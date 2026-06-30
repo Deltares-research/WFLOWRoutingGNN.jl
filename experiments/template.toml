@@ -1,0 +1,73 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# WflowRoutingGNN experiment configuration
+#
+# Relative paths are resolved relative to the directory containing this file.
+# Launch a training run with:
+#   julia --project=<repo_root> scripts/train.jl experiments/template.toml
+# ──────────────────────────────────────────────────────────────────────────────
+
+[data]
+# Name of this run; output is saved to <runs_dir>/<run_name>/
+run_name         = "template_run"
+
+# Root directory for all run outputs (relative to this file's directory)
+runs_dir         = "../runs"
+
+# Path to the wflow model directory.
+# Must contain staticmaps.nc and run_default/output.nc
+wflow_model_path = "../wflow_model/wflow_test_full"
+
+# Fraction of sliding windows used for training (remainder → test)
+train_frac = 0.6
+
+# Fraction of sliding windows used for validation (remainder → test)
+val_frac   = 0.2
+
+
+[model]
+# Routing domain: "river", "land", or "subsurface"
+domain = "river"
+
+# Width of all hidden layers
+hidden_dim = 64
+
+# Number of message-passing layers in the processor
+nlayers = 3
+
+# Activation function for the encoder MLP
+# Options: "relu", "sigmoid", "tanh", "swish", "identity"
+enc_activation  = "swish"
+
+# Activation function for the processor GNN layers
+proc_activation = "swish"
+
+
+[train]
+# Total number of training epochs
+epochs = 50
+
+# Number of horizon windows per mini-batch
+batch_size = 8
+
+# Initial learning rate
+lr_start = 1e-3
+
+# Final (minimum) learning rate after decay
+lr_final = 1e-5
+
+# Number of epochs between each learning-rate decay step
+lr_steps = 10
+
+# Compute device: "cpu" or "gpu"
+device = "cpu"
+
+# Training curriculum: rollout length is increased from steps[1] to steps[end]
+# over successive phases.  Each phase lasts durations[i] epochs.
+# lengths of steps and durations must match.
+[train.strategy]
+steps       = [1, 2, 4]
+durations   = [15, 15, 20]
+
+# Standard deviation of Gaussian noise injected into state/forcing inputs
+# during rollout steps (0.0 to disable)
+noise_scale = 0.0

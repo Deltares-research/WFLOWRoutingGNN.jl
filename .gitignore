@@ -29,3 +29,4 @@ JuliaLocalPreferences.toml
 
 models/*
 experiments/*
+!experiments/template.toml
