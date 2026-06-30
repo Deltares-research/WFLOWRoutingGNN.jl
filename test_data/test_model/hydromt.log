@@ -1,0 +1,749 @@
+2026-06-11 13:37:41,175 - hydromt - log - INFO - HydroMT version: 1.4.0
+2026-06-11 13:37:41,176 - hydromt.model.model - model - INFO - build: setup_config
+2026-06-11 13:37:41,176 - hydromt.model.model - model - INFO - setup_config.data={'time.starttime': datetime.datetime(2010, 1, 1, 0, 0), 'time.endtime': datetime.datetime(2010, 3, 31, 0, 0), 'time.timestepsecs': 86400, 'input.path_forcing': 'inmaps-era5-2010.nc', 'output.netcdf_grid.path': 'output.nc', 'output.netcdf_grid.compressionlevel': 1, 'output.netcdf_grid.variables.river_water__volume_flow_rate': 'river_q'}
+2026-06-11 13:37:41,176 - hydromt.model.model - model - INFO - build: setup_basemaps
+2026-06-11 13:37:41,177 - hydromt.model.model - model - INFO - setup_basemaps.basin_index_fn=merit_hydro_index
+2026-06-11 13:37:41,177 - hydromt.model.model - model - INFO - setup_basemaps.res=0.00833
+2026-06-11 13:37:41,178 - hydromt.model.model - model - INFO - setup_basemaps.upscale_method=ihu
+2026-06-11 13:37:41,181 - hydromt.model.model - model - INFO - setup_basemaps.output_names={'basin__local_drain_direction': 'local_drain_direction', 'subbasin_location__count': 'subcatchment', 'land_surface__slope': 'land_slope'}
+2026-06-11 13:37:41,181 - hydromt.model.model - model - INFO - setup_basemaps.hydrography_fn=merit_hydro
+2026-06-11 13:37:41,181 - hydromt.model.model - model - INFO - setup_basemaps.region={'subbasin': [12.2051, 45.8331], 'strord': 4, 'bounds': [11.7, 45.35, 12.95, 46.7]}
+2026-06-11 13:37:41,181 - hydromt.hydromt_wflow.wflow_base - wflow_base - INFO - Preparing base hydrography basemaps.
+2026-06-11 13:37:41,181 - hydromt.data_catalog.sources.data_source - data_source - INFO - Reading merit_hydro RasterDataset data from C:\Users\tromp_wm\.hydromt\artifact_data\latest\merit_hydro\{variable}.tif
+2026-06-11 13:37:41,253 - hydromt.data_catalog.sources.data_source - data_source - INFO - Reading merit_hydro_index GeoDataFrame data from C:\Users\tromp_wm\.hydromt\artifact_data\latest\merit_hydro_index.gpkg
+2026-06-11 13:37:45,859 - hydromt.model.processes.basin_mask - basin_mask - INFO - subbasin bbox: [11.7750, 45.8042, 12.7450, 46.6900]
+2026-06-11 13:37:45,921 - hydromt.hydromt_wflow.workflows.basemaps - basemaps - INFO - (Sub)basin at original resolution has 664756 cells.
+2026-06-11 13:37:46,037 - hydromt.hydromt_wflow.workflows.basemaps - basemaps - INFO - Upscale flow direction data: 10x, ihu method.
+2026-06-11 13:38:04,824 - hydromt.hydromt_wflow.workflows.basemaps - basemaps - INFO - Derive stream order.
+2026-06-11 13:38:05,196 - hydromt.hydromt_wflow.workflows.basemaps - basemaps - INFO - Map shape: (106, 116); active cells: 6637.
+2026-06-11 13:38:05,197 - hydromt.hydromt_wflow.workflows.basemaps - basemaps - INFO - Outlet coordinates (1/1): (12.20750,45.83583).
+2026-06-11 13:38:05,218 - hydromt.hydromt_wflow.wflow_base - wflow_base - INFO - Adding basin shape to staticgeoms.
+2026-06-11 13:38:05,232 - hydromt.hydromt_wflow.workflows.basemaps - basemaps - INFO - Derive elevation and slope.
+2026-06-11 13:38:05,307 - hydromt.model.model - model - INFO - build: setup_rivers
+2026-06-11 13:38:05,308 - hydromt.model.model - model - INFO - setup_rivers.river_geom_fn=hydro_rivers_lin
+2026-06-11 13:38:05,308 - hydromt.model.model - model - INFO - setup_rivers.river_upa=30
+2026-06-11 13:38:05,308 - hydromt.model.model - model - INFO - setup_rivers.rivdph_method=powlaw
+2026-06-11 13:38:05,308 - hydromt.model.model - model - INFO - setup_rivers.slope_len=2000
+2026-06-11 13:38:05,308 - hydromt.model.model - model - INFO - setup_rivers.min_rivlen_ratio=0.0
+2026-06-11 13:38:05,308 - hydromt.model.model - model - INFO - setup_rivers.min_rivdph=1
+2026-06-11 13:38:05,308 - hydromt.model.model - model - INFO - setup_rivers.min_rivwth=30
+2026-06-11 13:38:05,309 - hydromt.model.model - model - INFO - setup_rivers.smooth_len=5000
+2026-06-11 13:38:05,309 - hydromt.model.model - model - INFO - setup_rivers.elevtn_map=land_elevation
+2026-06-11 13:38:05,309 - hydromt.model.model - model - INFO - setup_rivers.river_routing=kinematic_wave
+2026-06-11 13:38:05,309 - hydromt.model.model - model - INFO - setup_rivers.connectivity=8
+2026-06-11 13:38:05,309 - hydromt.model.model - model - INFO - setup_rivers.output_names={'river_location__mask': 'river_mask', 'river__length': 'river_length', 'river__width': 'river_width', 'river_bank_water__depth': 'river_depth', 'river__slope': 'river_slope', 'river_bank_water__elevation': 'river_bank_elevation'}
+2026-06-11 13:38:05,309 - hydromt.model.model - model - INFO - setup_rivers.hydrography_fn=merit_hydro
+2026-06-11 13:38:05,310 - hydromt.hydromt_wflow.wflow_base - wflow_base - INFO - Preparing river maps.
+2026-06-11 13:38:05,314 - hydromt.data_catalog.sources.data_source - data_source - INFO - Reading merit_hydro RasterDataset data from C:\Users\tromp_wm\.hydromt\artifact_data\latest\merit_hydro\{variable}.tif
+2026-06-11 13:38:05,442 - hydromt.hydromt_wflow.workflows.river - river - INFO - Set river mask (min uparea: 30 km2) and prepare flow dirs.
+2026-06-11 13:38:05,626 - hydromt.hydromt_wflow.workflows.river - river - INFO - Derive river length.
+2026-06-11 13:38:09,109 - hydromt.hydromt_wflow.workflows.river - river - INFO - Derive river slope.
+2026-06-11 13:38:10,078 - hydromt.data_catalog.sources.data_source - data_source - INFO - Reading hydro_rivers_lin GeoDataFrame data from C:\Users\tromp_wm\.hydromt\artifact_data\latest\rivers_lin2019_v1.gpkg
+2026-06-11 13:38:10,473 - hydromt.hydromt_wflow.workflows.river - river - INFO - Derive ['rivwth', 'qbankfull'] from shapefile.
+2026-06-11 13:38:10,513 - hydromt.hydromt_wflow.workflows.river - river - INFO - Valid for 381/655 river cells (max dist: 392 m).
+2026-06-11 13:38:15,168 - hydromt.hydromt_wflow.wflow_sbm - wflow_sbm - INFO - Update wflow config model.river_routing="kinematic_wave"
+2026-06-11 13:38:15,168 - hydromt.model.model - model - INFO - build: setup_river_roughness
+2026-06-11 13:38:15,169 - hydromt.model.model - model - INFO - setup_river_roughness.rivman_mapping_fn=None
+2026-06-11 13:38:15,169 - hydromt.model.model - model - INFO - setup_river_roughness.strord_name=meta_streamorder
+2026-06-11 13:38:15,170 - hydromt.model.model - model - INFO - setup_river_roughness.output_name=river_manning_n
+2026-06-11 13:38:15,170 - hydromt.hydromt_wflow.wflow_sbm - wflow_sbm - INFO - Preparing river Manning roughness.
+2026-06-11 13:38:15,170 - hydromt.data_catalog.sources.data_source - data_source - INFO - Reading roughness_river_mapping_default DataFrame data from C:\Users\tromp_wm\AppData\Local\miniforge3\envs\hydromt-wflow\Lib\site-packages\hydromt_wflow\data\wflow_sbm\river_manning_mapping.csv
+2026-06-11 13:38:15,178 - hydromt.hydromt_wflow.workflows.landuse - landuse - INFO - Deriving river_manning_n using average resampling (nodata=-999.0).
+2026-06-11 13:38:15,184 - hydromt.model.model - model - INFO - build: setup_reservoirs_simple_control
+2026-06-11 13:38:15,185 - hydromt.model.model - model - INFO - setup_reservoirs_simple_control.timeseries_fn=gww
+2026-06-11 13:38:15,185 - hydromt.model.model - model - INFO - setup_reservoirs_simple_control.overwrite_existing=False
+2026-06-11 13:38:15,185 - hydromt.model.model - model - INFO - setup_reservoirs_simple_control.duplicate_id=error
+2026-06-11 13:38:15,186 - hydromt.model.model - model - INFO - setup_reservoirs_simple_control.min_area=1.0
+2026-06-11 13:38:15,186 - hydromt.model.model - model - INFO - setup_reservoirs_simple_control.output_names={'reservoir_area__count': 'reservoir_area_id', 'reservoir_location__count': 'reservoir_outlet_id', 'reservoir_surface__area': 'reservoir_area', 'reservoir_water_surface__initial_elevation': 'reservoir_initial_depth', 'reservoir_water__rating_curve_type_count': 'reservoir_rating_curve', 'reservoir_water__storage_curve_type_count': 'reservoir_storage_curve', 'reservoir_water__max_volume': 'reservoir_max_volume', 'reservoir_water__target_min_volume_fraction': 'reservoir_target_min_fraction', 'reservoir_water__target_full_volume_fraction': 'reservoir_target_full_fraction', 'reservoir_water_demand__required_downstream_volume_flow_rate': 'reservoir_demand', 'reservoir_water_release_below_spillway__max_volume_flow_rate': 'reservoir_max_release'}
+2026-06-11 13:38:15,186 - hydromt.model.model - model - INFO - setup_reservoirs_simple_control.geom_name=meta_reservoirs_simple_control
+2026-06-11 13:38:15,187 - hydromt.model.model - model - INFO - setup_reservoirs_simple_control.reservoirs_fn=hydro_reservoirs
+2026-06-11 13:38:15,187 - hydromt.hydromt_wflow.wflow_sbm - wflow_sbm - INFO - Preparing reservoir with simple control maps.
+2026-06-11 13:38:15,187 - hydromt.data_catalog.sources.data_source - data_source - INFO - Reading hydro_reservoirs GeoDataFrame data from C:\Users\tromp_wm\.hydromt\artifact_data\latest\hydro_reservoirs.gpkg
+2026-06-11 13:38:15,210 - hydromt.hydromt_wflow.workflows.reservoirs - reservoirs - INFO - 0 reservoir(s) of sufficient size found within region.
+2026-06-11 13:38:15,210 - hydromt.model.model - model - INFO - build: setup_reservoirs_no_control
+2026-06-11 13:38:15,211 - hydromt.model.model - model - INFO - setup_reservoirs_no_control.rating_curve_fns=None
+2026-06-11 13:38:15,211 - hydromt.model.model - model - INFO - setup_reservoirs_no_control.overwrite_existing=False
+2026-06-11 13:38:15,211 - hydromt.model.model - model - INFO - setup_reservoirs_no_control.duplicate_id=error
+2026-06-11 13:38:15,211 - hydromt.model.model - model - INFO - setup_reservoirs_no_control.min_area=10.0
+2026-06-11 13:38:15,211 - hydromt.model.model - model - INFO - setup_reservoirs_no_control.output_names={'reservoir_area__count': 'reservoir_area_id', 'reservoir_location__count': 'reservoir_outlet_id', 'reservoir_surface__area': 'reservoir_area', 'reservoir_water_surface__initial_elevation': 'reservoir_initial_depth', 'reservoir_water_flow_threshold_level__elevation': 'reservoir_outflow_threshold', 'reservoir_water__rating_curve_coefficient': 'reservoir_b', 'reservoir_water__rating_curve_exponent': 'reservoir_e', 'reservoir_water__rating_curve_type_count': 'reservoir_rating_curve', 'reservoir_water__storage_curve_type_count': 'reservoir_storage_curve', 'reservoir_lower_location__count': 'reservoir_lower_id'}
+2026-06-11 13:38:15,212 - hydromt.model.model - model - INFO - setup_reservoirs_no_control.geom_name=meta_reservoirs_no_control
+2026-06-11 13:38:15,212 - hydromt.model.model - model - INFO - setup_reservoirs_no_control.reservoirs_fn=hydro_lakes
+2026-06-11 13:38:15,212 - hydromt.hydromt_wflow.wflow_sbm - wflow_sbm - INFO - Preparing reservoir maps.
+2026-06-11 13:38:15,212 - hydromt.data_catalog.sources.data_source - data_source - INFO - Reading hydro_lakes GeoDataFrame data from C:\Users\tromp_wm\.hydromt\artifact_data\latest\hydro_lakes.gpkg
+2026-06-11 13:38:15,230 - hydromt.hydromt_wflow.workflows.reservoirs - reservoirs - INFO - 0 reservoir(s) of sufficient size found within region.
+2026-06-11 13:38:15,230 - hydromt.model.model - model - INFO - build: setup_glaciers
+2026-06-11 13:38:15,231 - hydromt.model.model - model - INFO - setup_glaciers.min_area=0.0
+2026-06-11 13:38:15,231 - hydromt.model.model - model - INFO - setup_glaciers.output_names={'glacier_surface__area_fraction': 'glacier_fraction', 'glacier_ice__initial_leq_depth': 'glacier_initial_leq_depth'}
+2026-06-11 13:38:15,231 - hydromt.model.model - model - INFO - setup_glaciers.geom_name=glaciers
+2026-06-11 13:38:15,231 - hydromt.model.model - model - INFO - setup_glaciers.glaciers_fn=rgi
+2026-06-11 13:38:15,231 - hydromt.hydromt_wflow.wflow_sbm - wflow_sbm - INFO - Preparing glacier maps.
+2026-06-11 13:38:15,231 - hydromt.data_catalog.sources.data_source - data_source - INFO - Reading rgi GeoDataFrame data from C:\Users\tromp_wm\.hydromt\artifact_data\latest\rgi.gpkg
+2026-06-11 13:38:15,249 - hydromt.hydromt_wflow.wflow_sbm - wflow_sbm - INFO - 38 glaciers of sufficient size found within region.
+2026-06-11 13:38:16,008 - hydromt.model.model - model - INFO - build: setup_lulcmaps
+2026-06-11 13:38:16,009 - hydromt.model.model - model - INFO - setup_lulcmaps.lulc_mapping_fn=globcover_mapping_default
+2026-06-11 13:38:16,009 - hydromt.model.model - model - INFO - setup_lulcmaps.lulc_vars=['landuse', 'vegetation_kext', 'land_manning_n', 'soil_compacted_fraction', 'vegetation_root_depth', 'vegetation_leaf_storage', 'vegetation_wood_storage', 'land_water_fraction', 'vegetation_crop_factor', 'vegetation_feddes_alpha_h1', 'vegetation_feddes_h1', 'vegetation_feddes_h2', 'vegetation_feddes_h3_high', 'vegetation_feddes_h3_low', 'vegetation_feddes_h4']
+2026-06-11 13:38:16,010 - hydromt.model.model - model - INFO - setup_lulcmaps.output_names_suffix=None
+2026-06-11 13:38:16,010 - hydromt.model.model - model - INFO - setup_lulcmaps.lulc_fn=globcover_2009
+2026-06-11 13:38:16,011 - hydromt.hydromt_wflow.wflow_base - wflow_base - INFO - Preparing LULC parameter maps.
+2026-06-11 13:38:16,013 - hydromt.data_catalog.sources.data_source - data_source - INFO - Reading globcover_2009 RasterDataset data from C:\Users\tromp_wm\.hydromt\artifact_data\latest\globcover.tif
+2026-06-11 13:38:16,022 - hydromt.data_catalog.sources.data_source - data_source - INFO - Reading globcover_mapping_default DataFrame data from C:\Users\tromp_wm\AppData\Local\miniforge3\envs\hydromt-wflow\Lib\site-packages\hydromt_wflow\data\lulc\v1.0\globcover_mapping.csv
+2026-06-11 13:38:16,030 - hydromt.hydromt_wflow.workflows.landuse - landuse - INFO - Deriving landuse using mode resampling (nodata=230).
+2026-06-11 13:38:16,101 - hydromt.hydromt_wflow.workflows.landuse - landuse - INFO - Deriving vegetation_kext using average resampling (nodata=-999.0).
+2026-06-11 13:38:16,119 - hydromt.hydromt_wflow.workflows.landuse - landuse - INFO - Deriving land_manning_n using average resampling (nodata=-999.0).
+2026-06-11 13:38:16,139 - hydromt.hydromt_wflow.workflows.landuse - landuse - INFO - Deriving soil_compacted_fraction using average resampling (nodata=-999.0).
+2026-06-11 13:38:16,155 - hydromt.hydromt_wflow.workflows.landuse - landuse - INFO - Deriving vegetation_root_depth using average resampling (nodata=-999.0).
+2026-06-11 13:38:16,174 - hydromt.hydromt_wflow.workflows.landuse - landuse - INFO - Deriving vegetation_leaf_storage using average resampling (nodata=-999.0).
+2026-06-11 13:38:16,192 - hydromt.hydromt_wflow.workflows.landuse - landuse - INFO - Deriving vegetation_wood_storage using average resampling (nodata=-999.0).
+2026-06-11 13:38:16,210 - hydromt.hydromt_wflow.workflows.landuse - landuse - INFO - Deriving land_water_fraction using average resampling (nodata=-999.0).
+2026-06-11 13:38:16,227 - hydromt.hydromt_wflow.workflows.landuse - landuse - INFO - Deriving vegetation_crop_factor using average resampling (nodata=-999.0).
+2026-06-11 13:38:16,246 - hydromt.hydromt_wflow.workflows.landuse - landuse - INFO - Deriving vegetation_feddes_alpha_h1 using mode resampling (nodata=-999).
+2026-06-11 13:38:16,314 - hydromt.hydromt_wflow.workflows.landuse - landuse - INFO - Deriving vegetation_feddes_h1 using average resampling (nodata=-999).
+2026-06-11 13:38:16,332 - hydromt.hydromt_wflow.workflows.landuse - landuse - INFO - Deriving vegetation_feddes_h2 using average resampling (nodata=-999).
+2026-06-11 13:38:16,350 - hydromt.hydromt_wflow.workflows.landuse - landuse - INFO - Deriving vegetation_feddes_h3_high using average resampling (nodata=-999).
+2026-06-11 13:38:16,368 - hydromt.hydromt_wflow.workflows.landuse - landuse - INFO - Deriving vegetation_feddes_h3_low using average resampling (nodata=-999).
+2026-06-11 13:38:16,387 - hydromt.hydromt_wflow.workflows.landuse - landuse - INFO - Deriving vegetation_feddes_h4 using average resampling (nodata=-999).
+2026-06-11 13:38:16,429 - hydromt.model.model - model - INFO - build: setup_laimaps
+2026-06-11 13:38:16,430 - hydromt.model.model - model - INFO - setup_laimaps.lulc_fn=None
+2026-06-11 13:38:16,430 - hydromt.model.model - model - INFO - setup_laimaps.lulc_sampling_method=any
+2026-06-11 13:38:16,430 - hydromt.model.model - model - INFO - setup_laimaps.lulc_zero_classes=[]
+2026-06-11 13:38:16,430 - hydromt.model.model - model - INFO - setup_laimaps.buffer=2
+2026-06-11 13:38:16,430 - hydromt.model.model - model - INFO - setup_laimaps.output_name=vegetation_leaf_area_index
+2026-06-11 13:38:16,430 - hydromt.model.model - model - INFO - setup_laimaps.lai_fn=modis_lai
+2026-06-11 13:38:16,431 - hydromt.hydromt_wflow.wflow_sbm - wflow_sbm - INFO - Preparing LAI maps.
+2026-06-11 13:38:16,433 - hydromt.data_catalog.sources.data_source - data_source - INFO - Reading modis_lai RasterDataset data from C:\Users\tromp_wm\.hydromt\artifact_data\latest\modis_lai.nc
+2026-06-11 13:38:16,486 - hydromt.hydromt_wflow.workflows.landuse - landuse - INFO - Deriving LAI using average resampling (nodata=nan).
+2026-06-11 13:38:16,895 - hydromt.model.model - model - INFO - build: setup_soilmaps
+2026-06-11 13:38:16,895 - hydromt.model.model - model - INFO - setup_soilmaps.soil_fn=soilgrids
+2026-06-11 13:38:16,895 - hydromt.model.model - model - INFO - setup_soilmaps.ptf_ksatver=brakensiek
+2026-06-11 13:38:16,896 - hydromt.model.model - model - INFO - setup_soilmaps.wflow_thicknesslayers=[100, 300, 800]
+2026-06-11 13:38:16,897 - hydromt.model.model - model - INFO - setup_soilmaps.output_names={'soil_water__saturated_volume_fraction': 'soil_theta_s', 'soil_water__residual_volume_fraction': 'soil_theta_r', 'soil_surface_water__vertical_saturated_hydraulic_conductivity': 'soil_ksat_vertical', 'soil__thickness': 'soil_thickness', 'soil_water__vertical_saturated_hydraulic_conductivity_scale_parameter': 'soil_f', 'soil_layer_water__brooks_corey_exponent': 'soil_brooks_corey_c'}
+2026-06-11 13:38:16,897 - hydromt.hydromt_wflow.wflow_sbm - wflow_sbm - INFO - Preparing soil parameter maps.
+2026-06-11 13:38:16,900 - hydromt.data_catalog.sources.data_source - data_source - INFO - Reading soilgrids RasterDataset data from C:\Users\tromp_wm\.hydromt\artifact_data\latest\soilgrids\{variable}.tif
+2026-06-11 13:38:17,404 - hydromt.hydromt_wflow.workflows.soilgrids - soilgrids - INFO - calculate and resample theta_s
+2026-06-11 13:38:17,638 - hydromt.hydromt_wflow.workflows.soilgrids - soilgrids - INFO - calculate and resample theta_r
+2026-06-11 13:38:17,829 - hydromt.hydromt_wflow.workflows.soilgrids - soilgrids - INFO - calculate and resample ksat_vertical 
+2026-06-11 13:38:18,048 - hydromt.hydromt_wflow.workflows.soilgrids - soilgrids - INFO - calculate and resample pore size distribution index
+2026-06-11 13:38:18,277 - hydromt.hydromt_wflow.workflows.soilgrids - soilgrids - INFO - fit z - log(ksat_vertical ) with numpy linalg regression (y = b*x) -> M_
+2026-06-11 13:38:18,440 - hydromt.hydromt_wflow.workflows.soilgrids - soilgrids - INFO - fit zi - Ksat with curve_fit (scipy.optimize) -> M
+2026-06-11 13:38:19,974 - hydromt.model.model - model - INFO - build: setup_outlets
+2026-06-11 13:38:19,974 - hydromt.model.model - model - INFO - setup_outlets.river_only=True
+2026-06-11 13:38:19,975 - hydromt.model.model - model - INFO - setup_outlets.toml_output=csv
+2026-06-11 13:38:19,975 - hydromt.model.model - model - INFO - setup_outlets.gauge_toml_header=['river_q']
+2026-06-11 13:38:19,976 - hydromt.model.model - model - INFO - setup_outlets.gauge_toml_param=['river_water__volume_flow_rate']
+2026-06-11 13:38:19,976 - hydromt.hydromt_wflow.wflow_base - wflow_base - INFO - Gauges locations set based on river outlets.
+2026-06-11 13:38:19,992 - hydromt.hydromt_wflow.wflow_base - wflow_base - INFO - Gauges map based on catchment river outlets added.
+2026-06-11 13:38:19,992 - hydromt.hydromt_wflow.wflow_base - wflow_base - INFO - Adding ['river_water__volume_flow_rate'] to csv section of toml.
+2026-06-11 13:38:19,992 - hydromt.model.model - model - INFO - build: setup_gauges
+2026-06-11 13:38:19,993 - hydromt.model.model - model - INFO - setup_gauges.index_col=None
+2026-06-11 13:38:19,993 - hydromt.model.model - model - INFO - setup_gauges.snap_to_river=True
+2026-06-11 13:38:19,993 - hydromt.model.model - model - INFO - setup_gauges.mask=None
+2026-06-11 13:38:19,993 - hydromt.model.model - model - INFO - setup_gauges.snap_uparea=False
+2026-06-11 13:38:19,993 - hydromt.model.model - model - INFO - setup_gauges.max_dist=10000.0
+2026-06-11 13:38:19,993 - hydromt.model.model - model - INFO - setup_gauges.wdw=3
+2026-06-11 13:38:19,993 - hydromt.model.model - model - INFO - setup_gauges.rel_error=0.05
+2026-06-11 13:38:19,994 - hydromt.model.model - model - INFO - setup_gauges.abs_error=50.0
+2026-06-11 13:38:19,994 - hydromt.model.model - model - INFO - setup_gauges.fillna=False
+2026-06-11 13:38:19,994 - hydromt.model.model - model - INFO - setup_gauges.derive_subcatch=False
+2026-06-11 13:38:19,994 - hydromt.model.model - model - INFO - setup_gauges.basename=None
+2026-06-11 13:38:19,994 - hydromt.model.model - model - INFO - setup_gauges.toml_output=csv
+2026-06-11 13:38:19,994 - hydromt.model.model - model - INFO - setup_gauges.gauge_toml_header=['river_q', 'precip']
+2026-06-11 13:38:19,995 - hydromt.model.model - model - INFO - setup_gauges.gauge_toml_param=['river_water__volume_flow_rate', 'atmosphere_water__precipitation_volume_flux']
+2026-06-11 13:38:19,995 - hydromt.model.model - model - INFO - setup_gauges.gauges_fn=grdc
+2026-06-11 13:38:19,996 - hydromt.data_catalog.sources.data_source - data_source - INFO - Reading grdc GeoDataFrame data from C:\Users\tromp_wm\.hydromt\artifact_data\latest\grdc.csv
+2026-06-11 13:38:20,006 - hydromt.hydromt_wflow.wflow_base - wflow_base - INFO - 3 grdc gauge locations found within domain
+2026-06-11 13:38:20,645 - hydromt.hydromt_wflow.wflow_base - wflow_base - INFO - Adding ['river_water__volume_flow_rate', 'atmosphere_water__precipitation_volume_flux'] to csv section of toml.
+2026-06-11 13:38:20,645 - hydromt.model.model - model - INFO - build: setup_precip_forcing
+2026-06-11 13:38:20,646 - hydromt.model.model - model - INFO - setup_precip_forcing.precip_clim_fn=None
+2026-06-11 13:38:20,646 - hydromt.model.model - model - INFO - setup_precip_forcing.chunksize=None
+2026-06-11 13:38:20,647 - hydromt.model.model - model - INFO - setup_precip_forcing.precip_fn=era5
+2026-06-11 13:38:20,649 - hydromt.data_catalog.sources.data_source - data_source - INFO - Reading era5 RasterDataset data from C:\Users\tromp_wm\.hydromt\artifact_data\latest\era5.nc
+2026-06-11 13:38:20,670 - hydromt.data_catalog.adapters.adapter_utils - adapter_utils - WARNING - Requested time range (2010-01-01 00:00:00, 2010-03-31 00:00:00) partially overlaps with available range '2010-02-02 00:00:00' to '2010-02-15 00:00:00'. Clamping to (2010-02-02 00:00:00, 2010-02-15 00:00:00).
+2026-06-11 13:38:20,744 - hydromt.model.model - model - INFO - build: setup_temp_pet_forcing
+2026-06-11 13:38:20,745 - hydromt.model.model - model - INFO - setup_temp_pet_forcing.pet_method=debruin
+2026-06-11 13:38:20,745 - hydromt.model.model - model - INFO - setup_temp_pet_forcing.press_correction=True
+2026-06-11 13:38:20,745 - hydromt.model.model - model - INFO - setup_temp_pet_forcing.temp_correction=True
+2026-06-11 13:38:20,746 - hydromt.model.model - model - INFO - setup_temp_pet_forcing.wind_correction=True
+2026-06-11 13:38:20,746 - hydromt.model.model - model - INFO - setup_temp_pet_forcing.wind_altitude=10
+2026-06-11 13:38:20,746 - hydromt.model.model - model - INFO - setup_temp_pet_forcing.reproj_method=nearest_index
+2026-06-11 13:38:20,747 - hydromt.model.model - model - INFO - setup_temp_pet_forcing.fillna_method=None
+2026-06-11 13:38:20,747 - hydromt.model.model - model - INFO - setup_temp_pet_forcing.dem_forcing_fn=era5_orography
+2026-06-11 13:38:20,747 - hydromt.model.model - model - INFO - setup_temp_pet_forcing.skip_pet=False
+2026-06-11 13:38:20,747 - hydromt.model.model - model - INFO - setup_temp_pet_forcing.chunksize=None
+2026-06-11 13:38:20,747 - hydromt.model.model - model - INFO - setup_temp_pet_forcing.temp_pet_fn=era5
+2026-06-11 13:38:20,750 - hydromt.data_catalog.sources.data_source - data_source - INFO - Reading era5 RasterDataset data from C:\Users\tromp_wm\.hydromt\artifact_data\latest\era5.nc
+2026-06-11 13:38:20,767 - hydromt.data_catalog.adapters.adapter_utils - adapter_utils - WARNING - Requested time range (2010-01-01 00:00:00, 2010-03-31 00:00:00) partially overlaps with available range '2010-02-02 00:00:00' to '2010-02-15 00:00:00'. Clamping to (2010-02-02 00:00:00, 2010-02-15 00:00:00).
+2026-06-11 13:38:20,806 - hydromt.data_catalog.sources.data_source - data_source - INFO - Reading era5_orography RasterDataset data from C:\Users\tromp_wm\.hydromt\artifact_data\latest\era5_orography.nc
+2026-06-11 13:38:21,056 - hydromt.model.model - model - INFO - build: setup_constant_pars
+2026-06-11 13:38:21,056 - hydromt.model.model - model - INFO - setup_constant_pars.subsurface_water__horizontal_to_vertical_saturated_hydraulic_conductivity_ratio=100
+2026-06-11 13:38:21,056 - hydromt.model.model - model - INFO - setup_constant_pars.snowpack__degree_day_coefficient=3.75653
+2026-06-11 13:38:21,057 - hydromt.model.model - model - INFO - setup_constant_pars.soil_surface_water__infiltration_reduction_parameter=0.038
+2026-06-11 13:38:21,057 - hydromt.model.model - model - INFO - setup_constant_pars.vegetation_canopy_water__mean_evaporation_to_mean_precipitation_ratio=0.11
+2026-06-11 13:38:21,058 - hydromt.model.model - model - INFO - setup_constant_pars.compacted_soil_surface_water__infiltration_capacity=10
+2026-06-11 13:38:21,058 - hydromt.model.model - model - INFO - setup_constant_pars.soil_water_saturated_zone_bottom__max_leakage_volume_flux=0
+2026-06-11 13:38:21,059 - hydromt.model.model - model - INFO - setup_constant_pars.soil_wet_root__sigmoid_function_shape_parameter=-500
+2026-06-11 13:38:21,059 - hydromt.model.model - model - INFO - setup_constant_pars.atmosphere_air__snowfall_temperature_threshold=0
+2026-06-11 13:38:21,063 - hydromt.model.model - model - INFO - setup_constant_pars.atmosphere_air__snowfall_temperature_interval=2
+2026-06-11 13:38:21,064 - hydromt.model.model - model - INFO - setup_constant_pars.snowpack__melting_temperature_threshold=0
+2026-06-11 13:38:21,064 - hydromt.model.model - model - INFO - setup_constant_pars.snowpack__liquid_water_holding_capacity=0.1
+2026-06-11 13:38:21,065 - hydromt.model.model - model - INFO - setup_constant_pars.glacier_ice__degree_day_coefficient=3
+2026-06-11 13:38:21,065 - hydromt.model.model - model - INFO - setup_constant_pars.glacier_firn_accumulation__snowpack_dry_snow_leq_depth_fraction=0.001
+2026-06-11 13:38:21,066 - hydromt.model.model - model - INFO - setup_constant_pars.glacier_ice__melting_temperature_threshold=0
+2026-06-11 13:38:21,067 - hydromt.hydromt_wflow.wflow_base - wflow_base - INFO - Write model data to C:\Users\tromp_wm\OneDrive - Stichting Deltares\Documents\WFLOW Emulator\example_model\wflow_test_full
+2026-06-11 13:38:21,093 - hydromt.model.components.grid - grid - INFO - wflow_sbm.staticmaps: Writing grid data to C:\Users\tromp_wm\OneDrive - Stichting Deltares\Documents\WFLOW Emulator\example_model\wflow_test_full\staticmaps.nc.
+2026-06-11 13:38:21,251 - hydromt.model.components.spatial - spatial - INFO - wflow_sbm.staticmaps: Writing region to C:\Users\tromp_wm\OneDrive - Stichting Deltares\Documents\WFLOW Emulator\example_model\wflow_test_full\staticgeoms\region.geojson.
+2026-06-11 13:38:21,296 - hydromt.model.components.geoms - geoms - INFO - wflow_sbm.geoms: Writing geoms to C:\Users\tromp_wm\OneDrive - Stichting Deltares\Documents\WFLOW Emulator\example_model\wflow_test_full\staticgeoms\meta_basins_highres.geojson.
+2026-06-11 13:38:21,313 - hydromt.model.components.geoms - geoms - INFO - wflow_sbm.geoms: Writing geoms to C:\Users\tromp_wm\OneDrive - Stichting Deltares\Documents\WFLOW Emulator\example_model\wflow_test_full\staticgeoms\basins.geojson.
+2026-06-11 13:38:21,322 - hydromt.model.components.geoms - geoms - INFO - wflow_sbm.geoms: Writing geoms to C:\Users\tromp_wm\OneDrive - Stichting Deltares\Documents\WFLOW Emulator\example_model\wflow_test_full\staticgeoms\rivers.geojson.
+2026-06-11 13:38:21,342 - hydromt.model.components.geoms - geoms - INFO - wflow_sbm.geoms: Writing geoms to C:\Users\tromp_wm\OneDrive - Stichting Deltares\Documents\WFLOW Emulator\example_model\wflow_test_full\staticgeoms\glaciers.geojson.
+2026-06-11 13:38:21,372 - hydromt.model.components.geoms - geoms - INFO - wflow_sbm.geoms: Writing geoms to C:\Users\tromp_wm\OneDrive - Stichting Deltares\Documents\WFLOW Emulator\example_model\wflow_test_full\staticgeoms\outlets.geojson.
+2026-06-11 13:38:21,377 - hydromt.model.components.geoms - geoms - INFO - wflow_sbm.geoms: Writing geoms to C:\Users\tromp_wm\OneDrive - Stichting Deltares\Documents\WFLOW Emulator\example_model\wflow_test_full\staticgeoms\gauges_grdc.geojson.
+2026-06-11 13:38:21,384 - hydromt.hydromt_wflow.components.forcing - forcing - INFO - Write forcing file
+2026-06-11 13:38:21,386 - hydromt.hydromt_wflow.components.forcing - forcing - WARNING - Start time 2010-01-01T00:00:00.000000 does not match the beginning of the data. Changing to start of the data: 2010-02-02T00:00:00.000000000.
+2026-06-11 13:38:21,386 - hydromt.hydromt_wflow.components.forcing - forcing - WARNING - End time 2010-03-31T00:00:00.000000 does not match the end of the data. Changing to end of the data: 2010-02-15T00:00:00.000000000.
+2026-06-11 13:38:21,389 - hydromt.hydromt_wflow.components.forcing - forcing - INFO - Writing file C:/Users/tromp_wm/OneDrive - Stichting Deltares/Documents/WFLOW Emulator/example_model/wflow_test_full/inmaps-era5-2010.nc
+2026-06-11 13:38:21,618 - hydromt.model.components.tables - tables - INFO - wflow_sbm.tables: No tables found, skip writing.
+2026-06-11 13:38:21,619 - hydromt.model.components.grid - grid - INFO - wflow_sbm.states: No grid data found, skip writing.
+2026-06-11 13:38:21,619 - hydromt.hydromt_wflow.components.config - config - INFO - Writing model config to C:/Users/tromp_wm/OneDrive - Stichting Deltares/Documents/WFLOW Emulator/example_model/wflow_test_full/wflow_sbm.toml.
+2026-06-25 11:46:56,248 - hydromt - log - INFO - HydroMT version: 1.4.0
+2026-06-25 11:46:56,251 - hydromt.model.model - model - INFO - build: setup_config
+2026-06-25 11:46:56,253 - hydromt.model.model - model - INFO - setup_config.data={'time.starttime': datetime.datetime(2010, 1, 1, 0, 0), 'time.endtime': datetime.datetime(2010, 3, 31, 0, 0), 'time.timestepsecs': 86400, 'input.path_forcing': 'inmaps-era5-2010.nc', 'output.netcdf_grid.path': 'output.nc', 'output.netcdf_grid.compressionlevel': 1, 'output.netcdf_grid.variables.river_water__volume_flow_rate': 'river_q'}
+2026-06-25 11:46:56,255 - hydromt.model.model - model - INFO - build: setup_basemaps
+2026-06-25 11:46:56,259 - hydromt.model.model - model - INFO - setup_basemaps.basin_index_fn=merit_hydro_index
+2026-06-25 11:46:56,261 - hydromt.model.model - model - INFO - setup_basemaps.res=0.00833
+2026-06-25 11:46:56,266 - hydromt.model.model - model - INFO - setup_basemaps.upscale_method=ihu
+2026-06-25 11:46:56,267 - hydromt.model.model - model - INFO - setup_basemaps.output_names={'basin__local_drain_direction': 'local_drain_direction', 'subbasin_location__count': 'subcatchment', 'land_surface__slope': 'land_slope'}
+2026-06-25 11:46:56,268 - hydromt.model.model - model - INFO - setup_basemaps.hydrography_fn=merit_hydro
+2026-06-25 11:46:56,269 - hydromt.model.model - model - INFO - setup_basemaps.region={'subbasin': [12.2051, 45.8331], 'strord': 4, 'bounds': [11.7, 45.35, 12.95, 46.7]}
+2026-06-25 11:46:56,270 - hydromt.hydromt_wflow.wflow_base - wflow_base - INFO - Preparing base hydrography basemaps.
+2026-06-25 11:46:56,273 - hydromt.data_catalog.sources.data_source - data_source - INFO - Reading merit_hydro RasterDataset data from C:\Users\tromp_wm\.hydromt\artifact_data\latest\merit_hydro\{variable}.tif
+2026-06-25 11:46:56,415 - hydromt.data_catalog.sources.data_source - data_source - INFO - Reading merit_hydro_index GeoDataFrame data from C:\Users\tromp_wm\.hydromt\artifact_data\latest\merit_hydro_index.gpkg
+2026-06-25 11:46:56,988 - hydromt.model.processes.basin_mask - basin_mask - INFO - subbasin bbox: [11.7750, 45.8042, 12.7450, 46.6900]
+2026-06-25 11:46:57,045 - hydromt.hydromt_wflow.workflows.basemaps - basemaps - INFO - (Sub)basin at original resolution has 664756 cells.
+2026-06-25 11:46:57,150 - hydromt.hydromt_wflow.workflows.basemaps - basemaps - INFO - Upscale flow direction data: 10x, ihu method.
+2026-06-25 11:46:57,742 - hydromt.hydromt_wflow.workflows.basemaps - basemaps - INFO - Derive stream order.
+2026-06-25 11:46:57,765 - hydromt.hydromt_wflow.workflows.basemaps - basemaps - INFO - Map shape: (106, 116); active cells: 6637.
+2026-06-25 11:46:57,766 - hydromt.hydromt_wflow.workflows.basemaps - basemaps - INFO - Outlet coordinates (1/1): (12.20750,45.83583).
+2026-06-25 11:46:57,785 - hydromt.hydromt_wflow.wflow_base - wflow_base - INFO - Adding basin shape to staticgeoms.
+2026-06-25 11:46:57,799 - hydromt.hydromt_wflow.workflows.basemaps - basemaps - INFO - Derive elevation and slope.
+2026-06-25 11:46:57,887 - hydromt.model.model - model - INFO - build: setup_rivers
+2026-06-25 11:46:57,888 - hydromt.model.model - model - INFO - setup_rivers.river_geom_fn=hydro_rivers_lin
+2026-06-25 11:46:57,888 - hydromt.model.model - model - INFO - setup_rivers.river_upa=30
+2026-06-25 11:46:57,888 - hydromt.model.model - model - INFO - setup_rivers.rivdph_method=powlaw
+2026-06-25 11:46:57,889 - hydromt.model.model - model - INFO - setup_rivers.slope_len=2000
+2026-06-25 11:46:57,889 - hydromt.model.model - model - INFO - setup_rivers.min_rivlen_ratio=0.0
+2026-06-25 11:46:57,889 - hydromt.model.model - model - INFO - setup_rivers.min_rivdph=1
+2026-06-25 11:46:57,890 - hydromt.model.model - model - INFO - setup_rivers.min_rivwth=30
+2026-06-25 11:46:57,890 - hydromt.model.model - model - INFO - setup_rivers.smooth_len=5000
+2026-06-25 11:46:57,891 - hydromt.model.model - model - INFO - setup_rivers.elevtn_map=land_elevation
+2026-06-25 11:46:57,891 - hydromt.model.model - model - INFO - setup_rivers.river_routing=kinematic_wave
+2026-06-25 11:46:57,891 - hydromt.model.model - model - INFO - setup_rivers.connectivity=8
+2026-06-25 11:46:57,892 - hydromt.model.model - model - INFO - setup_rivers.output_names={'river_location__mask': 'river_mask', 'river__length': 'river_length', 'river__width': 'river_width', 'river_bank_water__depth': 'river_depth', 'river__slope': 'river_slope', 'river_bank_water__elevation': 'river_bank_elevation'}
+2026-06-25 11:46:57,892 - hydromt.model.model - model - INFO - setup_rivers.hydrography_fn=merit_hydro
+2026-06-25 11:46:57,892 - hydromt.hydromt_wflow.wflow_base - wflow_base - INFO - Preparing river maps.
+2026-06-25 11:46:57,900 - hydromt.data_catalog.sources.data_source - data_source - INFO - Reading merit_hydro RasterDataset data from C:\Users\tromp_wm\.hydromt\artifact_data\latest\merit_hydro\{variable}.tif
+2026-06-25 11:46:57,966 - hydromt.hydromt_wflow.workflows.river - river - INFO - Set river mask (min uparea: 30 km2) and prepare flow dirs.
+2026-06-25 11:46:58,074 - hydromt.hydromt_wflow.workflows.river - river - INFO - Derive river length.
+2026-06-25 11:46:59,861 - hydromt.hydromt_wflow.workflows.river - river - INFO - Derive river slope.
+2026-06-25 11:46:59,939 - hydromt.data_catalog.sources.data_source - data_source - INFO - Reading hydro_rivers_lin GeoDataFrame data from C:\Users\tromp_wm\.hydromt\artifact_data\latest\rivers_lin2019_v1.gpkg
+2026-06-25 11:46:59,982 - hydromt.hydromt_wflow.workflows.river - river - INFO - Derive ['rivwth', 'qbankfull'] from shapefile.
+2026-06-25 11:47:00,039 - hydromt.hydromt_wflow.workflows.river - river - INFO - Valid for 381/655 river cells (max dist: 392 m).
+2026-06-25 11:47:00,191 - hydromt.hydromt_wflow.wflow_sbm - wflow_sbm - INFO - Update wflow config model.river_routing="kinematic_wave"
+2026-06-25 11:47:00,191 - hydromt.model.model - model - INFO - build: setup_river_roughness
+2026-06-25 11:47:00,192 - hydromt.model.model - model - INFO - setup_river_roughness.rivman_mapping_fn=None
+2026-06-25 11:47:00,192 - hydromt.model.model - model - INFO - setup_river_roughness.strord_name=meta_streamorder
+2026-06-25 11:47:00,193 - hydromt.model.model - model - INFO - setup_river_roughness.output_name=river_manning_n
+2026-06-25 11:47:00,193 - hydromt.hydromt_wflow.wflow_sbm - wflow_sbm - INFO - Preparing river Manning roughness.
+2026-06-25 11:47:00,193 - hydromt.data_catalog.sources.data_source - data_source - INFO - Reading roughness_river_mapping_default DataFrame data from C:\Users\tromp_wm\AppData\Local\miniforge3\envs\hydromt-wflow\Lib\site-packages\hydromt_wflow\data\wflow_sbm\river_manning_mapping.csv
+2026-06-25 11:47:00,202 - hydromt.hydromt_wflow.workflows.landuse - landuse - INFO - Deriving river_manning_n using average resampling (nodata=-999.0).
+2026-06-25 11:47:00,207 - hydromt.model.model - model - INFO - build: setup_reservoirs_simple_control
+2026-06-25 11:47:00,207 - hydromt.model.model - model - INFO - setup_reservoirs_simple_control.timeseries_fn=gww
+2026-06-25 11:47:00,208 - hydromt.model.model - model - INFO - setup_reservoirs_simple_control.overwrite_existing=False
+2026-06-25 11:47:00,208 - hydromt.model.model - model - INFO - setup_reservoirs_simple_control.duplicate_id=error
+2026-06-25 11:47:00,208 - hydromt.model.model - model - INFO - setup_reservoirs_simple_control.min_area=1.0
+2026-06-25 11:47:00,208 - hydromt.model.model - model - INFO - setup_reservoirs_simple_control.output_names={'reservoir_area__count': 'reservoir_area_id', 'reservoir_location__count': 'reservoir_outlet_id', 'reservoir_surface__area': 'reservoir_area', 'reservoir_water_surface__initial_elevation': 'reservoir_initial_depth', 'reservoir_water__rating_curve_type_count': 'reservoir_rating_curve', 'reservoir_water__storage_curve_type_count': 'reservoir_storage_curve', 'reservoir_water__max_volume': 'reservoir_max_volume', 'reservoir_water__target_min_volume_fraction': 'reservoir_target_min_fraction', 'reservoir_water__target_full_volume_fraction': 'reservoir_target_full_fraction', 'reservoir_water_demand__required_downstream_volume_flow_rate': 'reservoir_demand', 'reservoir_water_release_below_spillway__max_volume_flow_rate': 'reservoir_max_release'}
+2026-06-25 11:47:00,209 - hydromt.model.model - model - INFO - setup_reservoirs_simple_control.geom_name=meta_reservoirs_simple_control
+2026-06-25 11:47:00,209 - hydromt.model.model - model - INFO - setup_reservoirs_simple_control.reservoirs_fn=hydro_reservoirs
+2026-06-25 11:47:00,209 - hydromt.hydromt_wflow.wflow_sbm - wflow_sbm - INFO - Preparing reservoir with simple control maps.
+2026-06-25 11:47:00,209 - hydromt.data_catalog.sources.data_source - data_source - INFO - Reading hydro_reservoirs GeoDataFrame data from C:\Users\tromp_wm\.hydromt\artifact_data\latest\hydro_reservoirs.gpkg
+2026-06-25 11:47:00,238 - hydromt.hydromt_wflow.workflows.reservoirs - reservoirs - INFO - 0 reservoir(s) of sufficient size found within region.
+2026-06-25 11:47:00,240 - hydromt.model.model - model - INFO - build: setup_reservoirs_no_control
+2026-06-25 11:47:00,241 - hydromt.model.model - model - INFO - setup_reservoirs_no_control.rating_curve_fns=None
+2026-06-25 11:47:00,242 - hydromt.model.model - model - INFO - setup_reservoirs_no_control.overwrite_existing=False
+2026-06-25 11:47:00,243 - hydromt.model.model - model - INFO - setup_reservoirs_no_control.duplicate_id=error
+2026-06-25 11:47:00,245 - hydromt.model.model - model - INFO - setup_reservoirs_no_control.min_area=10.0
+2026-06-25 11:47:00,246 - hydromt.model.model - model - INFO - setup_reservoirs_no_control.output_names={'reservoir_area__count': 'reservoir_area_id', 'reservoir_location__count': 'reservoir_outlet_id', 'reservoir_surface__area': 'reservoir_area', 'reservoir_water_surface__initial_elevation': 'reservoir_initial_depth', 'reservoir_water_flow_threshold_level__elevation': 'reservoir_outflow_threshold', 'reservoir_water__rating_curve_coefficient': 'reservoir_b', 'reservoir_water__rating_curve_exponent': 'reservoir_e', 'reservoir_water__rating_curve_type_count': 'reservoir_rating_curve', 'reservoir_water__storage_curve_type_count': 'reservoir_storage_curve', 'reservoir_lower_location__count': 'reservoir_lower_id'}
+2026-06-25 11:47:00,246 - hydromt.model.model - model - INFO - setup_reservoirs_no_control.geom_name=meta_reservoirs_no_control
+2026-06-25 11:47:00,246 - hydromt.model.model - model - INFO - setup_reservoirs_no_control.reservoirs_fn=hydro_lakes
+2026-06-25 11:47:00,247 - hydromt.hydromt_wflow.wflow_sbm - wflow_sbm - INFO - Preparing reservoir maps.
+2026-06-25 11:47:00,247 - hydromt.data_catalog.sources.data_source - data_source - INFO - Reading hydro_lakes GeoDataFrame data from C:\Users\tromp_wm\.hydromt\artifact_data\latest\hydro_lakes.gpkg
+2026-06-25 11:47:00,267 - hydromt.hydromt_wflow.workflows.reservoirs - reservoirs - INFO - 0 reservoir(s) of sufficient size found within region.
+2026-06-25 11:47:00,267 - hydromt.model.model - model - INFO - build: setup_glaciers
+2026-06-25 11:47:00,267 - hydromt.model.model - model - INFO - setup_glaciers.min_area=0.0
+2026-06-25 11:47:00,268 - hydromt.model.model - model - INFO - setup_glaciers.output_names={'glacier_surface__area_fraction': 'glacier_fraction', 'glacier_ice__initial_leq_depth': 'glacier_initial_leq_depth'}
+2026-06-25 11:47:00,268 - hydromt.model.model - model - INFO - setup_glaciers.geom_name=glaciers
+2026-06-25 11:47:00,268 - hydromt.model.model - model - INFO - setup_glaciers.glaciers_fn=rgi
+2026-06-25 11:47:00,268 - hydromt.hydromt_wflow.wflow_sbm - wflow_sbm - INFO - Preparing glacier maps.
+2026-06-25 11:47:00,269 - hydromt.data_catalog.sources.data_source - data_source - INFO - Reading rgi GeoDataFrame data from C:\Users\tromp_wm\.hydromt\artifact_data\latest\rgi.gpkg
+2026-06-25 11:47:00,292 - hydromt.hydromt_wflow.wflow_sbm - wflow_sbm - INFO - 38 glaciers of sufficient size found within region.
+2026-06-25 11:47:00,871 - hydromt.model.model - model - INFO - build: setup_lulcmaps
+2026-06-25 11:47:00,876 - hydromt.model.model - model - INFO - setup_lulcmaps.lulc_mapping_fn=globcover_mapping_default
+2026-06-25 11:47:00,876 - hydromt.model.model - model - INFO - setup_lulcmaps.lulc_vars=['landuse', 'vegetation_kext', 'land_manning_n', 'soil_compacted_fraction', 'vegetation_root_depth', 'vegetation_leaf_storage', 'vegetation_wood_storage', 'land_water_fraction', 'vegetation_crop_factor', 'vegetation_feddes_alpha_h1', 'vegetation_feddes_h1', 'vegetation_feddes_h2', 'vegetation_feddes_h3_high', 'vegetation_feddes_h3_low', 'vegetation_feddes_h4']
+2026-06-25 11:47:00,876 - hydromt.model.model - model - INFO - setup_lulcmaps.output_names_suffix=None
+2026-06-25 11:47:00,876 - hydromt.model.model - model - INFO - setup_lulcmaps.lulc_fn=globcover_2009
+2026-06-25 11:47:00,876 - hydromt.hydromt_wflow.wflow_base - wflow_base - INFO - Preparing LULC parameter maps.
+2026-06-25 11:47:00,878 - hydromt.data_catalog.sources.data_source - data_source - INFO - Reading globcover_2009 RasterDataset data from C:\Users\tromp_wm\.hydromt\artifact_data\latest\globcover.tif
+2026-06-25 11:47:00,888 - hydromt.data_catalog.sources.data_source - data_source - INFO - Reading globcover_mapping_default DataFrame data from C:\Users\tromp_wm\AppData\Local\miniforge3\envs\hydromt-wflow\Lib\site-packages\hydromt_wflow\data\lulc\v1.0\globcover_mapping.csv
+2026-06-25 11:47:00,897 - hydromt.hydromt_wflow.workflows.landuse - landuse - INFO - Deriving landuse using mode resampling (nodata=230).
+2026-06-25 11:47:00,963 - hydromt.hydromt_wflow.workflows.landuse - landuse - INFO - Deriving vegetation_kext using average resampling (nodata=-999.0).
+2026-06-25 11:47:00,979 - hydromt.hydromt_wflow.workflows.landuse - landuse - INFO - Deriving land_manning_n using average resampling (nodata=-999.0).
+2026-06-25 11:47:00,997 - hydromt.hydromt_wflow.workflows.landuse - landuse - INFO - Deriving soil_compacted_fraction using average resampling (nodata=-999.0).
+2026-06-25 11:47:01,013 - hydromt.hydromt_wflow.workflows.landuse - landuse - INFO - Deriving vegetation_root_depth using average resampling (nodata=-999.0).
+2026-06-25 11:47:01,030 - hydromt.hydromt_wflow.workflows.landuse - landuse - INFO - Deriving vegetation_leaf_storage using average resampling (nodata=-999.0).
+2026-06-25 11:47:01,046 - hydromt.hydromt_wflow.workflows.landuse - landuse - INFO - Deriving vegetation_wood_storage using average resampling (nodata=-999.0).
+2026-06-25 11:47:01,061 - hydromt.hydromt_wflow.workflows.landuse - landuse - INFO - Deriving land_water_fraction using average resampling (nodata=-999.0).
+2026-06-25 11:47:01,078 - hydromt.hydromt_wflow.workflows.landuse - landuse - INFO - Deriving vegetation_crop_factor using average resampling (nodata=-999.0).
+2026-06-25 11:47:01,095 - hydromt.hydromt_wflow.workflows.landuse - landuse - INFO - Deriving vegetation_feddes_alpha_h1 using mode resampling (nodata=-999).
+2026-06-25 11:47:01,161 - hydromt.hydromt_wflow.workflows.landuse - landuse - INFO - Deriving vegetation_feddes_h1 using average resampling (nodata=-999).
+2026-06-25 11:47:01,178 - hydromt.hydromt_wflow.workflows.landuse - landuse - INFO - Deriving vegetation_feddes_h2 using average resampling (nodata=-999).
+2026-06-25 11:47:01,194 - hydromt.hydromt_wflow.workflows.landuse - landuse - INFO - Deriving vegetation_feddes_h3_high using average resampling (nodata=-999).
+2026-06-25 11:47:01,212 - hydromt.hydromt_wflow.workflows.landuse - landuse - INFO - Deriving vegetation_feddes_h3_low using average resampling (nodata=-999).
+2026-06-25 11:47:01,229 - hydromt.hydromt_wflow.workflows.landuse - landuse - INFO - Deriving vegetation_feddes_h4 using average resampling (nodata=-999).
+2026-06-25 11:47:01,269 - hydromt.model.model - model - INFO - build: setup_laimaps
+2026-06-25 11:47:01,270 - hydromt.model.model - model - INFO - setup_laimaps.lulc_fn=None
+2026-06-25 11:47:01,271 - hydromt.model.model - model - INFO - setup_laimaps.lulc_sampling_method=any
+2026-06-25 11:47:01,272 - hydromt.model.model - model - INFO - setup_laimaps.lulc_zero_classes=[]
+2026-06-25 11:47:01,272 - hydromt.model.model - model - INFO - setup_laimaps.buffer=2
+2026-06-25 11:47:01,273 - hydromt.model.model - model - INFO - setup_laimaps.output_name=vegetation_leaf_area_index
+2026-06-25 11:47:01,275 - hydromt.model.model - model - INFO - setup_laimaps.lai_fn=modis_lai
+2026-06-25 11:47:01,275 - hydromt.hydromt_wflow.wflow_sbm - wflow_sbm - INFO - Preparing LAI maps.
+2026-06-25 11:47:01,277 - hydromt.data_catalog.sources.data_source - data_source - INFO - Reading modis_lai RasterDataset data from C:\Users\tromp_wm\.hydromt\artifact_data\latest\modis_lai.nc
+2026-06-25 11:47:01,339 - hydromt.hydromt_wflow.workflows.landuse - landuse - INFO - Deriving LAI using average resampling (nodata=nan).
+2026-06-25 11:47:02,833 - hydromt.model.model - model - INFO - build: setup_soilmaps
+2026-06-25 11:47:02,834 - hydromt.model.model - model - INFO - setup_soilmaps.soil_fn=soilgrids
+2026-06-25 11:47:02,834 - hydromt.model.model - model - INFO - setup_soilmaps.ptf_ksatver=brakensiek
+2026-06-25 11:47:02,834 - hydromt.model.model - model - INFO - setup_soilmaps.wflow_thicknesslayers=[100, 300, 800]
+2026-06-25 11:47:02,835 - hydromt.model.model - model - INFO - setup_soilmaps.output_names={'soil_water__saturated_volume_fraction': 'soil_theta_s', 'soil_water__residual_volume_fraction': 'soil_theta_r', 'soil_surface_water__vertical_saturated_hydraulic_conductivity': 'soil_ksat_vertical', 'soil__thickness': 'soil_thickness', 'soil_water__vertical_saturated_hydraulic_conductivity_scale_parameter': 'soil_f', 'soil_layer_water__brooks_corey_exponent': 'soil_brooks_corey_c'}
+2026-06-25 11:47:02,835 - hydromt.hydromt_wflow.wflow_sbm - wflow_sbm - INFO - Preparing soil parameter maps.
+2026-06-25 11:47:02,837 - hydromt.data_catalog.sources.data_source - data_source - INFO - Reading soilgrids RasterDataset data from C:\Users\tromp_wm\.hydromt\artifact_data\latest\soilgrids\{variable}.tif
+2026-06-25 11:47:03,484 - hydromt.hydromt_wflow.workflows.soilgrids - soilgrids - INFO - calculate and resample theta_s
+2026-06-25 11:47:03,703 - hydromt.hydromt_wflow.workflows.soilgrids - soilgrids - INFO - calculate and resample theta_r
+2026-06-25 11:47:03,880 - hydromt.hydromt_wflow.workflows.soilgrids - soilgrids - INFO - calculate and resample ksat_vertical 
+2026-06-25 11:47:04,116 - hydromt.hydromt_wflow.workflows.soilgrids - soilgrids - INFO - calculate and resample pore size distribution index
+2026-06-25 11:47:04,334 - hydromt.hydromt_wflow.workflows.soilgrids - soilgrids - INFO - fit z - log(ksat_vertical ) with numpy linalg regression (y = b*x) -> M_
+2026-06-25 11:47:04,518 - hydromt.hydromt_wflow.workflows.soilgrids - soilgrids - INFO - fit zi - Ksat with curve_fit (scipy.optimize) -> M
+2026-06-25 11:47:06,028 - hydromt.model.model - model - INFO - build: setup_outlets
+2026-06-25 11:47:06,029 - hydromt.model.model - model - INFO - setup_outlets.river_only=True
+2026-06-25 11:47:06,029 - hydromt.model.model - model - INFO - setup_outlets.toml_output=csv
+2026-06-25 11:47:06,029 - hydromt.model.model - model - INFO - setup_outlets.gauge_toml_header=['river_q']
+2026-06-25 11:47:06,029 - hydromt.model.model - model - INFO - setup_outlets.gauge_toml_param=['river_water__volume_flow_rate']
+2026-06-25 11:47:06,029 - hydromt.hydromt_wflow.wflow_base - wflow_base - INFO - Gauges locations set based on river outlets.
+2026-06-25 11:47:06,045 - hydromt.hydromt_wflow.wflow_base - wflow_base - INFO - Gauges map based on catchment river outlets added.
+2026-06-25 11:47:06,045 - hydromt.hydromt_wflow.wflow_base - wflow_base - INFO - Adding ['river_water__volume_flow_rate'] to csv section of toml.
+2026-06-25 11:47:06,045 - hydromt.model.model - model - INFO - build: setup_gauges
+2026-06-25 11:47:06,046 - hydromt.model.model - model - INFO - setup_gauges.index_col=None
+2026-06-25 11:47:06,046 - hydromt.model.model - model - INFO - setup_gauges.snap_to_river=True
+2026-06-25 11:47:06,046 - hydromt.model.model - model - INFO - setup_gauges.mask=None
+2026-06-25 11:47:06,046 - hydromt.model.model - model - INFO - setup_gauges.snap_uparea=False
+2026-06-25 11:47:06,046 - hydromt.model.model - model - INFO - setup_gauges.max_dist=10000.0
+2026-06-25 11:47:06,047 - hydromt.model.model - model - INFO - setup_gauges.wdw=3
+2026-06-25 11:47:06,047 - hydromt.model.model - model - INFO - setup_gauges.rel_error=0.05
+2026-06-25 11:47:06,047 - hydromt.model.model - model - INFO - setup_gauges.abs_error=50.0
+2026-06-25 11:47:06,047 - hydromt.model.model - model - INFO - setup_gauges.fillna=False
+2026-06-25 11:47:06,047 - hydromt.model.model - model - INFO - setup_gauges.derive_subcatch=False
+2026-06-25 11:47:06,047 - hydromt.model.model - model - INFO - setup_gauges.basename=None
+2026-06-25 11:47:06,047 - hydromt.model.model - model - INFO - setup_gauges.toml_output=csv
+2026-06-25 11:47:06,047 - hydromt.model.model - model - INFO - setup_gauges.gauge_toml_header=['river_q', 'precip']
+2026-06-25 11:47:06,047 - hydromt.model.model - model - INFO - setup_gauges.gauge_toml_param=['river_water__volume_flow_rate', 'atmosphere_water__precipitation_volume_flux']
+2026-06-25 11:47:06,048 - hydromt.model.model - model - INFO - setup_gauges.gauges_fn=grdc
+2026-06-25 11:47:06,048 - hydromt.data_catalog.sources.data_source - data_source - INFO - Reading grdc GeoDataFrame data from C:\Users\tromp_wm\.hydromt\artifact_data\latest\grdc.csv
+2026-06-25 11:47:06,060 - hydromt.hydromt_wflow.wflow_base - wflow_base - INFO - 3 grdc gauge locations found within domain
+2026-06-25 11:47:06,125 - hydromt.hydromt_wflow.wflow_base - wflow_base - INFO - Adding ['river_water__volume_flow_rate', 'atmosphere_water__precipitation_volume_flux'] to csv section of toml.
+2026-06-25 11:47:06,125 - hydromt.model.model - model - INFO - build: setup_precip_forcing
+2026-06-25 11:47:06,126 - hydromt.model.model - model - INFO - setup_precip_forcing.precip_clim_fn=None
+2026-06-25 11:47:06,126 - hydromt.model.model - model - INFO - setup_precip_forcing.chunksize=None
+2026-06-25 11:47:06,126 - hydromt.model.model - model - INFO - setup_precip_forcing.precip_fn=era5
+2026-06-25 11:47:06,129 - hydromt.data_catalog.sources.data_source - data_source - INFO - Reading era5 RasterDataset data from C:\Users\tromp_wm\.hydromt\artifact_data\latest\era5.nc
+2026-06-25 11:47:06,152 - hydromt.data_catalog.adapters.adapter_utils - adapter_utils - WARNING - Requested time range (2010-01-01 00:00:00, 2010-03-31 00:00:00) partially overlaps with available range '2010-02-02 00:00:00' to '2010-02-15 00:00:00'. Clamping to (2010-02-02 00:00:00, 2010-02-15 00:00:00).
+2026-06-25 11:47:06,213 - hydromt.model.model - model - INFO - build: setup_temp_pet_forcing
+2026-06-25 11:47:06,214 - hydromt.model.model - model - INFO - setup_temp_pet_forcing.pet_method=debruin
+2026-06-25 11:47:06,214 - hydromt.model.model - model - INFO - setup_temp_pet_forcing.press_correction=True
+2026-06-25 11:47:06,214 - hydromt.model.model - model - INFO - setup_temp_pet_forcing.temp_correction=True
+2026-06-25 11:47:06,214 - hydromt.model.model - model - INFO - setup_temp_pet_forcing.wind_correction=True
+2026-06-25 11:47:06,215 - hydromt.model.model - model - INFO - setup_temp_pet_forcing.wind_altitude=10
+2026-06-25 11:47:06,215 - hydromt.model.model - model - INFO - setup_temp_pet_forcing.reproj_method=nearest_index
+2026-06-25 11:47:06,215 - hydromt.model.model - model - INFO - setup_temp_pet_forcing.fillna_method=None
+2026-06-25 11:47:06,215 - hydromt.model.model - model - INFO - setup_temp_pet_forcing.dem_forcing_fn=era5_orography
+2026-06-25 11:47:06,215 - hydromt.model.model - model - INFO - setup_temp_pet_forcing.skip_pet=False
+2026-06-25 11:47:06,215 - hydromt.model.model - model - INFO - setup_temp_pet_forcing.chunksize=None
+2026-06-25 11:47:06,215 - hydromt.model.model - model - INFO - setup_temp_pet_forcing.temp_pet_fn=era5
+2026-06-25 11:47:06,218 - hydromt.data_catalog.sources.data_source - data_source - INFO - Reading era5 RasterDataset data from C:\Users\tromp_wm\.hydromt\artifact_data\latest\era5.nc
+2026-06-25 11:47:06,234 - hydromt.data_catalog.adapters.adapter_utils - adapter_utils - WARNING - Requested time range (2010-01-01 00:00:00, 2010-03-31 00:00:00) partially overlaps with available range '2010-02-02 00:00:00' to '2010-02-15 00:00:00'. Clamping to (2010-02-02 00:00:00, 2010-02-15 00:00:00).
+2026-06-25 11:47:06,274 - hydromt.data_catalog.sources.data_source - data_source - INFO - Reading era5_orography RasterDataset data from C:\Users\tromp_wm\.hydromt\artifact_data\latest\era5_orography.nc
+2026-06-25 11:47:06,556 - hydromt.model.model - model - INFO - build: setup_constant_pars
+2026-06-25 11:47:06,557 - hydromt.model.model - model - INFO - setup_constant_pars.subsurface_water__horizontal_to_vertical_saturated_hydraulic_conductivity_ratio=100
+2026-06-25 11:47:06,558 - hydromt.model.model - model - INFO - setup_constant_pars.snowpack__degree_day_coefficient=3.75653
+2026-06-25 11:47:06,558 - hydromt.model.model - model - INFO - setup_constant_pars.soil_surface_water__infiltration_reduction_parameter=0.038
+2026-06-25 11:47:06,559 - hydromt.model.model - model - INFO - setup_constant_pars.vegetation_canopy_water__mean_evaporation_to_mean_precipitation_ratio=0.11
+2026-06-25 11:47:06,559 - hydromt.model.model - model - INFO - setup_constant_pars.compacted_soil_surface_water__infiltration_capacity=10
+2026-06-25 11:47:06,559 - hydromt.model.model - model - INFO - setup_constant_pars.soil_water_saturated_zone_bottom__max_leakage_volume_flux=0
+2026-06-25 11:47:06,560 - hydromt.model.model - model - INFO - setup_constant_pars.soil_wet_root__sigmoid_function_shape_parameter=-500
+2026-06-25 11:47:06,560 - hydromt.model.model - model - INFO - setup_constant_pars.atmosphere_air__snowfall_temperature_threshold=0
+2026-06-25 11:47:06,560 - hydromt.model.model - model - INFO - setup_constant_pars.atmosphere_air__snowfall_temperature_interval=2
+2026-06-25 11:47:06,560 - hydromt.model.model - model - INFO - setup_constant_pars.snowpack__melting_temperature_threshold=0
+2026-06-25 11:47:06,561 - hydromt.model.model - model - INFO - setup_constant_pars.snowpack__liquid_water_holding_capacity=0.1
+2026-06-25 11:47:06,561 - hydromt.model.model - model - INFO - setup_constant_pars.glacier_ice__degree_day_coefficient=3
+2026-06-25 11:47:06,561 - hydromt.model.model - model - INFO - setup_constant_pars.glacier_firn_accumulation__snowpack_dry_snow_leq_depth_fraction=0.001
+2026-06-25 11:47:06,562 - hydromt.model.model - model - INFO - setup_constant_pars.glacier_ice__melting_temperature_threshold=0
+2026-06-25 11:47:06,562 - hydromt.hydromt_wflow.wflow_base - wflow_base - INFO - Write model data to C:\Users\tromp_wm\OneDrive - Stichting Deltares\Documents\WFLOW Emulator\WflowRoutingGNN\test_data\test_model
+2026-06-25 11:47:06,588 - hydromt.model.components.grid - grid - INFO - wflow_sbm.staticmaps: Writing grid data to C:\Users\tromp_wm\OneDrive - Stichting Deltares\Documents\WFLOW Emulator\WflowRoutingGNN\test_data\test_model\staticmaps.nc.
+2026-06-25 11:47:06,755 - hydromt.model.components.spatial - spatial - INFO - wflow_sbm.staticmaps: Writing region to C:\Users\tromp_wm\OneDrive - Stichting Deltares\Documents\WFLOW Emulator\WflowRoutingGNN\test_data\test_model\staticgeoms\region.geojson.
+2026-06-25 11:47:06,845 - hydromt.model.components.geoms - geoms - INFO - wflow_sbm.geoms: Writing geoms to C:\Users\tromp_wm\OneDrive - Stichting Deltares\Documents\WFLOW Emulator\WflowRoutingGNN\test_data\test_model\staticgeoms\meta_basins_highres.geojson.
+2026-06-25 11:47:06,886 - hydromt.model.components.geoms - geoms - INFO - wflow_sbm.geoms: Writing geoms to C:\Users\tromp_wm\OneDrive - Stichting Deltares\Documents\WFLOW Emulator\WflowRoutingGNN\test_data\test_model\staticgeoms\basins.geojson.
+2026-06-25 11:47:06,896 - hydromt.model.components.geoms - geoms - INFO - wflow_sbm.geoms: Writing geoms to C:\Users\tromp_wm\OneDrive - Stichting Deltares\Documents\WFLOW Emulator\WflowRoutingGNN\test_data\test_model\staticgeoms\rivers.geojson.
+2026-06-25 11:47:06,917 - hydromt.model.components.geoms - geoms - INFO - wflow_sbm.geoms: Writing geoms to C:\Users\tromp_wm\OneDrive - Stichting Deltares\Documents\WFLOW Emulator\WflowRoutingGNN\test_data\test_model\staticgeoms\glaciers.geojson.
+2026-06-25 11:47:06,952 - hydromt.model.components.geoms - geoms - INFO - wflow_sbm.geoms: Writing geoms to C:\Users\tromp_wm\OneDrive - Stichting Deltares\Documents\WFLOW Emulator\WflowRoutingGNN\test_data\test_model\staticgeoms\outlets.geojson.
+2026-06-25 11:47:06,959 - hydromt.model.components.geoms - geoms - INFO - wflow_sbm.geoms: Writing geoms to C:\Users\tromp_wm\OneDrive - Stichting Deltares\Documents\WFLOW Emulator\WflowRoutingGNN\test_data\test_model\staticgeoms\gauges_grdc.geojson.
+2026-06-25 11:47:06,967 - hydromt.hydromt_wflow.components.forcing - forcing - INFO - Write forcing file
+2026-06-25 11:47:06,968 - hydromt.hydromt_wflow.components.forcing - forcing - WARNING - Start time 2010-01-01T00:00:00.000000 does not match the beginning of the data. Changing to start of the data: 2010-02-02T00:00:00.000000000.
+2026-06-25 11:47:06,969 - hydromt.hydromt_wflow.components.forcing - forcing - WARNING - End time 2010-03-31T00:00:00.000000 does not match the end of the data. Changing to end of the data: 2010-02-15T00:00:00.000000000.
+2026-06-25 11:47:06,972 - hydromt.hydromt_wflow.components.forcing - forcing - INFO - Writing file C:/Users/tromp_wm/OneDrive - Stichting Deltares/Documents/WFLOW Emulator/WflowRoutingGNN/test_data/test_model/inmaps-era5-2010.nc
+2026-06-25 11:47:07,208 - hydromt.model.components.tables - tables - INFO - wflow_sbm.tables: No tables found, skip writing.
+2026-06-25 11:47:07,208 - hydromt.model.components.grid - grid - INFO - wflow_sbm.states: No grid data found, skip writing.
+2026-06-25 11:47:07,209 - hydromt.hydromt_wflow.components.config - config - INFO - Writing model config to C:/Users/tromp_wm/OneDrive - Stichting Deltares/Documents/WFLOW Emulator/WflowRoutingGNN/test_data/test_model/wflow_sbm.toml.
+2026-06-25 13:53:27,113 - hydromt - log - INFO - HydroMT version: 1.4.0
+2026-06-25 13:53:27,117 - hydromt.model.model - model - INFO - build: setup_config
+2026-06-25 13:53:27,118 - hydromt.model.model - model - INFO - setup_config.data={'time.starttime': datetime.datetime(2010, 1, 1, 0, 0), 'time.endtime': datetime.datetime(2010, 3, 31, 0, 0), 'time.timestepsecs': 86400, 'input.path_forcing': 'inmaps-era5-2010.nc', 'output.netcdf_grid.path': 'output.nc', 'output.netcdf_grid.compressionlevel': 1, 'output.netcdf_grid.variables.river_water__volume_flow_rate': 'river_q', 'output.netcdf_grid.variables.river_water__depth': 'river_h', 'output.netcdf_grid.variables.river_water__lateral_inflow_volume_flow_rate': 'river_inwater'}
+2026-06-25 13:53:27,123 - hydromt.model.model - model - INFO - build: setup_basemaps
+2026-06-25 13:53:27,125 - hydromt.model.model - model - INFO - setup_basemaps.basin_index_fn=merit_hydro_index
+2026-06-25 13:53:27,127 - hydromt.model.model - model - INFO - setup_basemaps.res=0.00833
+2026-06-25 13:53:27,128 - hydromt.model.model - model - INFO - setup_basemaps.upscale_method=ihu
+2026-06-25 13:53:27,129 - hydromt.model.model - model - INFO - setup_basemaps.output_names={'basin__local_drain_direction': 'local_drain_direction', 'subbasin_location__count': 'subcatchment', 'land_surface__slope': 'land_slope'}
+2026-06-25 13:53:27,131 - hydromt.model.model - model - INFO - setup_basemaps.hydrography_fn=merit_hydro
+2026-06-25 13:53:27,133 - hydromt.model.model - model - INFO - setup_basemaps.region={'subbasin': [12.2051, 45.8331], 'strord': 4, 'bounds': [11.7, 45.35, 12.95, 46.7]}
+2026-06-25 13:53:27,134 - hydromt.hydromt_wflow.wflow_base - wflow_base - INFO - Preparing base hydrography basemaps.
+2026-06-25 13:53:27,134 - hydromt.data_catalog.sources.data_source - data_source - INFO - Reading merit_hydro RasterDataset data from p:\wflow_global\hydromt\topography\merit_hydro\*.vrt
+2026-06-25 13:53:27,814 - hydromt.data_catalog.sources.data_source - data_source - INFO - Reading merit_hydro_index GeoDataFrame data from p:\wflow_global\hydromt\topography\merit_hydro\basin_index.fgb
+2026-06-25 13:53:31,343 - hydromt.model.processes.basin_mask - basin_mask - INFO - subbasin bbox: [11.7750, 45.8042, 12.7450, 46.6900]
+2026-06-25 13:53:31,406 - hydromt.hydromt_wflow.workflows.basemaps - basemaps - INFO - (Sub)basin at original resolution has 664756 cells.
+2026-06-25 13:53:33,404 - hydromt.hydromt_wflow.workflows.basemaps - basemaps - INFO - Upscale flow direction data: 10x, ihu method.
+2026-06-25 13:53:35,547 - hydromt.hydromt_wflow.workflows.basemaps - basemaps - INFO - Derive stream order.
+2026-06-25 13:53:35,577 - hydromt.hydromt_wflow.workflows.basemaps - basemaps - INFO - Map shape: (106, 116); active cells: 6637.
+2026-06-25 13:53:35,579 - hydromt.hydromt_wflow.workflows.basemaps - basemaps - INFO - Outlet coordinates (1/1): (12.20750,45.83583).
+2026-06-25 13:53:35,601 - hydromt.hydromt_wflow.wflow_base - wflow_base - INFO - Adding basin shape to staticgeoms.
+2026-06-25 13:53:35,615 - hydromt.hydromt_wflow.workflows.basemaps - basemaps - INFO - Derive elevation and slope.
+2026-06-25 13:53:38,410 - hydromt.model.model - model - INFO - build: setup_rivers
+2026-06-25 13:53:38,411 - hydromt.model.model - model - INFO - setup_rivers.river_geom_fn=hydro_rivers_lin
+2026-06-25 13:53:38,411 - hydromt.model.model - model - INFO - setup_rivers.river_upa=30
+2026-06-25 13:53:38,411 - hydromt.model.model - model - INFO - setup_rivers.rivdph_method=powlaw
+2026-06-25 13:53:38,411 - hydromt.model.model - model - INFO - setup_rivers.slope_len=2000
+2026-06-25 13:53:38,411 - hydromt.model.model - model - INFO - setup_rivers.min_rivlen_ratio=0.0
+2026-06-25 13:53:38,411 - hydromt.model.model - model - INFO - setup_rivers.min_rivdph=1
+2026-06-25 13:53:38,412 - hydromt.model.model - model - INFO - setup_rivers.min_rivwth=30
+2026-06-25 13:53:38,412 - hydromt.model.model - model - INFO - setup_rivers.smooth_len=5000
+2026-06-25 13:53:38,412 - hydromt.model.model - model - INFO - setup_rivers.elevtn_map=land_elevation
+2026-06-25 13:53:38,412 - hydromt.model.model - model - INFO - setup_rivers.river_routing=kinematic_wave
+2026-06-25 13:53:38,412 - hydromt.model.model - model - INFO - setup_rivers.connectivity=8
+2026-06-25 13:53:38,412 - hydromt.model.model - model - INFO - setup_rivers.output_names={'river_location__mask': 'river_mask', 'river__length': 'river_length', 'river__width': 'river_width', 'river_bank_water__depth': 'river_depth', 'river__slope': 'river_slope', 'river_bank_water__elevation': 'river_bank_elevation'}
+2026-06-25 13:53:38,412 - hydromt.model.model - model - INFO - setup_rivers.hydrography_fn=merit_hydro
+2026-06-25 13:53:38,412 - hydromt.hydromt_wflow.wflow_base - wflow_base - INFO - Preparing river maps.
+2026-06-25 13:53:38,425 - hydromt.data_catalog.sources.data_source - data_source - INFO - Reading merit_hydro RasterDataset data from p:\wflow_global\hydromt\topography\merit_hydro\*.vrt
+2026-06-25 13:53:39,291 - hydromt.hydromt_wflow.workflows.river - river - INFO - Set river mask (min uparea: 30 km2) and prepare flow dirs.
+2026-06-25 13:53:40,273 - hydromt.hydromt_wflow.workflows.river - river - INFO - Derive river length.
+2026-06-25 13:53:42,175 - hydromt.hydromt_wflow.workflows.river - river - INFO - Derive river slope.
+2026-06-25 13:53:43,243 - hydromt.data_catalog.sources.data_source - data_source - INFO - Reading hydro_rivers_lin GeoDataFrame data from p:\wflow_global\hydromt\hydrography\rivers_lin2019\rivers_ge30m.fgb
+2026-06-25 13:53:43,619 - hydromt.hydromt_wflow.workflows.river - river - INFO - Derive ['rivwth', 'qbankfull'] from shapefile.
+2026-06-25 13:53:43,661 - hydromt.hydromt_wflow.workflows.river - river - INFO - Valid for 381/655 river cells (max dist: 392 m).
+2026-06-25 13:53:43,809 - hydromt.hydromt_wflow.wflow_sbm - wflow_sbm - INFO - Update wflow config model.river_routing="kinematic_wave"
+2026-06-25 13:53:43,810 - hydromt.model.model - model - INFO - build: setup_river_roughness
+2026-06-25 13:53:43,810 - hydromt.model.model - model - INFO - setup_river_roughness.rivman_mapping_fn=None
+2026-06-25 13:53:43,810 - hydromt.model.model - model - INFO - setup_river_roughness.strord_name=meta_streamorder
+2026-06-25 13:53:43,810 - hydromt.model.model - model - INFO - setup_river_roughness.output_name=river_manning_n
+2026-06-25 13:53:43,810 - hydromt.hydromt_wflow.wflow_sbm - wflow_sbm - INFO - Preparing river Manning roughness.
+2026-06-25 13:53:43,811 - hydromt.data_catalog.sources.data_source - data_source - INFO - Reading roughness_river_mapping_default DataFrame data from C:\Users\tromp_wm\AppData\Local\miniforge3\envs\hydromt-wflow\Lib\site-packages\hydromt_wflow\data\wflow_sbm\river_manning_mapping.csv
+2026-06-25 13:53:43,821 - hydromt.hydromt_wflow.workflows.landuse - landuse - INFO - Deriving river_manning_n using average resampling (nodata=-999.0).
+2026-06-25 13:53:43,829 - hydromt.model.model - model - INFO - build: setup_reservoirs_simple_control
+2026-06-25 13:53:43,830 - hydromt.model.model - model - INFO - setup_reservoirs_simple_control.timeseries_fn=gww
+2026-06-25 13:53:43,830 - hydromt.model.model - model - INFO - setup_reservoirs_simple_control.overwrite_existing=False
+2026-06-25 13:53:43,830 - hydromt.model.model - model - INFO - setup_reservoirs_simple_control.duplicate_id=error
+2026-06-25 13:53:43,831 - hydromt.model.model - model - INFO - setup_reservoirs_simple_control.min_area=1.0
+2026-06-25 13:53:43,831 - hydromt.model.model - model - INFO - setup_reservoirs_simple_control.output_names={'reservoir_area__count': 'reservoir_area_id', 'reservoir_location__count': 'reservoir_outlet_id', 'reservoir_surface__area': 'reservoir_area', 'reservoir_water_surface__initial_elevation': 'reservoir_initial_depth', 'reservoir_water__rating_curve_type_count': 'reservoir_rating_curve', 'reservoir_water__storage_curve_type_count': 'reservoir_storage_curve', 'reservoir_water__max_volume': 'reservoir_max_volume', 'reservoir_water__target_min_volume_fraction': 'reservoir_target_min_fraction', 'reservoir_water__target_full_volume_fraction': 'reservoir_target_full_fraction', 'reservoir_water_demand__required_downstream_volume_flow_rate': 'reservoir_demand', 'reservoir_water_release_below_spillway__max_volume_flow_rate': 'reservoir_max_release'}
+2026-06-25 13:53:43,831 - hydromt.model.model - model - INFO - setup_reservoirs_simple_control.geom_name=meta_reservoirs_simple_control
+2026-06-25 13:53:43,831 - hydromt.model.model - model - INFO - setup_reservoirs_simple_control.reservoirs_fn=hydro_reservoirs
+2026-06-25 13:53:43,831 - hydromt.hydromt_wflow.wflow_sbm - wflow_sbm - INFO - Preparing reservoir with simple control maps.
+2026-06-25 13:53:43,831 - hydromt.data_catalog.sources.data_source - data_source - INFO - Reading hydro_reservoirs GeoDataFrame data from p:\wflow_global\hydromt\hydrography\reservoirs\reservoir-db.fgb
+2026-06-25 13:53:43,893 - hydromt.hydromt_wflow.workflows.reservoirs - reservoirs - INFO - 0 reservoir(s) of sufficient size found within region.
+2026-06-25 13:53:43,894 - hydromt.model.model - model - INFO - build: setup_reservoirs_no_control
+2026-06-25 13:53:43,895 - hydromt.model.model - model - INFO - setup_reservoirs_no_control.rating_curve_fns=None
+2026-06-25 13:53:43,895 - hydromt.model.model - model - INFO - setup_reservoirs_no_control.overwrite_existing=False
+2026-06-25 13:53:43,895 - hydromt.model.model - model - INFO - setup_reservoirs_no_control.duplicate_id=error
+2026-06-25 13:53:43,896 - hydromt.model.model - model - INFO - setup_reservoirs_no_control.min_area=10.0
+2026-06-25 13:53:43,896 - hydromt.model.model - model - INFO - setup_reservoirs_no_control.output_names={'reservoir_area__count': 'reservoir_area_id', 'reservoir_location__count': 'reservoir_outlet_id', 'reservoir_surface__area': 'reservoir_area', 'reservoir_water_surface__initial_elevation': 'reservoir_initial_depth', 'reservoir_water_flow_threshold_level__elevation': 'reservoir_outflow_threshold', 'reservoir_water__rating_curve_coefficient': 'reservoir_b', 'reservoir_water__rating_curve_exponent': 'reservoir_e', 'reservoir_water__rating_curve_type_count': 'reservoir_rating_curve', 'reservoir_water__storage_curve_type_count': 'reservoir_storage_curve', 'reservoir_lower_location__count': 'reservoir_lower_id'}
+2026-06-25 13:53:43,897 - hydromt.model.model - model - INFO - setup_reservoirs_no_control.geom_name=meta_reservoirs_no_control
+2026-06-25 13:53:43,897 - hydromt.model.model - model - INFO - setup_reservoirs_no_control.reservoirs_fn=hydro_lakes
+2026-06-25 13:53:43,897 - hydromt.hydromt_wflow.wflow_sbm - wflow_sbm - INFO - Preparing reservoir maps.
+2026-06-25 13:53:43,898 - hydromt.data_catalog.sources.data_source - data_source - INFO - Reading hydro_lakes GeoDataFrame data from p:\wflow_global\hydromt\hydrography\lakes\lake-db.fgb
+2026-06-25 13:53:43,950 - hydromt.hydromt_wflow.workflows.reservoirs - reservoirs - INFO - 0 reservoir(s) of sufficient size found within region.
+2026-06-25 13:53:43,954 - hydromt.model.model - model - INFO - build: setup_glaciers
+2026-06-25 13:53:43,956 - hydromt.model.model - model - INFO - setup_glaciers.min_area=0.0
+2026-06-25 13:53:43,963 - hydromt.model.model - model - INFO - setup_glaciers.output_names={'glacier_surface__area_fraction': 'glacier_fraction', 'glacier_ice__initial_leq_depth': 'glacier_initial_leq_depth'}
+2026-06-25 13:53:43,964 - hydromt.model.model - model - INFO - setup_glaciers.geom_name=glaciers
+2026-06-25 13:53:43,980 - hydromt.model.model - model - INFO - setup_glaciers.glaciers_fn=rgi
+2026-06-25 13:53:43,980 - hydromt.hydromt_wflow.wflow_sbm - wflow_sbm - INFO - Preparing glacier maps.
+2026-06-25 13:53:43,981 - hydromt.data_catalog.sources.data_source - data_source - INFO - Reading rgi GeoDataFrame data from p:\wflow_global\hydromt\hydrography\rgi\rgi.fgb
+2026-06-25 13:53:44,049 - hydromt.hydromt_wflow.wflow_sbm - wflow_sbm - INFO - 38 glaciers of sufficient size found within region.
+2026-06-25 13:53:45,150 - hydromt.model.model - model - INFO - build: setup_lulcmaps
+2026-06-25 13:53:45,150 - hydromt.model.model - model - INFO - setup_lulcmaps.lulc_mapping_fn=globcover_mapping_default
+2026-06-25 13:53:45,150 - hydromt.model.model - model - INFO - setup_lulcmaps.lulc_vars=['landuse', 'vegetation_kext', 'land_manning_n', 'soil_compacted_fraction', 'vegetation_root_depth', 'vegetation_leaf_storage', 'vegetation_wood_storage', 'land_water_fraction', 'vegetation_crop_factor', 'vegetation_feddes_alpha_h1', 'vegetation_feddes_h1', 'vegetation_feddes_h2', 'vegetation_feddes_h3_high', 'vegetation_feddes_h3_low', 'vegetation_feddes_h4']
+2026-06-25 13:53:45,151 - hydromt.model.model - model - INFO - setup_lulcmaps.output_names_suffix=None
+2026-06-25 13:53:45,151 - hydromt.model.model - model - INFO - setup_lulcmaps.lulc_fn=globcover_2009
+2026-06-25 13:53:45,151 - hydromt.hydromt_wflow.wflow_base - wflow_base - INFO - Preparing LULC parameter maps.
+2026-06-25 13:53:45,153 - hydromt.data_catalog.sources.data_source - data_source - INFO - Reading globcover_2009 RasterDataset data from C:\Users\tromp_wm\OneDrive - Stichting Deltares\Documents\WFLOW Emulator\WflowRoutingGNN\test_data\test_model\globcover_2009
+2026-06-25 13:53:45,684 - hydromt - log - ERROR - Unhandled exception occured.
+Traceback (most recent call last):
+  File "C:\Users\tromp_wm\AppData\Local\miniforge3\envs\hydromt-wflow\Lib\site-packages\hydromt\log.py", line 179, in to_file
+    yield
+  File "C:\Users\tromp_wm\AppData\Local\miniforge3\envs\hydromt-wflow\Lib\site-packages\hydromt\model\model.py", line 324, in build
+    method(**merged)
+    ~~~~~~^^^^^^^^^^
+  File "C:\Users\tromp_wm\AppData\Local\miniforge3\envs\hydromt-wflow\Lib\site-packages\hydromt_wflow\wflow_base.py", line 861, in setup_lulcmaps
+    da = self.data_catalog.get_rasterdataset(
+        lulc_fn, geom=self.region, buffer=2, variables=["landuse"]
+    )
+  File "C:\Users\tromp_wm\AppData\Local\miniforge3\envs\hydromt-wflow\Lib\site-packages\hydromt\data_catalog\data_catalog.py", line 1477, in get_rasterdataset
+    return source.read_data(
+           ~~~~~~~~~~~~~~~~^
+        bbox=bbox,
+        ^^^^^^^^^^
+    ...<7 lines>...
+        single_var_as_array=single_var_as_array,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\tromp_wm\AppData\Local\miniforge3\envs\hydromt-wflow\Lib\site-packages\hydromt\data_catalog\sources\rasterdataset.py", line 72, in read_data
+    uris: List[str] = self.uri_resolver.resolve(
+                      ~~~~~~~~~~~~~~~~~~~~~~~~~^
+        self.full_uri,
+        ^^^^^^^^^^^^^^
+    ...<5 lines>...
+        handle_nodata=handle_nodata,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\tromp_wm\AppData\Local\miniforge3\envs\hydromt-wflow\Lib\site-packages\hydromt\data_catalog\uri_resolvers\convention_resolver.py", line 170, in resolve
+    exec_nodata_strat(
+    ~~~~~~~~~~~~~~~~~^
+        f"Resolver '{self.name}' found no files at {uri_expanded}.",
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        strategy=handle_nodata,
+        ^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\tromp_wm\AppData\Local\miniforge3\envs\hydromt-wflow\Lib\site-packages\hydromt\error.py", line 55, in exec_nodata_strat
+    raise NoDataException(msg)
+hydromt.error.NoDataException: Resolver 'convention' found no files at C:\Users\tromp_wm\OneDrive - Stichting Deltares\Documents\WFLOW Emulator\WflowRoutingGNN\test_data\test_model\globcover_2009.
+2026-06-25 13:54:19,296 - hydromt - log - INFO - HydroMT version: 1.4.0
+2026-06-25 13:54:19,299 - hydromt.model.model - model - INFO - build: setup_config
+2026-06-25 13:54:19,300 - hydromt.model.model - model - INFO - setup_config.data={'time.starttime': datetime.datetime(2010, 1, 1, 0, 0), 'time.endtime': datetime.datetime(2010, 3, 31, 0, 0), 'time.timestepsecs': 86400, 'input.path_forcing': 'inmaps-era5-2010.nc', 'output.netcdf_grid.path': 'output.nc', 'output.netcdf_grid.compressionlevel': 1, 'output.netcdf_grid.variables.river_water__volume_flow_rate': 'river_q', 'output.netcdf_grid.variables.river_water__depth': 'river_h', 'output.netcdf_grid.variables.river_water__lateral_inflow_volume_flow_rate': 'river_inwater'}
+2026-06-25 13:54:19,301 - hydromt.model.model - model - INFO - build: setup_basemaps
+2026-06-25 13:54:19,301 - hydromt.model.model - model - INFO - setup_basemaps.basin_index_fn=merit_hydro_index
+2026-06-25 13:54:19,302 - hydromt.model.model - model - INFO - setup_basemaps.res=0.00833
+2026-06-25 13:54:19,303 - hydromt.model.model - model - INFO - setup_basemaps.upscale_method=ihu
+2026-06-25 13:54:19,304 - hydromt.model.model - model - INFO - setup_basemaps.output_names={'basin__local_drain_direction': 'local_drain_direction', 'subbasin_location__count': 'subcatchment', 'land_surface__slope': 'land_slope'}
+2026-06-25 13:54:19,304 - hydromt.model.model - model - INFO - setup_basemaps.hydrography_fn=merit_hydro
+2026-06-25 13:54:19,305 - hydromt.model.model - model - INFO - setup_basemaps.region={'subbasin': [12.2051, 45.8331], 'strord': 4, 'bounds': [11.7, 45.35, 12.95, 46.7]}
+2026-06-25 13:54:19,305 - hydromt.hydromt_wflow.wflow_base - wflow_base - INFO - Preparing base hydrography basemaps.
+2026-06-25 13:54:19,307 - hydromt.data_catalog.sources.data_source - data_source - INFO - Reading merit_hydro RasterDataset data from C:\Users\tromp_wm\.hydromt\artifact_data\latest\merit_hydro\{variable}.tif
+2026-06-25 13:54:19,432 - hydromt.data_catalog.sources.data_source - data_source - INFO - Reading merit_hydro_index GeoDataFrame data from C:\Users\tromp_wm\.hydromt\artifact_data\latest\merit_hydro_index.gpkg
+2026-06-25 13:54:20,028 - hydromt.model.processes.basin_mask - basin_mask - INFO - subbasin bbox: [11.7750, 45.8042, 12.7450, 46.6900]
+2026-06-25 13:54:20,098 - hydromt.hydromt_wflow.workflows.basemaps - basemaps - INFO - (Sub)basin at original resolution has 664756 cells.
+2026-06-25 13:54:20,218 - hydromt.hydromt_wflow.workflows.basemaps - basemaps - INFO - Upscale flow direction data: 10x, ihu method.
+2026-06-25 13:54:20,705 - hydromt.hydromt_wflow.workflows.basemaps - basemaps - INFO - Derive stream order.
+2026-06-25 13:54:20,725 - hydromt.hydromt_wflow.workflows.basemaps - basemaps - INFO - Map shape: (106, 116); active cells: 6637.
+2026-06-25 13:54:20,726 - hydromt.hydromt_wflow.workflows.basemaps - basemaps - INFO - Outlet coordinates (1/1): (12.20750,45.83583).
+2026-06-25 13:54:20,743 - hydromt.hydromt_wflow.wflow_base - wflow_base - INFO - Adding basin shape to staticgeoms.
+2026-06-25 13:54:20,761 - hydromt.hydromt_wflow.workflows.basemaps - basemaps - INFO - Derive elevation and slope.
+2026-06-25 13:54:20,862 - hydromt.model.model - model - INFO - build: setup_rivers
+2026-06-25 13:54:20,863 - hydromt.model.model - model - INFO - setup_rivers.river_geom_fn=hydro_rivers_lin
+2026-06-25 13:54:20,863 - hydromt.model.model - model - INFO - setup_rivers.river_upa=30
+2026-06-25 13:54:20,863 - hydromt.model.model - model - INFO - setup_rivers.rivdph_method=powlaw
+2026-06-25 13:54:20,864 - hydromt.model.model - model - INFO - setup_rivers.slope_len=2000
+2026-06-25 13:54:20,864 - hydromt.model.model - model - INFO - setup_rivers.min_rivlen_ratio=0.0
+2026-06-25 13:54:20,865 - hydromt.model.model - model - INFO - setup_rivers.min_rivdph=1
+2026-06-25 13:54:20,865 - hydromt.model.model - model - INFO - setup_rivers.min_rivwth=30
+2026-06-25 13:54:20,866 - hydromt.model.model - model - INFO - setup_rivers.smooth_len=5000
+2026-06-25 13:54:20,866 - hydromt.model.model - model - INFO - setup_rivers.elevtn_map=land_elevation
+2026-06-25 13:54:20,866 - hydromt.model.model - model - INFO - setup_rivers.river_routing=kinematic_wave
+2026-06-25 13:54:20,866 - hydromt.model.model - model - INFO - setup_rivers.connectivity=8
+2026-06-25 13:54:20,867 - hydromt.model.model - model - INFO - setup_rivers.output_names={'river_location__mask': 'river_mask', 'river__length': 'river_length', 'river__width': 'river_width', 'river_bank_water__depth': 'river_depth', 'river__slope': 'river_slope', 'river_bank_water__elevation': 'river_bank_elevation'}
+2026-06-25 13:54:20,868 - hydromt.model.model - model - INFO - setup_rivers.hydrography_fn=merit_hydro
+2026-06-25 13:54:20,872 - hydromt.hydromt_wflow.wflow_base - wflow_base - INFO - Preparing river maps.
+2026-06-25 13:54:20,878 - hydromt.data_catalog.sources.data_source - data_source - INFO - Reading merit_hydro RasterDataset data from C:\Users\tromp_wm\.hydromt\artifact_data\latest\merit_hydro\{variable}.tif
+2026-06-25 13:54:20,950 - hydromt.hydromt_wflow.workflows.river - river - INFO - Set river mask (min uparea: 30 km2) and prepare flow dirs.
+2026-06-25 13:54:21,061 - hydromt.hydromt_wflow.workflows.river - river - INFO - Derive river length.
+2026-06-25 13:54:22,905 - hydromt.hydromt_wflow.workflows.river - river - INFO - Derive river slope.
+2026-06-25 13:54:22,983 - hydromt.data_catalog.sources.data_source - data_source - INFO - Reading hydro_rivers_lin GeoDataFrame data from C:\Users\tromp_wm\.hydromt\artifact_data\latest\rivers_lin2019_v1.gpkg
+2026-06-25 13:54:23,035 - hydromt.hydromt_wflow.workflows.river - river - INFO - Derive ['rivwth', 'qbankfull'] from shapefile.
+2026-06-25 13:54:23,087 - hydromt.hydromt_wflow.workflows.river - river - INFO - Valid for 381/655 river cells (max dist: 392 m).
+2026-06-25 13:54:23,203 - hydromt.hydromt_wflow.wflow_sbm - wflow_sbm - INFO - Update wflow config model.river_routing="kinematic_wave"
+2026-06-25 13:54:23,204 - hydromt.model.model - model - INFO - build: setup_river_roughness
+2026-06-25 13:54:23,205 - hydromt.model.model - model - INFO - setup_river_roughness.rivman_mapping_fn=None
+2026-06-25 13:54:23,205 - hydromt.model.model - model - INFO - setup_river_roughness.strord_name=meta_streamorder
+2026-06-25 13:54:23,205 - hydromt.model.model - model - INFO - setup_river_roughness.output_name=river_manning_n
+2026-06-25 13:54:23,205 - hydromt.hydromt_wflow.wflow_sbm - wflow_sbm - INFO - Preparing river Manning roughness.
+2026-06-25 13:54:23,206 - hydromt.data_catalog.sources.data_source - data_source - INFO - Reading roughness_river_mapping_default DataFrame data from C:\Users\tromp_wm\AppData\Local\miniforge3\envs\hydromt-wflow\Lib\site-packages\hydromt_wflow\data\wflow_sbm\river_manning_mapping.csv
+2026-06-25 13:54:23,214 - hydromt.hydromt_wflow.workflows.landuse - landuse - INFO - Deriving river_manning_n using average resampling (nodata=-999.0).
+2026-06-25 13:54:23,223 - hydromt.model.model - model - INFO - build: setup_reservoirs_simple_control
+2026-06-25 13:54:23,223 - hydromt.model.model - model - INFO - setup_reservoirs_simple_control.timeseries_fn=gww
+2026-06-25 13:54:23,224 - hydromt.model.model - model - INFO - setup_reservoirs_simple_control.overwrite_existing=False
+2026-06-25 13:54:23,224 - hydromt.model.model - model - INFO - setup_reservoirs_simple_control.duplicate_id=error
+2026-06-25 13:54:23,224 - hydromt.model.model - model - INFO - setup_reservoirs_simple_control.min_area=1.0
+2026-06-25 13:54:23,225 - hydromt.model.model - model - INFO - setup_reservoirs_simple_control.output_names={'reservoir_area__count': 'reservoir_area_id', 'reservoir_location__count': 'reservoir_outlet_id', 'reservoir_surface__area': 'reservoir_area', 'reservoir_water_surface__initial_elevation': 'reservoir_initial_depth', 'reservoir_water__rating_curve_type_count': 'reservoir_rating_curve', 'reservoir_water__storage_curve_type_count': 'reservoir_storage_curve', 'reservoir_water__max_volume': 'reservoir_max_volume', 'reservoir_water__target_min_volume_fraction': 'reservoir_target_min_fraction', 'reservoir_water__target_full_volume_fraction': 'reservoir_target_full_fraction', 'reservoir_water_demand__required_downstream_volume_flow_rate': 'reservoir_demand', 'reservoir_water_release_below_spillway__max_volume_flow_rate': 'reservoir_max_release'}
+2026-06-25 13:54:23,225 - hydromt.model.model - model - INFO - setup_reservoirs_simple_control.geom_name=meta_reservoirs_simple_control
+2026-06-25 13:54:23,227 - hydromt.model.model - model - INFO - setup_reservoirs_simple_control.reservoirs_fn=hydro_reservoirs
+2026-06-25 13:54:23,227 - hydromt.hydromt_wflow.wflow_sbm - wflow_sbm - INFO - Preparing reservoir with simple control maps.
+2026-06-25 13:54:23,228 - hydromt.data_catalog.sources.data_source - data_source - INFO - Reading hydro_reservoirs GeoDataFrame data from C:\Users\tromp_wm\.hydromt\artifact_data\latest\hydro_reservoirs.gpkg
+2026-06-25 13:54:23,254 - hydromt.hydromt_wflow.workflows.reservoirs - reservoirs - INFO - 0 reservoir(s) of sufficient size found within region.
+2026-06-25 13:54:23,255 - hydromt.model.model - model - INFO - build: setup_reservoirs_no_control
+2026-06-25 13:54:23,255 - hydromt.model.model - model - INFO - setup_reservoirs_no_control.rating_curve_fns=None
+2026-06-25 13:54:23,255 - hydromt.model.model - model - INFO - setup_reservoirs_no_control.overwrite_existing=False
+2026-06-25 13:54:23,255 - hydromt.model.model - model - INFO - setup_reservoirs_no_control.duplicate_id=error
+2026-06-25 13:54:23,255 - hydromt.model.model - model - INFO - setup_reservoirs_no_control.min_area=10.0
+2026-06-25 13:54:23,256 - hydromt.model.model - model - INFO - setup_reservoirs_no_control.output_names={'reservoir_area__count': 'reservoir_area_id', 'reservoir_location__count': 'reservoir_outlet_id', 'reservoir_surface__area': 'reservoir_area', 'reservoir_water_surface__initial_elevation': 'reservoir_initial_depth', 'reservoir_water_flow_threshold_level__elevation': 'reservoir_outflow_threshold', 'reservoir_water__rating_curve_coefficient': 'reservoir_b', 'reservoir_water__rating_curve_exponent': 'reservoir_e', 'reservoir_water__rating_curve_type_count': 'reservoir_rating_curve', 'reservoir_water__storage_curve_type_count': 'reservoir_storage_curve', 'reservoir_lower_location__count': 'reservoir_lower_id'}
+2026-06-25 13:54:23,256 - hydromt.model.model - model - INFO - setup_reservoirs_no_control.geom_name=meta_reservoirs_no_control
+2026-06-25 13:54:23,256 - hydromt.model.model - model - INFO - setup_reservoirs_no_control.reservoirs_fn=hydro_lakes
+2026-06-25 13:54:23,257 - hydromt.hydromt_wflow.wflow_sbm - wflow_sbm - INFO - Preparing reservoir maps.
+2026-06-25 13:54:23,257 - hydromt.data_catalog.sources.data_source - data_source - INFO - Reading hydro_lakes GeoDataFrame data from C:\Users\tromp_wm\.hydromt\artifact_data\latest\hydro_lakes.gpkg
+2026-06-25 13:54:23,276 - hydromt.hydromt_wflow.workflows.reservoirs - reservoirs - INFO - 0 reservoir(s) of sufficient size found within region.
+2026-06-25 13:54:23,276 - hydromt.model.model - model - INFO - build: setup_glaciers
+2026-06-25 13:54:23,277 - hydromt.model.model - model - INFO - setup_glaciers.min_area=0.0
+2026-06-25 13:54:23,277 - hydromt.model.model - model - INFO - setup_glaciers.output_names={'glacier_surface__area_fraction': 'glacier_fraction', 'glacier_ice__initial_leq_depth': 'glacier_initial_leq_depth'}
+2026-06-25 13:54:23,277 - hydromt.model.model - model - INFO - setup_glaciers.geom_name=glaciers
+2026-06-25 13:54:23,277 - hydromt.model.model - model - INFO - setup_glaciers.glaciers_fn=rgi
+2026-06-25 13:54:23,278 - hydromt.hydromt_wflow.wflow_sbm - wflow_sbm - INFO - Preparing glacier maps.
+2026-06-25 13:54:23,278 - hydromt.data_catalog.sources.data_source - data_source - INFO - Reading rgi GeoDataFrame data from C:\Users\tromp_wm\.hydromt\artifact_data\latest\rgi.gpkg
+2026-06-25 13:54:23,302 - hydromt.hydromt_wflow.wflow_sbm - wflow_sbm - INFO - 38 glaciers of sufficient size found within region.
+2026-06-25 13:54:23,939 - hydromt.model.model - model - INFO - build: setup_lulcmaps
+2026-06-25 13:54:23,940 - hydromt.model.model - model - INFO - setup_lulcmaps.lulc_mapping_fn=globcover_mapping_default
+2026-06-25 13:54:23,941 - hydromt.model.model - model - INFO - setup_lulcmaps.lulc_vars=['landuse', 'vegetation_kext', 'land_manning_n', 'soil_compacted_fraction', 'vegetation_root_depth', 'vegetation_leaf_storage', 'vegetation_wood_storage', 'land_water_fraction', 'vegetation_crop_factor', 'vegetation_feddes_alpha_h1', 'vegetation_feddes_h1', 'vegetation_feddes_h2', 'vegetation_feddes_h3_high', 'vegetation_feddes_h3_low', 'vegetation_feddes_h4']
+2026-06-25 13:54:23,942 - hydromt.model.model - model - INFO - setup_lulcmaps.output_names_suffix=None
+2026-06-25 13:54:23,942 - hydromt.model.model - model - INFO - setup_lulcmaps.lulc_fn=globcover_2009
+2026-06-25 13:54:23,943 - hydromt.hydromt_wflow.wflow_base - wflow_base - INFO - Preparing LULC parameter maps.
+2026-06-25 13:54:23,945 - hydromt.data_catalog.sources.data_source - data_source - INFO - Reading globcover_2009 RasterDataset data from C:\Users\tromp_wm\.hydromt\artifact_data\latest\globcover.tif
+2026-06-25 13:54:23,967 - hydromt.data_catalog.sources.data_source - data_source - INFO - Reading globcover_mapping_default DataFrame data from C:\Users\tromp_wm\AppData\Local\miniforge3\envs\hydromt-wflow\Lib\site-packages\hydromt_wflow\data\lulc\v1.0\globcover_mapping.csv
+2026-06-25 13:54:23,979 - hydromt.hydromt_wflow.workflows.landuse - landuse - INFO - Deriving landuse using mode resampling (nodata=230).
+2026-06-25 13:54:24,058 - hydromt.hydromt_wflow.workflows.landuse - landuse - INFO - Deriving vegetation_kext using average resampling (nodata=-999.0).
+2026-06-25 13:54:24,083 - hydromt.hydromt_wflow.workflows.landuse - landuse - INFO - Deriving land_manning_n using average resampling (nodata=-999.0).
+2026-06-25 13:54:24,100 - hydromt.hydromt_wflow.workflows.landuse - landuse - INFO - Deriving soil_compacted_fraction using average resampling (nodata=-999.0).
+2026-06-25 13:54:24,118 - hydromt.hydromt_wflow.workflows.landuse - landuse - INFO - Deriving vegetation_root_depth using average resampling (nodata=-999.0).
+2026-06-25 13:54:24,133 - hydromt.hydromt_wflow.workflows.landuse - landuse - INFO - Deriving vegetation_leaf_storage using average resampling (nodata=-999.0).
+2026-06-25 13:54:24,150 - hydromt.hydromt_wflow.workflows.landuse - landuse - INFO - Deriving vegetation_wood_storage using average resampling (nodata=-999.0).
+2026-06-25 13:54:24,165 - hydromt.hydromt_wflow.workflows.landuse - landuse - INFO - Deriving land_water_fraction using average resampling (nodata=-999.0).
+2026-06-25 13:54:24,184 - hydromt.hydromt_wflow.workflows.landuse - landuse - INFO - Deriving vegetation_crop_factor using average resampling (nodata=-999.0).
+2026-06-25 13:54:24,204 - hydromt.hydromt_wflow.workflows.landuse - landuse - INFO - Deriving vegetation_feddes_alpha_h1 using mode resampling (nodata=-999).
+2026-06-25 13:54:24,279 - hydromt.hydromt_wflow.workflows.landuse - landuse - INFO - Deriving vegetation_feddes_h1 using average resampling (nodata=-999).
+2026-06-25 13:54:24,298 - hydromt.hydromt_wflow.workflows.landuse - landuse - INFO - Deriving vegetation_feddes_h2 using average resampling (nodata=-999).
+2026-06-25 13:54:24,317 - hydromt.hydromt_wflow.workflows.landuse - landuse - INFO - Deriving vegetation_feddes_h3_high using average resampling (nodata=-999).
+2026-06-25 13:54:24,340 - hydromt.hydromt_wflow.workflows.landuse - landuse - INFO - Deriving vegetation_feddes_h3_low using average resampling (nodata=-999).
+2026-06-25 13:54:24,359 - hydromt.hydromt_wflow.workflows.landuse - landuse - INFO - Deriving vegetation_feddes_h4 using average resampling (nodata=-999).
+2026-06-25 13:54:24,406 - hydromt.model.model - model - INFO - build: setup_laimaps
+2026-06-25 13:54:24,406 - hydromt.model.model - model - INFO - setup_laimaps.lulc_fn=None
+2026-06-25 13:54:24,407 - hydromt.model.model - model - INFO - setup_laimaps.lulc_sampling_method=any
+2026-06-25 13:54:24,407 - hydromt.model.model - model - INFO - setup_laimaps.lulc_zero_classes=[]
+2026-06-25 13:54:24,407 - hydromt.model.model - model - INFO - setup_laimaps.buffer=2
+2026-06-25 13:54:24,407 - hydromt.model.model - model - INFO - setup_laimaps.output_name=vegetation_leaf_area_index
+2026-06-25 13:54:24,407 - hydromt.model.model - model - INFO - setup_laimaps.lai_fn=modis_lai
+2026-06-25 13:54:24,407 - hydromt.hydromt_wflow.wflow_sbm - wflow_sbm - INFO - Preparing LAI maps.
+2026-06-25 13:54:24,411 - hydromt.data_catalog.sources.data_source - data_source - INFO - Reading modis_lai RasterDataset data from C:\Users\tromp_wm\.hydromt\artifact_data\latest\modis_lai.nc
+2026-06-25 13:54:24,475 - hydromt.hydromt_wflow.workflows.landuse - landuse - INFO - Deriving LAI using average resampling (nodata=nan).
+2026-06-25 13:54:24,936 - hydromt.model.model - model - INFO - build: setup_soilmaps
+2026-06-25 13:54:24,944 - hydromt.model.model - model - INFO - setup_soilmaps.soil_fn=soilgrids
+2026-06-25 13:54:24,944 - hydromt.model.model - model - INFO - setup_soilmaps.ptf_ksatver=brakensiek
+2026-06-25 13:54:24,945 - hydromt.model.model - model - INFO - setup_soilmaps.wflow_thicknesslayers=[100, 300, 800]
+2026-06-25 13:54:24,945 - hydromt.model.model - model - INFO - setup_soilmaps.output_names={'soil_water__saturated_volume_fraction': 'soil_theta_s', 'soil_water__residual_volume_fraction': 'soil_theta_r', 'soil_surface_water__vertical_saturated_hydraulic_conductivity': 'soil_ksat_vertical', 'soil__thickness': 'soil_thickness', 'soil_water__vertical_saturated_hydraulic_conductivity_scale_parameter': 'soil_f', 'soil_layer_water__brooks_corey_exponent': 'soil_brooks_corey_c'}
+2026-06-25 13:54:24,945 - hydromt.hydromt_wflow.wflow_sbm - wflow_sbm - INFO - Preparing soil parameter maps.
+2026-06-25 13:54:24,948 - hydromt.data_catalog.sources.data_source - data_source - INFO - Reading soilgrids RasterDataset data from C:\Users\tromp_wm\.hydromt\artifact_data\latest\soilgrids\{variable}.tif
+2026-06-25 13:54:25,542 - hydromt.hydromt_wflow.workflows.soilgrids - soilgrids - INFO - calculate and resample theta_s
+2026-06-25 13:54:25,720 - hydromt.hydromt_wflow.workflows.soilgrids - soilgrids - INFO - calculate and resample theta_r
+2026-06-25 13:54:25,890 - hydromt.hydromt_wflow.workflows.soilgrids - soilgrids - INFO - calculate and resample ksat_vertical 
+2026-06-25 13:54:26,088 - hydromt.hydromt_wflow.workflows.soilgrids - soilgrids - INFO - calculate and resample pore size distribution index
+2026-06-25 13:54:26,280 - hydromt.hydromt_wflow.workflows.soilgrids - soilgrids - INFO - fit z - log(ksat_vertical ) with numpy linalg regression (y = b*x) -> M_
+2026-06-25 13:54:26,461 - hydromt.hydromt_wflow.workflows.soilgrids - soilgrids - INFO - fit zi - Ksat with curve_fit (scipy.optimize) -> M
+2026-06-25 13:54:28,160 - hydromt.model.model - model - INFO - build: setup_outlets
+2026-06-25 13:54:28,161 - hydromt.model.model - model - INFO - setup_outlets.river_only=True
+2026-06-25 13:54:28,161 - hydromt.model.model - model - INFO - setup_outlets.toml_output=csv
+2026-06-25 13:54:28,161 - hydromt.model.model - model - INFO - setup_outlets.gauge_toml_header=['river_q']
+2026-06-25 13:54:28,162 - hydromt.model.model - model - INFO - setup_outlets.gauge_toml_param=['river_water__volume_flow_rate']
+2026-06-25 13:54:28,162 - hydromt.hydromt_wflow.wflow_base - wflow_base - INFO - Gauges locations set based on river outlets.
+2026-06-25 13:54:28,175 - hydromt.hydromt_wflow.wflow_base - wflow_base - INFO - Gauges map based on catchment river outlets added.
+2026-06-25 13:54:28,176 - hydromt.hydromt_wflow.wflow_base - wflow_base - INFO - Adding ['river_water__volume_flow_rate'] to csv section of toml.
+2026-06-25 13:54:28,176 - hydromt.model.model - model - INFO - build: setup_gauges
+2026-06-25 13:54:28,176 - hydromt.model.model - model - INFO - setup_gauges.index_col=None
+2026-06-25 13:54:28,177 - hydromt.model.model - model - INFO - setup_gauges.snap_to_river=True
+2026-06-25 13:54:28,177 - hydromt.model.model - model - INFO - setup_gauges.mask=None
+2026-06-25 13:54:28,177 - hydromt.model.model - model - INFO - setup_gauges.snap_uparea=False
+2026-06-25 13:54:28,178 - hydromt.model.model - model - INFO - setup_gauges.max_dist=10000.0
+2026-06-25 13:54:28,179 - hydromt.model.model - model - INFO - setup_gauges.wdw=3
+2026-06-25 13:54:28,180 - hydromt.model.model - model - INFO - setup_gauges.rel_error=0.05
+2026-06-25 13:54:28,180 - hydromt.model.model - model - INFO - setup_gauges.abs_error=50.0
+2026-06-25 13:54:28,180 - hydromt.model.model - model - INFO - setup_gauges.fillna=False
+2026-06-25 13:54:28,180 - hydromt.model.model - model - INFO - setup_gauges.derive_subcatch=False
+2026-06-25 13:54:28,180 - hydromt.model.model - model - INFO - setup_gauges.basename=None
+2026-06-25 13:54:28,181 - hydromt.model.model - model - INFO - setup_gauges.toml_output=csv
+2026-06-25 13:54:28,181 - hydromt.model.model - model - INFO - setup_gauges.gauge_toml_header=['river_q', 'precip']
+2026-06-25 13:54:28,181 - hydromt.model.model - model - INFO - setup_gauges.gauge_toml_param=['river_water__volume_flow_rate', 'atmosphere_water__precipitation_volume_flux']
+2026-06-25 13:54:28,181 - hydromt.model.model - model - INFO - setup_gauges.gauges_fn=grdc
+2026-06-25 13:54:28,181 - hydromt.data_catalog.sources.data_source - data_source - INFO - Reading grdc GeoDataFrame data from C:\Users\tromp_wm\.hydromt\artifact_data\latest\grdc.csv
+2026-06-25 13:54:28,190 - hydromt.hydromt_wflow.wflow_base - wflow_base - INFO - 3 grdc gauge locations found within domain
+2026-06-25 13:54:28,245 - hydromt.hydromt_wflow.wflow_base - wflow_base - INFO - Adding ['river_water__volume_flow_rate', 'atmosphere_water__precipitation_volume_flux'] to csv section of toml.
+2026-06-25 13:54:28,245 - hydromt.model.model - model - INFO - build: setup_precip_forcing
+2026-06-25 13:54:28,246 - hydromt.model.model - model - INFO - setup_precip_forcing.precip_clim_fn=None
+2026-06-25 13:54:28,246 - hydromt.model.model - model - INFO - setup_precip_forcing.chunksize=None
+2026-06-25 13:54:28,246 - hydromt.model.model - model - INFO - setup_precip_forcing.precip_fn=era5
+2026-06-25 13:54:28,249 - hydromt.data_catalog.sources.data_source - data_source - INFO - Reading era5 RasterDataset data from C:\Users\tromp_wm\.hydromt\artifact_data\latest\era5.nc
+2026-06-25 13:54:28,268 - hydromt.data_catalog.adapters.adapter_utils - adapter_utils - WARNING - Requested time range (2010-01-01 00:00:00, 2010-03-31 00:00:00) partially overlaps with available range '2010-02-02 00:00:00' to '2010-02-15 00:00:00'. Clamping to (2010-02-02 00:00:00, 2010-02-15 00:00:00).
+2026-06-25 13:54:28,330 - hydromt.model.model - model - INFO - build: setup_temp_pet_forcing
+2026-06-25 13:54:28,331 - hydromt.model.model - model - INFO - setup_temp_pet_forcing.pet_method=debruin
+2026-06-25 13:54:28,332 - hydromt.model.model - model - INFO - setup_temp_pet_forcing.press_correction=True
+2026-06-25 13:54:28,332 - hydromt.model.model - model - INFO - setup_temp_pet_forcing.temp_correction=True
+2026-06-25 13:54:28,332 - hydromt.model.model - model - INFO - setup_temp_pet_forcing.wind_correction=True
+2026-06-25 13:54:28,332 - hydromt.model.model - model - INFO - setup_temp_pet_forcing.wind_altitude=10
+2026-06-25 13:54:28,333 - hydromt.model.model - model - INFO - setup_temp_pet_forcing.reproj_method=nearest_index
+2026-06-25 13:54:28,333 - hydromt.model.model - model - INFO - setup_temp_pet_forcing.fillna_method=None
+2026-06-25 13:54:28,333 - hydromt.model.model - model - INFO - setup_temp_pet_forcing.dem_forcing_fn=era5_orography
+2026-06-25 13:54:28,334 - hydromt.model.model - model - INFO - setup_temp_pet_forcing.skip_pet=False
+2026-06-25 13:54:28,334 - hydromt.model.model - model - INFO - setup_temp_pet_forcing.chunksize=None
+2026-06-25 13:54:28,334 - hydromt.model.model - model - INFO - setup_temp_pet_forcing.temp_pet_fn=era5
+2026-06-25 13:54:28,337 - hydromt.data_catalog.sources.data_source - data_source - INFO - Reading era5 RasterDataset data from C:\Users\tromp_wm\.hydromt\artifact_data\latest\era5.nc
+2026-06-25 13:54:28,356 - hydromt.data_catalog.adapters.adapter_utils - adapter_utils - WARNING - Requested time range (2010-01-01 00:00:00, 2010-03-31 00:00:00) partially overlaps with available range '2010-02-02 00:00:00' to '2010-02-15 00:00:00'. Clamping to (2010-02-02 00:00:00, 2010-02-15 00:00:00).
+2026-06-25 13:54:28,398 - hydromt.data_catalog.sources.data_source - data_source - INFO - Reading era5_orography RasterDataset data from C:\Users\tromp_wm\.hydromt\artifact_data\latest\era5_orography.nc
+2026-06-25 13:54:28,620 - hydromt.model.model - model - INFO - build: setup_constant_pars
+2026-06-25 13:54:28,620 - hydromt.model.model - model - INFO - setup_constant_pars.subsurface_water__horizontal_to_vertical_saturated_hydraulic_conductivity_ratio=100
+2026-06-25 13:54:28,621 - hydromt.model.model - model - INFO - setup_constant_pars.snowpack__degree_day_coefficient=3.75653
+2026-06-25 13:54:28,621 - hydromt.model.model - model - INFO - setup_constant_pars.soil_surface_water__infiltration_reduction_parameter=0.038
+2026-06-25 13:54:28,621 - hydromt.model.model - model - INFO - setup_constant_pars.vegetation_canopy_water__mean_evaporation_to_mean_precipitation_ratio=0.11
+2026-06-25 13:54:28,622 - hydromt.model.model - model - INFO - setup_constant_pars.compacted_soil_surface_water__infiltration_capacity=10
+2026-06-25 13:54:28,622 - hydromt.model.model - model - INFO - setup_constant_pars.soil_water_saturated_zone_bottom__max_leakage_volume_flux=0
+2026-06-25 13:54:28,622 - hydromt.model.model - model - INFO - setup_constant_pars.soil_wet_root__sigmoid_function_shape_parameter=-500
+2026-06-25 13:54:28,622 - hydromt.model.model - model - INFO - setup_constant_pars.atmosphere_air__snowfall_temperature_threshold=0
+2026-06-25 13:54:28,622 - hydromt.model.model - model - INFO - setup_constant_pars.atmosphere_air__snowfall_temperature_interval=2
+2026-06-25 13:54:28,622 - hydromt.model.model - model - INFO - setup_constant_pars.snowpack__melting_temperature_threshold=0
+2026-06-25 13:54:28,622 - hydromt.model.model - model - INFO - setup_constant_pars.snowpack__liquid_water_holding_capacity=0.1
+2026-06-25 13:54:28,622 - hydromt.model.model - model - INFO - setup_constant_pars.glacier_ice__degree_day_coefficient=3
+2026-06-25 13:54:28,622 - hydromt.model.model - model - INFO - setup_constant_pars.glacier_firn_accumulation__snowpack_dry_snow_leq_depth_fraction=0.001
+2026-06-25 13:54:28,623 - hydromt.model.model - model - INFO - setup_constant_pars.glacier_ice__melting_temperature_threshold=0
+2026-06-25 13:54:28,623 - hydromt.hydromt_wflow.wflow_base - wflow_base - INFO - Write model data to C:\Users\tromp_wm\OneDrive - Stichting Deltares\Documents\WFLOW Emulator\WflowRoutingGNN\test_data\test_model
+2026-06-25 13:54:28,638 - hydromt.model.components.grid - grid - INFO - wflow_sbm.staticmaps: Writing grid data to C:\Users\tromp_wm\OneDrive - Stichting Deltares\Documents\WFLOW Emulator\WflowRoutingGNN\test_data\test_model\staticmaps.nc.
+2026-06-25 13:54:28,761 - hydromt.model.components.spatial - spatial - INFO - wflow_sbm.staticmaps: Writing region to C:\Users\tromp_wm\OneDrive - Stichting Deltares\Documents\WFLOW Emulator\WflowRoutingGNN\test_data\test_model\staticgeoms\region.geojson.
+2026-06-25 13:54:28,811 - hydromt.model.components.geoms - geoms - INFO - wflow_sbm.geoms: Writing geoms to C:\Users\tromp_wm\OneDrive - Stichting Deltares\Documents\WFLOW Emulator\WflowRoutingGNN\test_data\test_model\staticgeoms\meta_basins_highres.geojson.
+2026-06-25 13:54:28,833 - hydromt.model.components.geoms - geoms - INFO - wflow_sbm.geoms: Writing geoms to C:\Users\tromp_wm\OneDrive - Stichting Deltares\Documents\WFLOW Emulator\WflowRoutingGNN\test_data\test_model\staticgeoms\basins.geojson.
+2026-06-25 13:54:28,841 - hydromt.model.components.geoms - geoms - INFO - wflow_sbm.geoms: Writing geoms to C:\Users\tromp_wm\OneDrive - Stichting Deltares\Documents\WFLOW Emulator\WflowRoutingGNN\test_data\test_model\staticgeoms\rivers.geojson.
+2026-06-25 13:54:28,855 - hydromt.model.components.geoms - geoms - INFO - wflow_sbm.geoms: Writing geoms to C:\Users\tromp_wm\OneDrive - Stichting Deltares\Documents\WFLOW Emulator\WflowRoutingGNN\test_data\test_model\staticgeoms\glaciers.geojson.
+2026-06-25 13:54:28,892 - hydromt.model.components.geoms - geoms - INFO - wflow_sbm.geoms: Writing geoms to C:\Users\tromp_wm\OneDrive - Stichting Deltares\Documents\WFLOW Emulator\WflowRoutingGNN\test_data\test_model\staticgeoms\outlets.geojson.
+2026-06-25 13:54:28,899 - hydromt.model.components.geoms - geoms - INFO - wflow_sbm.geoms: Writing geoms to C:\Users\tromp_wm\OneDrive - Stichting Deltares\Documents\WFLOW Emulator\WflowRoutingGNN\test_data\test_model\staticgeoms\gauges_grdc.geojson.
+2026-06-25 13:54:28,909 - hydromt.hydromt_wflow.components.forcing - forcing - INFO - Write forcing file
+2026-06-25 13:54:28,910 - hydromt.hydromt_wflow.components.forcing - forcing - WARNING - Start time 2010-01-01T00:00:00.000000 does not match the beginning of the data. Changing to start of the data: 2010-02-02T00:00:00.000000000.
+2026-06-25 13:54:28,910 - hydromt.hydromt_wflow.components.forcing - forcing - WARNING - End time 2010-03-31T00:00:00.000000 does not match the end of the data. Changing to end of the data: 2010-02-15T00:00:00.000000000.
+2026-06-25 13:54:28,913 - hydromt.hydromt_wflow.components.forcing - forcing - INFO - Writing file C:/Users/tromp_wm/OneDrive - Stichting Deltares/Documents/WFLOW Emulator/WflowRoutingGNN/test_data/test_model/inmaps-era5-2010.nc
+2026-06-25 13:54:29,043 - hydromt.model.components.tables - tables - INFO - wflow_sbm.tables: No tables found, skip writing.
+2026-06-25 13:54:29,045 - hydromt.model.components.grid - grid - INFO - wflow_sbm.states: No grid data found, skip writing.
+2026-06-25 13:54:29,047 - hydromt.hydromt_wflow.components.config - config - INFO - Writing model config to C:/Users/tromp_wm/OneDrive - Stichting Deltares/Documents/WFLOW Emulator/WflowRoutingGNN/test_data/test_model/wflow_sbm.toml.
