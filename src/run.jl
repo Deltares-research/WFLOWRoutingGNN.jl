@@ -96,7 +96,7 @@ function run_wflow_gnn_from_toml(toml_path::String)
         end,
     )
 
-    return run_wflow_gnn(ds, ms, ts)
+    return first(run_wflow_gnn(ds, ms, ts))
 end
 
 """
@@ -121,7 +121,13 @@ Steps:
            val.jld2
            test.jld2
 
-Returns the trained model.
+Returns `(model, metrics)` where `metrics` is a `NamedTuple` with fields:
+- `final_train_loss`            : rollout train loss at the last epoch
+- `final_val_loss`              : rollout val loss at the last epoch
+- `n_params`                    : total number of trainable model parameters
+- `train_duration_s`            : wall-clock seconds spent in `train_model!`
+- `val_rollout_duration_s`      : wall-clock seconds spent on the val trajectory rollout
+- `val_n_timesteps`             : number of timesteps in the val trajectory
 """
 function run_wflow_gnn(ds::DataSettings, ms::ModelSettings, ts::TrainSettings)
 
@@ -153,8 +159,10 @@ function run_wflow_gnn(ds::DataSettings, ms::ModelSettings, ts::TrainSettings)
     @info "Training model"
     dev_fn = ts.device == :gpu ? Flux.gpu : identity
     model  = dev_fn(WflowGNN(ms))
-    train_rollout, val_rollout, train_1step, val_1step =
-        train_model!(model, train_loader, val_loader, ts)
+    train_duration = @elapsed begin
+        train_rollout, val_rollout, train_1step, val_1step =
+            train_model!(model, train_loader, val_loader, ts)
+    end
 
     # --- 5. Persist artefacts ---
     @info "Saving artefacts to $(joinpath(ds.runs_dir, ds.run_name))"
@@ -199,14 +207,23 @@ function run_wflow_gnn(ds::DataSettings, ms::ModelSettings, ts::TrainSettings)
     @info "Evaluating train and val trajectories"
     all_times = NCDataset(output_file, "r") do ds; ds["time"][:]; end
     cpu_model = Flux.cpu(model)
+    n_params  = sum(length, Flux.trainables(cpu_model))
+
+    val_rollout_duration = 0.0
+    val_n_timesteps      = 0
 
     for (split_name, split_data, t_offset) in (
             ("train", dataset.train, 0),
             ("val",   dataset.val,   length(dataset.train)))
 
+        t0 = time_ns()
         p_states, t_states = evaluate_trajectory(
             cpu_model, split_data, norm_stats, ms.domain;
             device = :cpu, postscale)
+        if split_name == "val"
+            val_rollout_duration = (time_ns() - t0) / 1e9
+            val_n_timesteps      = size(p_states, 3)
+        end
         p_grids = regrid(p_states, grid, ms.domain)
         t_grids = regrid(t_states, grid, ms.domain)
 
@@ -269,5 +286,13 @@ function run_wflow_gnn(ds::DataSettings, ms::ModelSettings, ts::TrainSettings)
         end
     end
 
-    return model
+    metrics = (
+        final_train_loss           = last(train_rollout),
+        final_val_loss             = last(val_rollout),
+        n_params                   = n_params,
+        train_duration_s           = train_duration,
+        val_rollout_duration_s     = val_rollout_duration,
+        val_n_timesteps            = val_n_timesteps,
+    )
+    return model, metrics
 end

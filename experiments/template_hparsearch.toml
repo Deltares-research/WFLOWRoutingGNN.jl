@@ -1,0 +1,95 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# WflowRoutingGNN hyperparameter search configuration
+#
+# Relative paths are resolved relative to the directory containing this file.
+# Launch a search with:
+#   julia --project=<repo_root> scripts/hparsearch.jl experiments/template_hparsearch.toml
+#
+# The [data], [model], and [train] tables define the base configuration that is
+# shared across all runs.  The [hparsearch] table defines which parameters are
+# varied and what values to try.
+#
+# For each combination in the search space, [data].run_name is automatically
+# suffixed with a zero-padded index (e.g. "template_hps_run_hps01") and all
+# outputs are written to a separate subfolder under runs_dir.
+#
+# After all runs complete, a summary CSV is written to:
+#   <runs_dir>/<run_name>_hps_results.csv
+# ──────────────────────────────────────────────────────────────────────────────
+
+[data]
+# Base name for this search; each run is named <run_name>_hpsXX
+run_name         = "template_hps_run"
+
+# Root directory for all run outputs (relative to this file's directory)
+runs_dir         = "../runs"
+
+# Path to the wflow model directory.
+# Must contain staticmaps.nc and run_default/output.nc
+wflow_model_path = "../wflow_model/wflow_test_full"
+
+# Fraction of sliding windows used for training
+train_frac = 0.6
+
+# Fraction of sliding windows used for validation (remainder → test)
+val_frac   = 0.2
+
+
+[model]
+# Base model settings — individual values may be overridden by [hparsearch]
+domain = "river"
+
+hidden_dim = 64
+
+nlayers = 3
+
+enc_activation  = "swish"
+proc_activation = "swish"
+
+
+[train]
+# Base training settings — individual values may be overridden by [hparsearch]
+epochs = 50
+
+batch_size = 8
+
+lr_start = 1e-3
+lr_final = 1e-5
+lr_steps = 10
+
+device = "cpu"
+
+[train.strategy]
+steps       = [1, 2, 4]
+durations   = [15, 15, 20]
+noise_scale = 0.0
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Hyperparameter search settings
+# ──────────────────────────────────────────────────────────────────────────────
+
+[hparsearch]
+# Search strategy.  Currently only "box" is supported, which evaluates every
+# Cartesian-product combination of the values in search_space.
+search_type = "box"
+
+[hparsearch.search_space]
+# Each key is a dot-separated path into the [data] / [model] / [train] tables
+# above.  Each value is the list of settings to try.
+
+# Architecture size
+"model.hidden_dim" = [32, 64, 128]
+"model.nlayers"    = [2, 3]
+
+# Learning rate
+"train.lr_start" = [1e-3, 5e-4]
+
+# Training strategy — vary the entire schedule as an array of dicts so that
+# steps and durations are always kept consistent with each other.
+# (Comment out the two scalar keys above and uncomment this block to use it.)
+# "train.strategy" = [
+#     {steps = [1],       durations = [50],         noise_scale = 0.0},
+#     {steps = [1, 2],    durations = [25, 25],      noise_scale = 0.0},
+#     {steps = [1, 2, 4], durations = [15, 15, 20],  noise_scale = 0.0},
+# ]

@@ -30,3 +30,4 @@ JuliaLocalPreferences.toml
 models/*
 experiments/*
 !experiments/template.toml
+!experiments/template_hparsearch.toml

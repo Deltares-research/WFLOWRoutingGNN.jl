@@ -19,6 +19,9 @@ export TrainSettings, save_train_settings, load_train_settings, train_model!
 include("run.jl")
 export run_wflow_gnn, run_wflow_gnn_from_toml
 
+include("hparsearch.jl")
+export HParSearchSettings, save_hpar_search_settings, load_hpar_search_settings, hpar_search
+
 include("plot.jl")
 export plot_losses, plot_validation_movie, plot_timeseries, plot_downstream_timeseries
 
