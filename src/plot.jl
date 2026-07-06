@@ -147,10 +147,17 @@ function plot_validation_movie(
         for vn in state_vars
     ]
 
+    n_ticks_err  = min(T, 6)
+    tick_idx_err = unique(round.(Int, range(1, T; length = n_ticks_err)))
     err_ax = Axis(fig[nvars + 1, 1:3];
-                  title  = "Mean (pred−truth)/truth over graph nodes",
-                  xlabel = isnothing(timestamps) ? "Timestep" : "Time",
-                  ylabel = "Mean relative error")
+                  title              = "Mean (pred−truth)/truth over graph nodes",
+                  xlabel             = isnothing(timestamps) ? "Timestep" : "Time",
+                  ylabel             = "Mean relative error",
+                  xticklabelrotation = isnothing(timestamps) ? 0.0 : π/4,
+                  xticklabelalign    = isnothing(timestamps) ?
+                                       (:center, :top) : (:right, :top),
+                  xticks             = isnothing(timestamps) ? Makie.automatic :
+                                       (tick_idx_err, string.(timestamps[tick_idx_err])))
 
     palette = cgrad(:tab10; categorical = true)
     for (vi, vname) in enumerate(state_vars)
@@ -201,7 +208,8 @@ function plot_timeseries(
         domain     :: String,
         row        :: Int,
         col        :: Int;
-        path       = nothing)
+        path       = nothing,
+        timestamps = nothing)
 
     state_vars = DOMAIN_VARS[domain]["state"]
     isempty(state_vars) && throw(ArgumentError("domain \"$domain\" has no state variables"))
@@ -220,9 +228,17 @@ function plot_timeseries(
 
         # --- timeseries panel ---
         ax_ts = Axis(fig[vi, 1];
-                     title  = "$vname  —  cell ($row, $col)",
-                     xlabel = "Timestep",
-                     ylabel = vname)
+                     title                = "$vname  —  cell ($row, $col)",
+                     xlabel               = isnothing(timestamps) ? "Timestep" : "Time",
+                     ylabel               = vname,
+                     xticklabelrotation   = isnothing(timestamps) ? 0.0 : π/4,
+                     xticklabelalign      = isnothing(timestamps) ?
+                                            (:center, :top) : (:right, :top))
+        if !isnothing(timestamps)
+            n_ticks    = min(T, 6)
+            tick_idx   = unique(round.(Int, range(1, T; length = n_ticks)))
+            ax_ts.xticks = (tick_idx, string.(timestamps[tick_idx]))
+        end
         lines!(ax_ts, ts, truth; label = "truth",      color = :steelblue)
         lines!(ax_ts, ts, pred;  label = "prediction", color = :orangered,
                linestyle = :dash)
@@ -279,7 +295,8 @@ function plot_downstream_timeseries(
         domain        :: String,
         grid          :: NamedTuple,
         upstream_area :: AbstractVector{<:Real};
-        path          = nothing)
+        path          = nothing,
+        timestamps    = nothing)
 
     # Most downstream node = largest upstream catchment area (ignore NaN)
     outlet_idx = argmax(i -> isnan(upstream_area[i]) ? -Inf : upstream_area[i],
@@ -288,5 +305,5 @@ function plot_downstream_timeseries(
     row = grid.rows[outlet_idx]
     col = grid.cols[outlet_idx]
 
-    return plot_timeseries(pred_grids, true_grids, domain, row, col; path)
+    return plot_timeseries(pred_grids, true_grids, domain, row, col; path, timestamps)
 end

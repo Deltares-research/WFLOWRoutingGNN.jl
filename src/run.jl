@@ -244,7 +244,8 @@ function run_wflow_gnn(ds::DataSettings, ms::ModelSettings, ts::TrainSettings)
 
             plot_downstream_timeseries(p_grids, t_grids, ms.domain, grid,
                                        postscale["river_q"];  # upstream area per node
-                                       path = joinpath(run_dir, "downstream_timeseries.png"))
+                                       path       = joinpath(run_dir, "downstream_timeseries.png"),
+                                       timestamps = split_times)
 
             # Optional date-range rollout on the validation split
             if !isnothing(ts.val_daterange)
@@ -269,7 +270,6 @@ function run_wflow_gnn(ds::DataSettings, ms::ModelSettings, ts::TrainSettings)
                     @warn "val_daterange $dr_start – $dr_stop does not overlap the val split; skipping"
                 else
                     dr_split = split_data[w_start:w_stop]
-                    dr_times = val_graph_times[w_start:w_stop]
 
                     dr_p_states, dr_t_states = evaluate_trajectory(
                         cpu_model, dr_split, norm_stats, ms.domain;
@@ -277,10 +277,17 @@ function run_wflow_gnn(ds::DataSettings, ms::ModelSettings, ts::TrainSettings)
                     dr_p_grids = regrid(dr_p_states, grid, ms.domain)
                     dr_t_grids = regrid(dr_t_states, grid, ms.domain)
 
+                    # evaluate_trajectory flattens windows into a consecutive sequence
+                    # and returns nhorizon + n_windows - 2 frames — more than n_windows.
+                    # Derive timestamps directly from all_times for the exact frame count.
+                    n_dr_frames   = size(dr_p_states, 3)
+                    dr_pred_times = [all_times[clamp(n_train_w + w_start + i, 1, length(all_times))]
+                                     for i in 1:n_dr_frames]
+
                     plot_validation_movie(dr_p_grids, dr_t_grids, ms.domain;
                                           path       = joinpath(run_dir, "validation_daterange.mp4"),
                                           framerate  = 10,
-                                          timestamps = dr_times)
+                                          timestamps = dr_pred_times)
                 end
             end
         end
