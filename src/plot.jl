@@ -212,20 +212,39 @@ function plot_timeseries(
     all(isnan, true_grids[state_vars[1]][row, col, :]) &&
         @warn "Cell ($row, $col) is inactive (all NaN); plot will be empty"
 
-    fig = Figure(size = (800, 300 * nvars))
+    fig = Figure(size = (1200, 300 * nvars))
 
     for (vi, vname) in enumerate(state_vars)
         truth = true_grids[vname][row, col, :]
         pred  = pred_grids[vname][row, col, :]
 
-        ax = Axis(fig[vi, 1];
-                  title  = "$vname  —  cell ($row, $col)",
-                  xlabel = "Timestep",
-                  ylabel = vname)
-        lines!(ax, ts, truth; label = "truth",      color = :steelblue)
-        lines!(ax, ts, pred;  label = "prediction", color = :orangered,
+        # --- timeseries panel ---
+        ax_ts = Axis(fig[vi, 1];
+                     title  = "$vname  —  cell ($row, $col)",
+                     xlabel = "Timestep",
+                     ylabel = vname)
+        lines!(ax_ts, ts, truth; label = "truth",      color = :steelblue)
+        lines!(ax_ts, ts, pred;  label = "prediction", color = :orangered,
                linestyle = :dash)
-        axislegend(ax; position = :rt)
+        axislegend(ax_ts; position = :rt)
+
+        # --- pred vs truth scatter panel ---
+        mask        = isfinite.(truth) .& isfinite.(pred)
+        truth_valid = truth[mask]
+        pred_valid  = pred[mask]
+
+        ax_sc = Axis(fig[vi, 2];
+                     title  = "$vname  —  pred vs truth",
+                     xlabel = "truth",
+                     ylabel = "prediction",
+                     aspect = 1)
+        if !isempty(truth_valid)
+            scatter!(ax_sc, truth_valid, pred_valid;
+                     color = (:steelblue, 0.4), markersize = 4)
+            lo = min(minimum(truth_valid), minimum(pred_valid))
+            hi = max(maximum(truth_valid), maximum(pred_valid))
+            lines!(ax_sc, [lo, hi], [lo, hi]; color = :black, linewidth = 1.5)
+        end
     end
 
     isnothing(path) || save(path, fig)
