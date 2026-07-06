@@ -111,9 +111,9 @@ Fields (all per-node constants, not optimised):
 - `μ_inwater`, `σ_inwater` : z-score statistics of river_inwater
 - `dt`            : model timestep in seconds
 """
-struct MassBalanceLayer
-    postscale_q  :: Vector{Float32}
-    postscale_h  :: Vector{Float32}
+struct MassBalanceLayer{V <: AbstractVector{Float32}}
+    postscale_q  :: V
+    postscale_h  :: V
     μ_q          :: Float32
     σ_q          :: Float32
     μ_h          :: Float32
