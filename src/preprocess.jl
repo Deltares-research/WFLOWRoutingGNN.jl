@@ -1,4 +1,5 @@
 import TOML
+import Dates
 using NCDatasets
 using GraphNeuralNetworks
 using MLUtils
@@ -442,6 +443,22 @@ end
 # Vector{GNNGraph} where each element is a batched GNNGraph.
 MLUtils.batch(windows::AbstractVector{<:Vector{<:GNNGraph}}) =
     [GNNGraphs.batch([w[t] for w in windows]) for t in 1:length(windows[1])]
+
+"""
+    get_timestep(output_file) -> Float32
+
+Return the model timestep in seconds by reading two consecutive timestamps
+from the `time` variable in `output_file` (a CF-convention NetCDF file).
+"""
+function get_timestep(output_file::String)
+    NCDataset(output_file, "r") do ds
+        times = ds["time"][:]
+        length(times) >= 2 ||
+            throw(ArgumentError("output file must contain at least 2 timesteps"))
+        # DateTime subtraction returns Dates.Millisecond on all Julia versions
+        Float32(Dates.value(times[2] - times[1]) / 1000)
+    end
+end
 
 # ---------------------------------------------------------------------------
 # DataSettings

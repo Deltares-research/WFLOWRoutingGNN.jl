@@ -158,7 +158,23 @@ function run_wflow_gnn(ds::DataSettings, ms::ModelSettings, ts::TrainSettings)
     # --- 4. Build model and train ---
     @info "Training model"
     dev_fn = ts.device == :gpu ? Flux.gpu : identity
-    model  = dev_fn(WflowGNN(ms))
+    if ms.domain == "river"
+        dt = get_timestep(output_file)
+        mb = MassBalanceLayer(
+            postscale["river_q"],
+            postscale["river_h"],
+            Float32(norm_stats["river_q"].mean),
+            Float32(norm_stats["river_q"].std),
+            Float32(norm_stats["river_h"].mean),
+            Float32(norm_stats["river_h"].std),
+            Float32(norm_stats["river_inwater"].mean),
+            Float32(norm_stats["river_inwater"].std),
+            dt,
+        )
+        model = dev_fn(WflowGNN(ms, mb))
+    else
+        model = dev_fn(WflowGNN(ms))
+    end
     train_duration = @elapsed begin
         train_rollout, val_rollout, train_1step, val_1step =
             train_model!(model, train_loader, val_loader, ts)
