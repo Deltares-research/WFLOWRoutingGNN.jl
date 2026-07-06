@@ -110,6 +110,7 @@ function plot_validation_movie(
         valid_rel = filter(!isnan, vec(rel_err_all))
         emax = isempty(valid_rel) ? 1f0 : maximum(abs, valid_rel)
         emax = emax == 0f0 ? 1f0 : emax
+        emax = min(emax, 1f2)  # cap at 100% for better colour contrast
 
         tg_obs = @lift(tg[:, :, $t_obs])
         pg_obs = @lift(pg[:, :, $t_obs])
@@ -139,7 +140,7 @@ function plot_validation_movie(
                                 let t_ = true_grids[vn][k, t], p_ = pred_grids[vn][k, t]
                                     (isnan(t_) || t_ == 0f0) ? NaN32 : (p_ - t_) / t_
                                 end
-                                for k in eachindex(view(true_grids[vn], :, :, 1))])
+                                for k in CartesianIndices(view(true_grids[vn], :, :, 1))])
                     isempty(vals) ? NaN32 : mean(vals)
                 end
                 for t in 1:T]

@@ -28,6 +28,12 @@ LocalPreferences.toml
 JuliaLocalPreferences.toml
 
 models/*
+
 experiments/*
 !experiments/template.toml
+
+slurm_logs/*
+
+scripts/test_gpu.jl
+test_gpu.sh
 !experiments/template_hparsearch.toml
