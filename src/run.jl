@@ -304,6 +304,11 @@ function run_wflow_gnn(ds::DataSettings, ms::ModelSettings, ts::TrainSettings)
                                           path       = joinpath(run_dir, "validation_daterange.mp4"),
                                           framerate  = 10,
                                           timestamps = dr_pred_times)
+
+                    plot_downstream_timeseries(dr_p_grids, dr_t_grids, ms.domain, grid,
+                                               postscale["river_q"];
+                                               path       = joinpath(run_dir, "downstream_timeseries_daterange.png"),
+                                               timestamps = dr_pred_times)
                 end
             end
         end
