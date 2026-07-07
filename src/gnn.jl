@@ -172,6 +172,9 @@ function (l::MassBalanceLayer)(g      ::GNNGraph,
     h_phys_new = h_phys_curr .+
                  l.dt .* (ph ./ pq) .* (upstream_q .+ inwater_phys .- q_phys_new)
 
+    # Water depth cannot be negative (dry-channel floor)
+    h_phys_new = max.(0f0, h_phys_new)
+
     # Re-normalise:  scaled_h = h_phys / postscale_h  →  norm_h = (scaled_h - μ_h) / σ_h
     return (h_phys_new ./ ph .- l.μ_h) ./ l.σ_h
 end
@@ -286,9 +289,14 @@ function (m::WflowGNN)(g::GNNGraph,
     if isnothing(m.mass_balance)
         return state .+ Δ
     else
-        # Δ is (1, n_nodes): predicted Δq
-        q_new = state[1:1, :] .+ Δ
-        h_new = m.mass_balance(g, state, forcing, q_new)
+        # Δ is (1, n_nodes): predicted Δq.
+        # h_new is derived analytically from the mass balance; its gradient is
+        # blocked so that the h MSE does not flow back through q and overwhelm
+        # the q training signal with a factor of dt (~3600 s).
+        q_new = max.(0f0, state[1:1, :] .+ Δ)
+        h_new = Flux.ignore_derivatives() do
+            m.mass_balance(g, state, forcing, q_new)
+        end
         return vcat(q_new, h_new)
     end
 end
