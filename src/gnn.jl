@@ -153,8 +153,9 @@ function (l::MassBalanceLayer)(g      ::GNNGraph,
     ph = reshape(repeat(l.postscale_h, n_rep), 1, n)
 
     # Physical discharge at current and predicted timesteps  [m³/s]
+    # q_phys_new is floored at 0 in physical space (z-scored 0 ≠ physical 0).
     q_phys_curr = pq .* (state[1:1, :]  .* l.σ_q .+ l.μ_q)
-    q_phys_new  = pq .* (q_norm_new     .* l.σ_q .+ l.μ_q)
+    q_phys_new  = max.(0f0, pq .* (q_norm_new .* l.σ_q .+ l.μ_q))
 
     # Lateral inflow  [m³/s]  (row 1 = river_inwater)
     inwater_phys = forcing[1:1, :] .* l.σ_inwater .+ l.μ_inwater
@@ -293,7 +294,7 @@ function (m::WflowGNN)(g::GNNGraph,
         # h_new is derived analytically from the mass balance; its gradient is
         # blocked so that the h MSE does not flow back through q and overwhelm
         # the q training signal with a factor of dt (~3600 s).
-        q_new = max.(0f0, state[1:1, :] .+ Δ)
+        q_new = state[1:1, :] .+ Δ
         h_new = Flux.ignore_derivatives() do
             m.mass_balance(g, state, forcing, q_new)
         end
