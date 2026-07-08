@@ -328,3 +328,98 @@ function plot_downstream_timeseries(
 
     return plot_timeseries(pred_grids, true_grids, domain, row, col; path, timestamps)
 end
+
+"""
+    plot_mb_diagnostics(diags; path=nothing, timestamps=nothing) -> Figure
+
+Plot mass-balance diagnostic terms over the validation rollout timeseries.
+`diags` is the NamedTuple returned by `rollout_mb_diagnostics`.
+
+Four rows:
+1. Predicted vs true Q (median ± 10th–90th percentile over nodes).
+2. Predicted H, true H, and MB-with-true-Q verification line.
+3. Flux terms: upstream Q, lateral inflow, predicted Q_out, net flux.
+4. h_raw before the ≥0 floor (median) + fraction of nodes where h_raw < 0.
+
+The verification line in row 2 answers whether the equation itself is correct:
+if `MB(true Q)` ≈ `true H`, the formulation is sound.
+"""
+function plot_mb_diagnostics(diags; path=nothing, timestamps=nothing)
+    T  = size(diags.pred_q, 2)
+    xs = 1:T
+
+    function pct(m, lo=10, hi=90)
+        med = vec(median(m, dims=1))
+        lo_ = Float32[quantile(view(m, :, t), lo/100) for t in 1:T]
+        hi_ = Float32[quantile(view(m, :, t), hi/100) for t in 1:T]
+        med, lo_, hi_
+    end
+
+    function dticks!(ax)
+        isnothing(timestamps) && return
+        idxs = round.(Int, range(1, T; length = min(6, T)))
+        ax.xticks = (idxs, string.(timestamps[idxs]))
+        ax.xticklabelrotation = π/4
+    end
+
+    fig = Figure(size = (1000, 950))
+    Label(fig[0, 1], "Mass balance diagnostics"; fontsize = 14, font = :bold)
+
+    # Row 1: Q
+    ax1 = Axis(fig[1, 1]; title = "Discharge Q [m³/s]",
+               xlabel = "timestep", ylabel = "m³/s")
+    pq_med, pq_lo, pq_hi = pct(diags.pred_q)
+    tq_med, tq_lo, tq_hi = pct(diags.true_q)
+    band!(ax1, xs, pq_lo, pq_hi; color = (:steelblue, 0.25))
+    lines!(ax1, xs, pq_med; color = :steelblue,  label = "pred (p10–p90)")
+    band!(ax1, xs, tq_lo, tq_hi; color = (:orangered, 0.25))
+    lines!(ax1, xs, tq_med; color = :orangered,  label = "true")
+    axislegend(ax1; position = :rt); dticks!(ax1)
+
+    # Row 2: H + verification
+    ax2 = Axis(fig[2, 1]; title = "Water depth H [m]  |  green-dashed = MB(true Q)",
+               xlabel = "timestep", ylabel = "m")
+    ph_med, ph_lo, ph_hi = pct(diags.pred_h)
+    th_med, th_lo, th_hi = pct(diags.true_h)
+    mv_med, mv_lo, mv_hi = pct(diags.mb_verify_h)
+    band!(ax2, xs, ph_lo, ph_hi; color = (:steelblue,   0.25))
+    lines!(ax2, xs, ph_med; color = :steelblue,   label = "pred H")
+    band!(ax2, xs, th_lo, th_hi; color = (:orangered,   0.25))
+    lines!(ax2, xs, th_med; color = :orangered,   label = "true H")
+    band!(ax2, xs, mv_lo, mv_hi; color = (:forestgreen, 0.20))
+    lines!(ax2, xs, mv_med; color = :forestgreen, linestyle = :dash,
+           label = "MB(true Q)")
+    axislegend(ax2; position = :rt); dticks!(ax2)
+
+    # Row 3: flux terms
+    ax3 = Axis(fig[3, 1]; title = "Flux terms (median over nodes) [m³/s]",
+               xlabel = "timestep", ylabel = "m³/s")
+    lines!(ax3, xs, vec(median(diags.upstream_q, dims=1));
+           color = :steelblue,   label = "upstream_q")
+    lines!(ax3, xs, vec(median(diags.inwater, dims=1));
+           color = :forestgreen, label = "inwater")
+    lines!(ax3, xs, vec(median(diags.pred_q, dims=1));
+           color = :orangered,   label = "q_out (pred)")
+    lines!(ax3, xs, vec(median(diags.net_flux, dims=1));
+           color = :black, linestyle = :dash, label = "net_flux")
+    hlines!(ax3, [0f0]; color = :gray, linestyle = :dot)
+    axislegend(ax3; position = :rt); dticks!(ax3)
+
+    # Row 4: h_raw + fraction-negative
+    ax4 = Axis(fig[4, 1]; title = "h_raw before ≥0 floor",
+               xlabel = "timestep", ylabel = "median h_raw [m]")
+    ax4b = Axis(fig[4, 1]; ylabel = "fraction nodes h_raw<0",
+                yaxisposition = :right, yticklabelcolor = :orangered)
+    hidespines!(ax4b); hidexdecorations!(ax4b)
+    lines!(ax4, xs, vec(median(diags.h_raw, dims=1));
+           color = :steelblue, label = "median h_raw")
+    hlines!(ax4, [0f0]; color = :black, linestyle = :dash)
+    frac_neg = Float32[mean(diags.h_raw[:, t] .< 0) for t in 1:T]
+    lines!(ax4b, xs, frac_neg; color = :orangered, label = "frac h_raw<0")
+    axislegend(ax4;  position = :lb)
+    axislegend(ax4b; position = :rb)
+    dticks!(ax4)
+
+    isnothing(path) || save(path, fig)
+    return fig
+end

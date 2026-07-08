@@ -171,10 +171,12 @@ function run_wflow_gnn(ds::DataSettings, ms::ModelSettings, ts::TrainSettings)
             Float32(norm_stats["river_inwater"].std),
             dt,
         )
-        h_weight = mb.σ_h / (mb.dt * mb.σ_q)
-        @info "Mass balance h_loss_weight = $(round(h_weight; sigdigits=3)) " *
-              "(σ_h=$(round(mb.σ_h; sigdigits=3)), σ_q=$(round(mb.σ_q; sigdigits=3)), dt=$(mb.dt) s)"
-        ts.strategy.h_loss_weight = h_weight
+        # h_weight = mb.σ_h / (mb.dt * mb.σ_q)
+        # @info "Mass balance h_loss_weight = $(round(h_weight; sigdigits=3)) " *
+        #       "(σ_h=$(round(mb.σ_h; sigdigits=3)), σ_q=$(round(mb.σ_q; sigdigits=3)), dt=$(mb.dt) s)"
+        # ts.strategy.h_loss_weight = h_weight
+        @info "Mass balance enabled: h derived from physics constraint, h_loss_weight=0"
+        ts.strategy.h_loss_weight = 0f0
         model = dev_fn(WflowGNN(ms, mb))
     else
         model = dev_fn(WflowGNN(ms))
@@ -273,6 +275,14 @@ function run_wflow_gnn(ds::DataSettings, ms::ModelSettings, ts::TrainSettings)
                                        postscale["river_q"];  # upstream area per node
                                        path       = joinpath(run_dir, "downstream_timeseries.png"),
                                        timestamps = split_times)
+
+            if !isnothing(cpu_model.mass_balance)
+                @info "Computing mass balance diagnostics on validation split"
+                mb_diags = rollout_mb_diagnostics(cpu_model, split_data)
+                plot_mb_diagnostics(mb_diags;
+                                    path       = joinpath(run_dir, "mb_diagnostics.png"),
+                                    timestamps = split_times)
+            end
 
             # Optional date-range rollout on the validation split
             if !isnothing(ts.val_daterange)

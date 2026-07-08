@@ -127,3 +127,85 @@ function evaluate_trajectory(model, split, norm_stats, domain::String;
 
     return pred_states, true_states
 end
+
+"""
+    rollout_mb_diagnostics(model, split) -> NamedTuple
+
+Run a single autoregressive rollout over `split` and record physical mass-balance
+terms at every step.  Also runs the mass balance with ground-truth q/h inputs to
+verify the equation independently of the model.
+
+Returns a NamedTuple with matrices of shape `(n_nodes, T)`:
+- `pred_q`      [m³/s]: predicted discharge (denorm + postscale)
+- `pred_h`      [m]:    water depth from MB applied to predicted q
+- `true_q`      [m³/s]: ground-truth discharge
+- `true_h`      [m]:    ground-truth water depth
+- `upstream_q`  [m³/s]: sum of upstream q (using predicted q as input)
+- `inwater`     [m³/s]: lateral inflow at each step
+- `net_flux`    [m³/s]: upstream_q + inwater - q_out  (using predicted q)
+- `h_raw`       [m]:    h before the ≥0 floor (using predicted q)
+- `mb_verify_h` [m]:    h from MB fed true q/h — verifies the equation itself
+"""
+function rollout_mb_diagnostics(model::WflowGNN, split)
+    isnothing(model.mass_balance) &&
+        throw(ArgumentError("rollout_mb_diagnostics requires a MassBalanceLayer"))
+    mb = model.mass_balance
+
+    # Flatten windows to a consecutive timeseries (same logic as evaluate_trajectory)
+    graphs = vcat(split[1], [w[end] for w in split[2:end]])
+    T      = length(graphs) - 1
+    T >= 1 || throw(ArgumentError("split must contain at least 2 unique timesteps"))
+
+    g0      = graphs[1]
+    n_nodes = g0.num_nodes
+    static  = g0.ndata.static
+
+    # Output matrices (n_nodes × T)
+    pred_q      = Matrix{Float32}(undef, n_nodes, T)
+    pred_h      = Matrix{Float32}(undef, n_nodes, T)
+    true_q      = Matrix{Float32}(undef, n_nodes, T)
+    true_h      = Matrix{Float32}(undef, n_nodes, T)
+    upstream_q  = Matrix{Float32}(undef, n_nodes, T)
+    inwater     = Matrix{Float32}(undef, n_nodes, T)
+    net_flux    = Matrix{Float32}(undef, n_nodes, T)
+    h_raw       = Matrix{Float32}(undef, n_nodes, T)
+    mb_verify_h = Matrix{Float32}(undef, n_nodes, T)
+
+    state_pred = g0.ndata.state  # normalised, starts from true initial condition
+
+    for t in 1:T
+        forcing_t    = graphs[t].ndata.forcing
+        target_state = graphs[t + 1].ndata.state
+
+        # One autoregressive step
+        state_pred = model(g0, state_pred, forcing_t, static)
+
+        # --- Diagnostics: MB with predicted q --------------------------------
+        d = mb_diagnostics(mb, g0, state_pred, forcing_t, state_pred[1:1, :])
+        pred_q[:,     t] = d.q_phys_new
+        pred_h[:,     t] = d.h_phys_new
+        upstream_q[:, t] = d.upstream_q
+        inwater[:,    t] = d.inwater_phys
+        net_flux[:,   t] = d.net_flux
+        h_raw[:,      t] = d.h_phys_raw
+
+        # --- Ground truth (physical units, denorm) ---------------------------
+        true_q[:, t] = vec(target_state[1:1, :]) .* mb.σ_q .+ mb.μ_q
+        true_h[:, t] = vec(target_state[2:2, :]) .* mb.σ_h .+ mb.μ_h
+
+        # --- Verification: MB fed true q, from true previous state -----------
+        d_v = mb_diagnostics(mb, g0, graphs[t].ndata.state, forcing_t,
+                             target_state[1:1, :])
+        mb_verify_h[:, t] = d_v.h_phys_new
+    end
+
+    return (pred_q      = pred_q,
+            pred_h      = pred_h,
+            true_q      = true_q,
+            true_h      = true_h,
+            upstream_q  = upstream_q,
+            inwater     = inwater,
+            net_flux    = net_flux,
+            h_raw       = h_raw,
+            mb_verify_h = mb_verify_h)
+end

@@ -8,7 +8,7 @@ export ldd_to_graph, build_wflow_graph, make_horizon_dataset, DOMAIN_VARS, LDD_O
        get_timestep
 
 include("gnn.jl")
-export WflowGNN, MassBalanceLayer, ModelSettings, save_model_settings, load_model_settings, ACTIVATIONS
+export WflowGNN, MassBalanceLayer, mb_diagnostics, ModelSettings, save_model_settings, load_model_settings, ACTIVATIONS
 
 include("strategy.jl")
 export TrainingStrategy, save_training_strategy, load_training_strategy,
@@ -24,10 +24,11 @@ include("hparsearch.jl")
 export HParSearchSettings, save_hpar_search_settings, load_hpar_search_settings, hpar_search
 
 include("plot.jl")
-export plot_losses, plot_validation_movie, plot_timeseries, plot_downstream_timeseries
+export plot_losses, plot_validation_movie, plot_timeseries, plot_downstream_timeseries,
+       plot_mb_diagnostics
 
 include("rollout.jl")
-export rollout, evaluate_trajectory
+export rollout, evaluate_trajectory, rollout_mb_diagnostics
 
 include("postprocess.jl")
 export regrid, write_regrid_to_netcdf

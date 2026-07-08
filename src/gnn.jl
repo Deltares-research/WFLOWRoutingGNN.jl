@@ -181,6 +181,58 @@ function (l::MassBalanceLayer)(g      ::GNNGraph,
 end
 
 """
+    mb_diagnostics(l, g, state, forcing, q_norm_new) -> NamedTuple
+
+Compute all intermediate physical quantities of the mass balance for one step.
+Non-differentiable; intended for validation/debugging only.
+
+Returns a `NamedTuple` with `Vector{Float32}` per node (physical units):
+- `q_phys_curr`  [m³/s]: discharge from input state (denorm + postscale)
+- `q_phys_new`   [m³/s]: predicted discharge (floored at 0)
+- `upstream_q`   [m³/s]: sum of direct upstream neighbours' discharge
+- `inwater_phys` [m³/s]: lateral inflow
+- `net_flux`     [m³/s]: upstream_q + inwater - q_phys_new
+- `h_phys_curr`  [m]:    current water depth
+- `h_phys_raw`   [m]:    next water depth before the ≥0 floor
+- `h_phys_new`   [m]:    next water depth after floor
+"""
+function mb_diagnostics(l          ::MassBalanceLayer,
+                        g          ::GNNGraph,
+                        state      ::AbstractMatrix,
+                        forcing    ::AbstractMatrix,
+                        q_norm_new ::AbstractMatrix)
+    n     = g.num_nodes
+    n_per = length(l.postscale_q)
+    n_rep = n ÷ n_per
+
+    # Force everything to CPU plain arrays for the diagnostic
+    pq  = reshape(repeat(Array(l.postscale_q), n_rep), 1, n)
+    ph  = reshape(repeat(Array(l.postscale_h), n_rep), 1, n)
+    st  = Array(state)
+    fo  = Array(forcing)
+    qn  = Array(q_norm_new)
+    g_c = g isa GNNGraph ? Flux.cpu(g) : g
+
+    q_phys_curr  = pq .* (st[1:1, :] .* l.σ_q .+ l.μ_q)
+    q_phys_new   = max.(0f0, pq .* (qn .* l.σ_q .+ l.μ_q))
+    inwater_phys = fo[1:1, :] .* l.σ_inwater .+ l.μ_inwater
+    upstream_q   = propagate((xi, xj, e) -> xj, g_c, +; xj = q_phys_curr)
+    h_phys_curr  = ph .* (st[2:2, :] .* l.σ_h .+ l.μ_h)
+    net_flux     = upstream_q .+ inwater_phys .- q_phys_new
+    h_phys_raw   = h_phys_curr .+ l.dt .* (ph ./ pq) .* net_flux
+    h_phys_new   = max.(0f0, h_phys_raw)
+
+    return (q_phys_curr  = vec(q_phys_curr),
+            q_phys_new   = vec(q_phys_new),
+            upstream_q   = vec(upstream_q),
+            inwater_phys = vec(inwater_phys),
+            net_flux     = vec(net_flux),
+            h_phys_curr  = vec(h_phys_curr),
+            h_phys_raw   = vec(h_phys_raw),
+            h_phys_new   = vec(h_phys_new))
+end
+
+"""
     WflowGNN
 
 Encode-process-decode GNN for wflow routing emulation.
@@ -295,7 +347,9 @@ function (m::WflowGNN)(g::GNNGraph,
         # blocked so that the h MSE does not flow back through q and overwhelm
         # the q training signal with a factor of dt (~3600 s).
         q_new = state[1:1, :] .+ Δ
-        h_new = m.mass_balance(g, state, forcing, q_new)
+        h_new = Flux.ignore_derivatives() do
+            m.mass_balance(g, state, forcing, q_new)
+        end
         return vcat(q_new, h_new)
     end
 end
