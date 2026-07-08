@@ -22,22 +22,43 @@ Arguments:
 Returns the `Figure` object.
 """
 function plot_losses(train_rollout, val_rollout, train_1step, val_1step;
+                     train_q_1step = nothing,
+                     val_q_1step   = nothing,
+                     train_h_1step = nothing,
+                     val_h_1step   = nothing,
                      path = nothing)
-    epochs = 1:length(train_rollout)
+    epochs         = 1:length(train_rollout)
+    has_components = !isnothing(train_q_1step) &&
+                     !isempty(train_q_1step)   &&
+                     any(isfinite, train_q_1step)
 
-    fig = Figure(size = (600, 400))
+    fig = Figure(size = (600, has_components ? 700 : 400))
 
-    ax = Axis(fig[1, 1];
-              title  = "Training losses",
-              xlabel = "Epoch",
-              ylabel = "MSE")
-    lines!(ax, epochs, train_rollout; label = "train rollout", color = :steelblue)
-    lines!(ax, epochs, val_rollout;   label = "val rollout",   color = :steelblue,
+    ax1 = Axis(fig[1, 1];
+               title  = "Training losses",
+               xlabel = "Epoch",
+               ylabel = "MSE")
+    lines!(ax1, epochs, train_rollout; label = "train rollout", color = :steelblue)
+    lines!(ax1, epochs, val_rollout;   label = "val rollout",   color = :steelblue,
            linestyle = :dash)
-    lines!(ax, epochs, train_1step;   label = "train 1-step",  color = :orangered)
-    lines!(ax, epochs, val_1step;     label = "val 1-step",    color = :orangered,
+    lines!(ax1, epochs, train_1step;   label = "train 1-step",  color = :orangered)
+    lines!(ax1, epochs, val_1step;     label = "val 1-step",    color = :orangered,
            linestyle = :dash)
-    axislegend(ax; position = :rt)
+    axislegend(ax1; position = :rt)
+
+    if has_components
+        ax2 = Axis(fig[2, 1];
+                   title  = "1-step loss components (Q vs H)",
+                   xlabel = "Epoch",
+                   ylabel = "MSE")
+        lines!(ax2, epochs, train_q_1step; label = "train Q", color = :steelblue)
+        lines!(ax2, epochs, val_q_1step;   label = "val Q",   color = :steelblue,
+               linestyle = :dash)
+        lines!(ax2, epochs, train_h_1step; label = "train H", color = :forestgreen)
+        lines!(ax2, epochs, val_h_1step;   label = "val H",   color = :forestgreen,
+               linestyle = :dash)
+        axislegend(ax2; position = :rt)
+    end
 
     isnothing(path) || save(path, fig)
 

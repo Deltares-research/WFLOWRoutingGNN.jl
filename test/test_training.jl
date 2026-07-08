@@ -110,8 +110,11 @@ end
     ts    = TrainSettings(; VALID_TS_KWARGS..., epochs = TR_EPOCHS, lr_steps = 2)
     model = deepcopy(TR_MODEL)
 
-    train_rollout, val_rollout, train_1step, val_1step =
-        train_model!(model, TR_TRAIN_LOADER, TR_VAL_LOADER, ts)
+    losses = train_model!(model, TR_TRAIN_LOADER, TR_VAL_LOADER, ts)
+    train_rollout = losses.train_rollout
+    val_rollout   = losses.val_rollout
+    train_1step   = losses.train_1step
+    val_1step     = losses.val_1step
 
     @testset "loss arrays have length == epochs" begin
         @test length(train_rollout) == TR_EPOCHS

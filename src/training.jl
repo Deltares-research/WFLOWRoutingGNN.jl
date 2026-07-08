@@ -193,6 +193,12 @@ function train_model!(model,
     val_rollout   = Float32[]
     train_1step   = Float32[]
     val_1step     = Float32[]
+    train_q_1step = Float32[]
+    val_q_1step   = Float32[]
+    train_h_1step = Float32[]
+    val_h_1step   = Float32[]
+
+    has_components = !isnothing(model.mass_balance)
 
     prog = Progress(ts.epochs; desc = "Training ", showspeed = true)
 
@@ -204,6 +210,8 @@ function train_model!(model,
         # Training pass
         ep_train_rollout = 0f0
         ep_train_1step   = 0f0
+        ep_train_q_1step = 0f0
+        ep_train_h_1step = 0f0
         n_batches        = 0
 
         for batch in train_loader_d
@@ -211,21 +219,40 @@ function train_model!(model,
             Flux.update!(opt_state, model, grads[1])
             ep_train_rollout += train_loss
             ep_train_1step   += one_step_loss(model, batch)
+            if has_components
+                qc, hc = loss_components(model, batch)
+                ep_train_q_1step += qc
+                ep_train_h_1step += hc
+            end
             n_batches        += 1
         end
         ep_train_rollout /= n_batches
         ep_train_1step   /= n_batches
+        ep_train_q_1step /= n_batches
+        ep_train_h_1step /= n_batches
 
         # Validation pass
         ep_val_rollout = mean(loss_function(model, b, strategy) for b in val_loader_d)
         ep_val_1step   = mean(one_step_loss(model, b)           for b in val_loader_d)
+        if has_components
+            val_comps      = [loss_components(model, b) for b in val_loader_d]
+            ep_val_q_1step = mean(c[1] for c in val_comps)
+            ep_val_h_1step = mean(c[2] for c in val_comps)
+        else
+            ep_val_q_1step = NaN32
+            ep_val_h_1step = NaN32
+        end
 
         push!(train_rollout, ep_train_rollout)
         push!(val_rollout,   ep_val_rollout)
         push!(train_1step,   ep_train_1step)
         push!(val_1step,     ep_val_1step)
+        push!(train_q_1step, has_components ? ep_train_q_1step : NaN32)
+        push!(val_q_1step,   ep_val_q_1step)
+        push!(train_h_1step, has_components ? ep_train_h_1step : NaN32)
+        push!(val_h_1step,   ep_val_h_1step)
 
-        next!(prog; showvalues = [
+        base_vals = [
             (:epoch,         "$epoch / $(ts.epochs)"),
             (:steps,         strategy.current_steps),
             (:lr,            round(schedule(epoch - 1), sigdigits = 3)),
@@ -233,9 +260,23 @@ function train_model!(model,
             (:val_rollout,   round(ep_val_rollout,   sigdigits = 4)),
             (:train_1step,   round(ep_train_1step,   sigdigits = 4)),
             (:val_1step,     round(ep_val_1step,     sigdigits = 4)),
-        ])
+        ]
+        comp_vals = has_components ? [
+            (:train_q_1step, round(ep_train_q_1step, sigdigits = 4)),
+            (:val_q_1step,   round(ep_val_q_1step,   sigdigits = 4)),
+            (:train_h_1step, round(ep_train_h_1step, sigdigits = 4)),
+            (:val_h_1step,   round(ep_val_h_1step,   sigdigits = 4)),
+        ] : []
+        next!(prog; showvalues = vcat(base_vals, comp_vals))
     end
 
-    return train_rollout, val_rollout, train_1step, val_1step
+    return (train_rollout = train_rollout,
+            val_rollout   = val_rollout,
+            train_1step   = train_1step,
+            val_1step     = val_1step,
+            train_q_1step = train_q_1step,
+            val_q_1step   = val_q_1step,
+            train_h_1step = train_h_1step,
+            val_h_1step   = val_h_1step)
 end
 

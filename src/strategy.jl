@@ -21,10 +21,11 @@ epochs, then `steps[2]` steps ahead for `durations[2]` epochs, and so on.
 Once all phases are exhausted the last phase is repeated indefinitely.
 """
 mutable struct TrainingStrategy
-    steps         :: Vector{Int}
-    durations     :: Vector{Int}
-    noise_scale   :: Float32
-    current_steps :: Int
+    steps          :: Vector{Int}
+    durations      :: Vector{Int}
+    noise_scale    :: Float32
+    h_loss_weight  :: Float32
+    current_steps  :: Int
 end
 
 """
@@ -32,7 +33,7 @@ end
 
 Construct a `TrainingStrategy`. `current_steps` is initialised to `steps[1]`.
 """
-function TrainingStrategy(steps, durations, noise_scale = 0)
+function TrainingStrategy(steps, durations, noise_scale = 0; h_loss_weight = 1f0)
     length(steps) == length(durations) ||
         throw(ArgumentError("steps and durations must have the same length"))
     isempty(steps) &&
@@ -47,15 +48,17 @@ function TrainingStrategy(steps, durations, noise_scale = 0)
     TrainingStrategy(steps_v,
                      convert(Vector{Int}, durations),
                      Float32(noise_scale),
+                     Float32(h_loss_weight),
                      steps_v[1])
 end
 
 function Base.show(io::IO, s::TrainingStrategy)
     println(io, "TrainingStrategy:")
-    println(io, "  steps         : ", s.steps)
-    println(io, "  durations     : ", s.durations)
-    println(io, "  noise_scale   : ", s.noise_scale)
-    print(  io, "  current_steps : ", s.current_steps)
+    println(io, "  steps          : ", s.steps)
+    println(io, "  durations      : ", s.durations)
+    println(io, "  noise_scale    : ", s.noise_scale)
+    println(io, "  h_loss_weight  : ", s.h_loss_weight)
+    print(  io, "  current_steps  : ", s.current_steps)
 end
 
 """
@@ -157,7 +160,8 @@ function loss_function(model    ::WflowGNN,
             forcing = forcing .+ noise_scale .* randn(Float32, size(forcing))
         end
         pred_state = model(g_topo, state, forcing, static)
-        loss      += Flux.mse(pred_state, targets[t])
+        loss += Flux.mse(pred_state[1:1, :], targets[t][1:1, :]) +
+                strategy.h_loss_weight * Flux.mse(pred_state[2:2, :], targets[t][2:2, :])
         state      = pred_state
     end
     return loss / nsteps
@@ -175,5 +179,24 @@ function one_step_loss(model::WflowGNN, batch::Vector{<:GNNGraph})
         g, g.ndata.state, g.ndata.forcing, g.ndata.static, batch[2].ndata.state
     end
     Flux.mse(model(g, state, forcing, static), target)
+end
+
+"""
+    loss_components(model, batch) -> (q_mse, h_mse)
+
+Compute unweighted 1-step-ahead MSE separately for q (row 1) and h (row 2) of
+the state. Returns `(nothing, nothing)` when the model has no mass balance.
+
+Runs entirely under `Flux.ignore_derivatives` — for diagnostic reporting only.
+"""
+function loss_components(model::WflowGNN, batch::Vector{<:GNNGraph})
+    isnothing(model.mass_balance) && return (nothing, nothing)
+    Flux.ignore_derivatives() do
+        g      = batch[1]
+        pred   = model(g, g.ndata.state, g.ndata.forcing, g.ndata.static)
+        target = batch[2].ndata.state
+        Flux.mse(pred[1:1, :], target[1:1, :]),
+        Flux.mse(pred[2:2, :], target[2:2, :])
+    end
 end
 

@@ -171,14 +171,21 @@ function run_wflow_gnn(ds::DataSettings, ms::ModelSettings, ts::TrainSettings)
             Float32(norm_stats["river_inwater"].std),
             dt,
         )
+        h_weight = mb.σ_h / (mb.dt * mb.σ_q)
+        @info "Mass balance h_loss_weight = $(round(h_weight; sigdigits=3)) " *
+              "(σ_h=$(round(mb.σ_h; sigdigits=3)), σ_q=$(round(mb.σ_q; sigdigits=3)), dt=$(mb.dt) s)"
+        ts.strategy.h_loss_weight = h_weight
         model = dev_fn(WflowGNN(ms, mb))
     else
         model = dev_fn(WflowGNN(ms))
     end
     train_duration = @elapsed begin
-        train_rollout, val_rollout, train_1step, val_1step =
-            train_model!(model, train_loader, val_loader, ts)
+        losses = train_model!(model, train_loader, val_loader, ts)
     end
+    train_rollout = losses.train_rollout
+    val_rollout   = losses.val_rollout
+    train_1step   = losses.train_1step
+    val_1step     = losses.val_1step
 
     # --- 5. Persist artefacts ---
     @info "Saving artefacts to $(joinpath(ds.runs_dir, ds.run_name))"
@@ -205,6 +212,10 @@ function run_wflow_gnn(ds::DataSettings, ms::ModelSettings, ts::TrainSettings)
 
     # Training loss curves
     plot_losses(train_rollout, val_rollout, train_1step, val_1step;
+                train_q_1step = losses.train_q_1step,
+                val_q_1step   = losses.val_q_1step,
+                train_h_1step = losses.train_h_1step,
+                val_h_1step   = losses.val_h_1step,
                 path = joinpath(run_dir, "losses.png"))
 
     # Grid lookup table (node index → raster position)

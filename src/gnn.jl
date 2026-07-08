@@ -295,9 +295,7 @@ function (m::WflowGNN)(g::GNNGraph,
         # blocked so that the h MSE does not flow back through q and overwhelm
         # the q training signal with a factor of dt (~3600 s).
         q_new = state[1:1, :] .+ Δ
-        h_new = Flux.ignore_derivatives() do
-            m.mass_balance(g, state, forcing, q_new)
-        end
+        h_new = m.mass_balance(g, state, forcing, q_new)
         return vcat(q_new, h_new)
     end
 end
