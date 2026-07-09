@@ -362,64 +362,68 @@ function plot_mb_diagnostics(diags; path=nothing, timestamps=nothing)
         ax.xticklabelrotation = π/4
     end
 
-    fig = Figure(size = (1000, 950))
-    Label(fig[0, 1], "Mass balance diagnostics"; fontsize = 14, font = :bold)
+    fig = Figure(size = (1100, 1050))
+    Label(fig[0, 1:2], "Mass balance diagnostics"; fontsize = 14, font = :bold)
 
-    # Row 1: Q
-    ax1 = Axis(fig[1, 1]; title = "Discharge Q [m³/s]",
-               xlabel = "timestep", ylabel = "m³/s")
+    # ── Row 1: Q ──────────────────────────────────────────────────────────────
+    ax1 = Axis(fig[1, 1:2]; title = "Discharge Q [m³/s]", ylabel = "m³/s")
     pq_med, pq_lo, pq_hi = pct(diags.pred_q)
     tq_med, tq_lo, tq_hi = pct(diags.true_q)
     band!(ax1, xs, pq_lo, pq_hi; color = (:steelblue, 0.25))
-    lines!(ax1, xs, pq_med; color = :steelblue,  label = "pred (p10–p90)")
+    el_pq = lines!(ax1, xs, pq_med; color = :steelblue)
     band!(ax1, xs, tq_lo, tq_hi; color = (:orangered, 0.25))
-    lines!(ax1, xs, tq_med; color = :orangered,  label = "true")
-    axislegend(ax1; position = :rt); dticks!(ax1)
+    el_tq = lines!(ax1, xs, tq_med; color = :orangered)
+    hidexdecorations!(ax1; ticks = false); dticks!(ax1)
 
-    # Row 2: H + verification
-    ax2 = Axis(fig[2, 1]; title = "Water depth H [m]  |  green-dashed = MB(true Q)",
-               xlabel = "timestep", ylabel = "m")
+    # ── Row 2: H + verification ───────────────────────────────────────────────
+    ax2 = Axis(fig[2, 1:2]; title = "Water depth H [m]", ylabel = "m")
     ph_med, ph_lo, ph_hi = pct(diags.pred_h)
     th_med, th_lo, th_hi = pct(diags.true_h)
     mv_med, mv_lo, mv_hi = pct(diags.mb_verify_h)
     band!(ax2, xs, ph_lo, ph_hi; color = (:steelblue,   0.25))
-    lines!(ax2, xs, ph_med; color = :steelblue,   label = "pred H")
+    el_ph = lines!(ax2, xs, ph_med; color = :steelblue)
     band!(ax2, xs, th_lo, th_hi; color = (:orangered,   0.25))
-    lines!(ax2, xs, th_med; color = :orangered,   label = "true H")
+    el_th = lines!(ax2, xs, th_med; color = :orangered)
     band!(ax2, xs, mv_lo, mv_hi; color = (:forestgreen, 0.20))
-    lines!(ax2, xs, mv_med; color = :forestgreen, linestyle = :dash,
-           label = "MB(true Q)")
-    axislegend(ax2; position = :rt); dticks!(ax2)
+    el_mv = lines!(ax2, xs, mv_med; color = :forestgreen, linestyle = :dash)
+    hidexdecorations!(ax2; ticks = false); dticks!(ax2)
 
-    # Row 3: flux terms
-    ax3 = Axis(fig[3, 1]; title = "Flux terms (median over nodes) [m³/s]",
-               xlabel = "timestep", ylabel = "m³/s")
-    lines!(ax3, xs, vec(median(diags.upstream_q, dims=1));
-           color = :steelblue,   label = "upstream_q")
-    lines!(ax3, xs, vec(median(diags.inwater, dims=1));
-           color = :forestgreen, label = "inwater")
-    lines!(ax3, xs, vec(median(diags.pred_q, dims=1));
-           color = :orangered,   label = "q_out (pred)")
-    lines!(ax3, xs, vec(median(diags.net_flux, dims=1));
-           color = :black, linestyle = :dash, label = "net_flux")
+    # ── Row 3: flux terms ─────────────────────────────────────────────────────
+    ax3 = Axis(fig[3, 1:2]; title = "Flux terms (median over nodes) [m³/s]",
+               ylabel = "m³/s")
+    el_uq  = lines!(ax3, xs, vec(median(diags.upstream_q, dims=1)); color = :steelblue)
+    el_iw  = lines!(ax3, xs, vec(median(diags.inwater, dims=1));    color = :forestgreen)
+    el_qo  = lines!(ax3, xs, vec(median(diags.pred_q, dims=1));     color = :orangered)
+    el_nf  = lines!(ax3, xs, vec(median(diags.net_flux, dims=1));
+                    color = :black, linestyle = :dash)
     hlines!(ax3, [0f0]; color = :gray, linestyle = :dot)
-    axislegend(ax3; position = :rt); dticks!(ax3)
+    hidexdecorations!(ax3; ticks = false); dticks!(ax3)
 
-    # Row 4: h_raw + fraction-negative
-    ax4 = Axis(fig[4, 1]; title = "h_raw before ≥0 floor",
-               xlabel = "timestep", ylabel = "median h_raw [m]")
-    ax4b = Axis(fig[4, 1]; ylabel = "fraction nodes h_raw<0",
-                yaxisposition = :right, yticklabelcolor = :orangered)
-    hidespines!(ax4b); hidexdecorations!(ax4b)
-    lines!(ax4, xs, vec(median(diags.h_raw, dims=1));
-           color = :steelblue, label = "median h_raw")
-    hlines!(ax4, [0f0]; color = :black, linestyle = :dash)
+    # ── Row 4a: h_raw ─────────────────────────────────────────────────────────
+    ax4a = Axis(fig[4, 1]; title = "h_raw before ≥0 floor (median)",
+                xlabel = "timestep", ylabel = "m")
+    el_hr = lines!(ax4a, xs, vec(median(diags.h_raw, dims=1)); color = :steelblue)
+    hlines!(ax4a, [0f0]; color = :black, linestyle = :dash)
+    dticks!(ax4a)
+
+    # ── Row 4b: fraction negative ─────────────────────────────────────────────
+    ax4b = Axis(fig[4, 2]; title = "Fraction of nodes with h_raw < 0",
+                xlabel = "timestep", ylabel = "fraction")
     frac_neg = Float32[mean(diags.h_raw[:, t] .< 0) for t in 1:T]
-    lines!(ax4b, xs, frac_neg; color = :orangered, label = "frac h_raw<0")
-    axislegend(ax4;  position = :lb)
-    axislegend(ax4b; position = :rb)
-    dticks!(ax4)
+    el_fn = lines!(ax4b, xs, frac_neg; color = :orangered)
+    dticks!(ax4b)
 
+    # ── Figure-level legend ───────────────────────────────────────────────────
+    Legend(fig[5, 1:2],
+           [el_pq,         el_tq,    el_ph,    el_th,   el_mv,
+            el_uq,         el_iw,    el_qo,    el_nf,   el_hr,   el_fn],
+           ["pred Q (p10–p90)", "true Q", "pred H (p10–p90)", "true H",
+            "MB(true Q)",  "upstream_q", "inwater", "q_out (pred)",
+            "net_flux",    "h_raw median", "frac h_raw<0"];
+           orientation = :horizontal, tellheight = true, nbanks = 3,
+           framevisible = false)
+
+    rowsize!(fig.layout, 5, Auto())
     isnothing(path) || save(path, fig)
     return fig
 end
