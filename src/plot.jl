@@ -349,11 +349,17 @@ function plot_mb_diagnostics(diags; path=nothing, timestamps=nothing)
     xs = 1:T
 
     function pct(m, lo=10, hi=90)
-        med = vec(median(m, dims=1))
-        lo_ = Float32[quantile(view(m, :, t), lo/100) for t in 1:T]
-        hi_ = Float32[quantile(view(m, :, t), hi/100) for t in 1:T]
+        med = Float32[let v = filter(isfinite, view(m, :, t))
+                          isempty(v) ? NaN32 : median(v) end for t in 1:T]
+        lo_ = Float32[let v = filter(isfinite, view(m, :, t))
+                          isempty(v) ? NaN32 : quantile(v, lo/100) end for t in 1:T]
+        hi_ = Float32[let v = filter(isfinite, view(m, :, t))
+                          isempty(v) ? NaN32 : quantile(v, hi/100) end for t in 1:T]
         med, lo_, hi_
     end
+
+    nanmedian(m) = Float32[let v = filter(isfinite, view(m, :, t))
+                               isempty(v) ? NaN32 : median(v) end for t in 1:T]
 
     function dticks!(ax)
         isnothing(timestamps) && return
@@ -391,10 +397,10 @@ function plot_mb_diagnostics(diags; path=nothing, timestamps=nothing)
     # ── Row 3: flux terms ─────────────────────────────────────────────────────
     ax3 = Axis(fig[3, 1:2]; title = "Flux terms (median over nodes) [m³/s]",
                ylabel = "m³/s")
-    el_uq  = lines!(ax3, xs, vec(median(diags.upstream_q, dims=1)); color = :steelblue)
-    el_iw  = lines!(ax3, xs, vec(median(diags.inwater, dims=1));    color = :forestgreen)
-    el_qo  = lines!(ax3, xs, vec(median(diags.pred_q, dims=1));     color = :orangered)
-    el_nf  = lines!(ax3, xs, vec(median(diags.net_flux, dims=1));
+    el_uq  = lines!(ax3, xs, nanmedian(diags.upstream_q); color = :steelblue)
+    el_iw  = lines!(ax3, xs, nanmedian(diags.inwater);    color = :forestgreen)
+    el_qo  = lines!(ax3, xs, nanmedian(diags.pred_q);     color = :orangered)
+    el_nf  = lines!(ax3, xs, nanmedian(diags.net_flux);
                     color = :black, linestyle = :dash)
     hlines!(ax3, [0f0]; color = :gray, linestyle = :dot)
     hidexdecorations!(ax3; ticks = false); dticks!(ax3)
@@ -402,14 +408,15 @@ function plot_mb_diagnostics(diags; path=nothing, timestamps=nothing)
     # ── Row 4a: h_raw ─────────────────────────────────────────────────────────
     ax4a = Axis(fig[4, 1]; title = "h_raw before ≥0 floor (median)",
                 xlabel = "timestep", ylabel = "m")
-    el_hr = lines!(ax4a, xs, vec(median(diags.h_raw, dims=1)); color = :steelblue)
+    el_hr = lines!(ax4a, xs, nanmedian(diags.h_raw); color = :steelblue)
     hlines!(ax4a, [0f0]; color = :black, linestyle = :dash)
     dticks!(ax4a)
 
     # ── Row 4b: fraction negative ─────────────────────────────────────────────
     ax4b = Axis(fig[4, 2]; title = "Fraction of nodes with h_raw < 0",
                 xlabel = "timestep", ylabel = "fraction")
-    frac_neg = Float32[mean(diags.h_raw[:, t] .< 0) for t in 1:T]
+    frac_neg = Float32[let v = filter(isfinite, view(diags.h_raw, :, t))
+                           isempty(v) ? NaN32 : mean(v .< 0) end for t in 1:T]
     el_fn = lines!(ax4b, xs, frac_neg; color = :orangered)
     dticks!(ax4b)
 
