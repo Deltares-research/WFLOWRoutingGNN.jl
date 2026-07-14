@@ -41,11 +41,21 @@ function rollout(model, g0::GNNGraph, forcing::AbstractArray{<:Real, 3};
 
     states_d = similar(state, n_state, n_nodes, T)
 
+    t_start = time()
+    step_times = Vector{Float64}(undef, T)
+
     for t in 1:T
+        t_step = time()
         forcing_next_t    = forcing_d[:, :, min(t + 1, T_max)]
         state             = model_d(g0_d, state, forcing_d[:, :, t], static, forcing_next_t)
         states_d[:, :, t] = state
+        step_times[t] = time() - t_step
     end
+
+    t_total = time() - t_start
+    mean_step = sum(step_times) / T
+    @info @sprintf("rollout: %d steps  total=%.3f s  mean/step=%.4f s  min=%.4f s  max=%.4f s",
+                   T, t_total, mean_step, minimum(step_times), maximum(step_times))
 
     return Array{Float32}(Flux.cpu(states_d))
 end

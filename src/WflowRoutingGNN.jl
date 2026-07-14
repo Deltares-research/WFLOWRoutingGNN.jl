@@ -1,5 +1,8 @@
 module WflowRoutingGNN
 
+using Printf
+using Statistics
+
 include("preprocess.jl")
 export ldd_to_graph, build_wflow_graph, make_horizon_dataset, DOMAIN_VARS, LDD_OFFSETS,
        check_and_correct_grid_alignment,
