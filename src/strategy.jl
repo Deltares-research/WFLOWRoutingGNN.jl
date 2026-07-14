@@ -180,7 +180,9 @@ function one_step_loss(model::WflowGNN, batch::Vector{<:GNNGraph})
         g = batch[1]
         g, g.ndata.state, g.ndata.forcing, batch[2].ndata.forcing, g.ndata.static, batch[2].ndata.state
     end
-    Flux.mse(model(g, state, forcing, static, forcing_next), target)
+    pred = model(g, state, forcing, static, forcing_next)
+    Flux.mse(pred[1:1, :], target[1:1, :]) +
+        Flux.mse(pred[2:2, :], target[2:2, :])
 end
 
 """
