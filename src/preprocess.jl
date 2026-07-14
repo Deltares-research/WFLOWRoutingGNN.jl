@@ -23,20 +23,23 @@ const DOMAIN_VARS = Dict(
     ),
 )
 
-# LDD numpad direction → (Δrow, Δcol) offset
+# LDD numpad direction → (Δlon_idx, Δlat_idx) offset
+# The LDD raster is stored as (lon, lat): dim1 = longitude, dim2 = latitude.
+# Latitude DECREASES with lat_idx (north-at-top raster convention), so
+# moving south means lat_idx+1, north means lat_idx-1.
 # Numpad layout:
 #   7 8 9
 #   4 5 6
 #   1 2 3
 const LDD_OFFSETS = Dict(
-    1 => (+1, -1),  # Southwest
-    2 => (+1,  0),  # South
-    3 => (+1, +1),  # Southeast
-    4 => ( 0, -1),  # West
-    6 => ( 0, +1),  # East
-    7 => (-1, -1),  # Northwest
-    8 => (-1,  0),  # North
-    9 => (-1, +1),  # Northeast
+    1 => (-1, +1),  # Southwest: lon-1, lat_idx+1 (lat decreases → south)
+    2 => ( 0, +1),  # South:     lon+0, lat_idx+1
+    3 => (+1, +1),  # Southeast: lon+1, lat_idx+1
+    4 => (-1,  0),  # West:      lon-1, lat_idx+0
+    6 => (+1,  0),  # East:      lon+1, lat_idx+0
+    7 => (-1, -1),  # Northwest: lon-1, lat_idx-1
+    8 => ( 0, -1),  # North:     lon+0, lat_idx-1
+    9 => (+1, -1),  # Northeast: lon+1, lat_idx-1
     # 5 = pit/outlet — no outflow, excluded
 )
 

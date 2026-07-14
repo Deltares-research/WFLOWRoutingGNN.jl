@@ -143,23 +143,25 @@ function loss_function(model    ::WflowGNN,
     # Extract all arrays from GNNGraph.ndata outside the diff path.
     # GNNGraph.ndata uses a Dict internally; Zygote cannot accumulate Dict
     # tangents, so we mark these reads as non-differentiable constants.
-    g_topo, state, static, forcings, targets = Flux.ignore_derivatives() do
+    g_topo, state, static, forcings, forcings_next, targets = Flux.ignore_derivatives() do
         g    = batch[1]
         st   = g.ndata.state
         sl   = g.ndata.static
-        fs   = [batch[t].ndata.forcing   for t in 1:nsteps]
-        tgts = [batch[t + 1].ndata.state for t in 1:nsteps]
-        g, st, sl, fs, tgts
+        fs   = [batch[t].ndata.forcing     for t in 1:nsteps]
+        fsn  = [batch[t + 1].ndata.forcing for t in 1:nsteps]  # fully-implicit: iw[t+1]
+        tgts = [batch[t + 1].ndata.state   for t in 1:nsteps]
+        g, st, sl, fs, fsn, tgts
     end
 
     loss = 0f0
     for t in 1:nsteps
-        forcing = forcings[t]
+        forcing      = forcings[t]
+        forcing_next = forcings_next[t]
         if noise_scale > 0f0
             state   = state   .+ noise_scale .* randn(Float32, size(state))
             forcing = forcing .+ noise_scale .* randn(Float32, size(forcing))
         end
-        pred_state = model(g_topo, state, forcing, static)
+        pred_state = model(g_topo, state, forcing, static, forcing_next)
         loss += Flux.mse(pred_state[1:1, :], targets[t][1:1, :]) +
                 strategy.h_loss_weight * Flux.mse(pred_state[2:2, :], targets[t][2:2, :])
         state      = pred_state
@@ -174,11 +176,11 @@ end
 `batch[2].ndata.state` as target.
 """
 function one_step_loss(model::WflowGNN, batch::Vector{<:GNNGraph})
-    g, state, forcing, static, target = Flux.ignore_derivatives() do
+    g, state, forcing, forcing_next, static, target = Flux.ignore_derivatives() do
         g = batch[1]
-        g, g.ndata.state, g.ndata.forcing, g.ndata.static, batch[2].ndata.state
+        g, g.ndata.state, g.ndata.forcing, batch[2].ndata.forcing, g.ndata.static, batch[2].ndata.state
     end
-    Flux.mse(model(g, state, forcing, static), target)
+    Flux.mse(model(g, state, forcing, static, forcing_next), target)
 end
 
 """
@@ -193,7 +195,7 @@ function loss_components(model::WflowGNN, batch::Vector{<:GNNGraph})
     isnothing(model.mass_balance) && return (nothing, nothing)
     Flux.ignore_derivatives() do
         g      = batch[1]
-        pred   = model(g, g.ndata.state, g.ndata.forcing, g.ndata.static)
+        pred   = model(g, g.ndata.state, g.ndata.forcing, g.ndata.static, batch[2].ndata.forcing)
         target = batch[2].ndata.state
         Flux.mse(pred[1:1, :], target[1:1, :]),
         Flux.mse(pred[2:2, :], target[2:2, :])

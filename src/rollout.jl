@@ -42,7 +42,8 @@ function rollout(model, g0::GNNGraph, forcing::AbstractArray{<:Real, 3};
     states_d = similar(state, n_state, n_nodes, T)
 
     for t in 1:T
-        state             = model_d(g0_d, state, forcing_d[:, :, t], static)
+        forcing_next_t    = forcing_d[:, :, min(t + 1, T_max)]
+        state             = model_d(g0_d, state, forcing_d[:, :, t], static, forcing_next_t)
         states_d[:, :, t] = state
     end
 
@@ -175,13 +176,14 @@ function rollout_mb_diagnostics(model::WflowGNN, split)
 
     for t in 1:T
         forcing_t    = graphs[t].ndata.forcing
+        forcing_next = graphs[t + 1].ndata.forcing   # graphs has T+1 elements
         target_state = graphs[t + 1].ndata.state
 
-        # One autoregressive step
-        state_pred = model(g0, state_pred, forcing_t, static)
+        # One autoregressive step (fully-implicit: pass forcing_next)
+        state_pred = model(g0, state_pred, forcing_t, static, forcing_next)
 
         # --- Diagnostics: MB with predicted q --------------------------------
-        d = mb_diagnostics(mb, g0, state_pred, forcing_t, state_pred[1:1, :])
+        d = mb_diagnostics(mb, g0, state_pred, forcing_t, forcing_next, state_pred[1:1, :])
         pred_q[:,     t] = d.q_phys_new
         pred_h[:,     t] = d.h_phys_new
         upstream_q[:, t] = d.upstream_q
@@ -194,7 +196,7 @@ function rollout_mb_diagnostics(model::WflowGNN, split)
         true_h[:, t] = vec(target_state[2:2, :]) .* mb.σ_h .+ mb.μ_h
 
         # --- Verification: MB fed true q, from true previous state -----------
-        d_v = mb_diagnostics(mb, g0, graphs[t].ndata.state, forcing_t,
+        d_v = mb_diagnostics(mb, g0, graphs[t].ndata.state, forcing_t, forcing_next,
                              target_state[1:1, :])
         mb_verify_h[:, t] = d_v.h_phys_new
     end

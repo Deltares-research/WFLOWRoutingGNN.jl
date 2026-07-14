@@ -129,21 +129,26 @@ Flux.trainable(::MassBalanceLayer) = (;)  # physics constants, not optimised
 """
     (l::MassBalanceLayer)(g, state, forcing, q_norm_new) -> h_norm_new
 
-Compute normalised water depth at the next timestep by enforcing mass balance.
+    Compute normalised water depth at the next timestep by enforcing the
+    fully-implicit kinematic-wave mass balance:
 
-- `state`      : normalised state matrix `(2, n_nodes)` — rows are river_q, river_h.
-- `forcing`    : normalised forcing matrix; row 1 is river_inwater.
-- `q_norm_new` : normalised predicted discharge `(1, n_nodes)` at t+1.
+        h[t+1] = h[t] + dt/(w·l) · (Σq[t+1] + iw[t+1] − q[t+1])
+
+- `state`         : normalised state matrix `(2, n_nodes)` — rows are river_q, river_h at t.
+- `forcing`       : normalised forcing matrix at t; unused (kept for API symmetry).
+- `forcing_next`  : normalised forcing matrix at t+1; row 1 is river_inwater[t+1].
+- `q_norm_new`    : normalised predicted discharge `(1, n_nodes)` at t+1.
 
 Returns normalised `h_norm_new` of shape `(1, n_nodes)`.
 
 Handles batched `GNNGraph`s automatically: per-node constants are tiled to
 match the total node count of the batch.
 """
-function (l::MassBalanceLayer)(g      ::GNNGraph,
-                               state  ::AbstractMatrix,
-                               forcing::AbstractMatrix,
-                               q_norm_new::AbstractMatrix)
+function (l::MassBalanceLayer)(g            ::GNNGraph,
+                               state        ::AbstractMatrix,
+                               forcing      ::AbstractMatrix,
+                               forcing_next ::AbstractMatrix,
+                               q_norm_new   ::AbstractMatrix)
     n     = g.num_nodes
     n_per = length(l.postscale_q)
     n_rep = n ÷ n_per
@@ -154,15 +159,14 @@ function (l::MassBalanceLayer)(g      ::GNNGraph,
 
     # Physical discharge at current and predicted timesteps  [m³/s]
     # q_phys_new is floored at 0 in physical space (z-scored 0 ≠ physical 0).
-    q_phys_curr = pq .* (state[1:1, :]  .* l.σ_q .+ l.μ_q)
     q_phys_new  = max.(0f0, pq .* (q_norm_new .* l.σ_q .+ l.μ_q))
 
-    # Lateral inflow  [m³/s]  (row 1 = river_inwater)
-    inwater_phys = forcing[1:1, :] .* l.σ_inwater .+ l.μ_inwater
+    # Lateral inflow at t+1  [m³/s]  (row 1 = river_inwater)  — fully-implicit
+    inwater_phys = forcing_next[1:1, :] .* l.σ_inwater .+ l.μ_inwater
 
-    # Sum upstream Q into each node via the river network edges  [m³/s]
-    # propagate with aggr=+ sends xj (source q) to each target and sums.
-    upstream_q = propagate((xi, xj, e) -> xj, g, +; xj = q_phys_curr)
+    # Sum upstream Q[t+1] into each node via the river network edges  [m³/s]
+    # Fully-implicit: both upstream and outflow use the predicted q at t+1.
+    upstream_q = propagate((xi, xj, e) -> xj, g, +; xj = q_phys_new)
 
     # Physical h at current step  [m]
     # h_phys = postscale_h · (norm_h · σ_h + μ_h)
@@ -196,11 +200,12 @@ Returns a `NamedTuple` with `Vector{Float32}` per node (physical units):
 - `h_phys_raw`   [m]:    next water depth before the ≥0 floor
 - `h_phys_new`   [m]:    next water depth after floor
 """
-function mb_diagnostics(l          ::MassBalanceLayer,
-                        g          ::GNNGraph,
-                        state      ::AbstractMatrix,
-                        forcing    ::AbstractMatrix,
-                        q_norm_new ::AbstractMatrix)
+function mb_diagnostics(l            ::MassBalanceLayer,
+                        g            ::GNNGraph,
+                        state        ::AbstractMatrix,
+                        forcing      ::AbstractMatrix,
+                        forcing_next ::AbstractMatrix,
+                        q_norm_new   ::AbstractMatrix)
     n     = g.num_nodes
     n_per = length(l.postscale_q)
     n_rep = n ÷ n_per
@@ -209,14 +214,14 @@ function mb_diagnostics(l          ::MassBalanceLayer,
     pq  = reshape(repeat(Array(l.postscale_q), n_rep), 1, n)
     ph  = reshape(repeat(Array(l.postscale_h), n_rep), 1, n)
     st  = Array(state)
-    fo  = Array(forcing)
+    fn  = Array(forcing_next)
     qn  = Array(q_norm_new)
     g_c = g isa GNNGraph ? Flux.cpu(g) : g
 
-    q_phys_curr  = pq .* (st[1:1, :] .* l.σ_q .+ l.μ_q)
+    q_phys_curr  = pq .* (st[1:1, :] .* l.σ_q .+ l.μ_q)   # for diagnostics only
     q_phys_new   = max.(0f0, pq .* (qn .* l.σ_q .+ l.μ_q))
-    inwater_phys = fo[1:1, :] .* l.σ_inwater .+ l.μ_inwater
-    upstream_q   = propagate((xi, xj, e) -> xj, g_c, +; xj = q_phys_curr)
+    inwater_phys = fn[1:1, :] .* l.σ_inwater .+ l.μ_inwater
+    upstream_q   = propagate((xi, xj, e) -> xj, g_c, +; xj = q_phys_new)
     h_phys_curr  = ph .* (st[2:2, :] .* l.σ_h .+ l.μ_h)
     net_flux     = upstream_q .+ inwater_phys .- q_phys_new
     h_phys_raw   = h_phys_curr .+ l.dt .* (ph ./ pq) .* net_flux
@@ -332,9 +337,10 @@ and `static` are passed directly as matrices, avoiding GNNGraph ndata in the
 differentiation path.
 """
 function (m::WflowGNN)(g::GNNGraph,
-                       state  ::AbstractMatrix,
-                       forcing::AbstractMatrix,
-                       static ::AbstractMatrix)
+                       state        ::AbstractMatrix,
+                       forcing      ::AbstractMatrix,
+                       static       ::AbstractMatrix,
+                       forcing_next ::AbstractMatrix = forcing)
     x = vcat(state, forcing, static)
     h = m.encoder(x)
     h = m.processor(g, h)
@@ -343,12 +349,12 @@ function (m::WflowGNN)(g::GNNGraph,
         return state .+ Δ
     else
         # Δ is (1, n_nodes): predicted Δq.
-        # h_new is derived analytically from the mass balance; its gradient is
-        # blocked so that the h MSE does not flow back through q and overwhelm
-        # the q training signal with a factor of dt (~3600 s).
+        # h_new is derived analytically from the fully-implicit mass balance;
+        # its gradient is blocked so that the h MSE does not flow back through
+        # q and overwhelm the q training signal with a factor of dt (~86400 s).
         q_new = state[1:1, :] .+ Δ
         h_new = Flux.ignore_derivatives() do
-            m.mass_balance(g, state, forcing, q_new)
+            m.mass_balance(g, state, forcing, forcing_next, q_new)
         end
         return vcat(q_new, h_new)
     end
