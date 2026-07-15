@@ -241,7 +241,7 @@ function plot_timeseries(
     all(isnan, true_grids[state_vars[1]][row, col, :]) &&
         @warn "Cell ($row, $col) is inactive (all NaN); plot will be empty"
 
-    fig = Figure(size = (1200, 300 * nvars))
+    fig = Figure(size = (1600, 300 * nvars))
 
     for (vi, vname) in enumerate(state_vars)
         truth = true_grids[vname][row, col, :]
@@ -281,6 +281,35 @@ function plot_timeseries(
             lo = min(minimum(truth_valid), minimum(pred_valid))
             hi = max(maximum(truth_valid), maximum(pred_valid))
             lines!(ax_sc, [lo, hi], [lo, hi]; color = :black, linewidth = 1.5)
+        end
+
+        # --- RMSE over time panel ---
+        abserr = abs.(pred .- truth)
+        rmse_val = let v = filter(isfinite, abserr)
+            isempty(v) ? NaN32 : Float32(sqrt(mean(v .^ 2)))
+        end
+
+        ax_err = Axis(fig[vi, 3];
+                      title              = "$vname  —  absolute error",
+                      xlabel             = isnothing(timestamps) ? "Timestep" : "Time",
+                      ylabel             = "|pred − truth|",
+                      xticklabelrotation = isnothing(timestamps) ? 0.0 : π/4,
+                      xticklabelalign    = isnothing(timestamps) ?
+                                           (:center, :top) : (:right, :top))
+        if !isnothing(timestamps)
+            n_ticks  = min(T, 6)
+            tick_idx = unique(round.(Int, range(1, T; length = n_ticks)))
+            ax_err.xticks = (tick_idx, string.(timestamps[tick_idx]))
+        end
+        lines!(ax_err, ts, abserr; color = :purple)
+        if isfinite(rmse_val)
+            hlines!(ax_err, [rmse_val]; color = :black, linestyle = :dash, linewidth = 1.5)
+            valid_err = filter(isfinite, abserr)
+            ypos = isempty(valid_err) ? rmse_val : maximum(valid_err) * 0.97
+            text!(ax_err, T * 0.02f0, ypos;
+                  text     = "RMSE = $(round(rmse_val; sigdigits = 4))",
+                  fontsize = 11,
+                  align    = (:left, :top))
         end
     end
 
