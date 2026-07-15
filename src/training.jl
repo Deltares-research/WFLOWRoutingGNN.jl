@@ -218,7 +218,7 @@ function train_model!(model,
             train_loss, grads = Flux.withgradient(m -> loss_function(m, batch, strategy), model)
             Flux.update!(opt_state, model, grads[1])
             ep_train_rollout += train_loss
-            ep_train_1step   += one_step_loss(model, batch)
+            ep_train_1step   += one_step_loss(model, batch, strategy.h_loss_weight)
             if has_components
                 qc, hc = loss_components(model, batch)
                 ep_train_q_1step += qc
@@ -233,7 +233,7 @@ function train_model!(model,
 
         # Validation pass
         ep_val_rollout = mean(loss_function(model, b, strategy) for b in val_loader_d)
-        ep_val_1step   = mean(one_step_loss(model, b)           for b in val_loader_d)
+        ep_val_1step   = mean(one_step_loss(model, b, strategy.h_loss_weight) for b in val_loader_d)
         if has_components
             val_comps      = [loss_components(model, b) for b in val_loader_d]
             ep_val_q_1step = mean(c[1] for c in val_comps)

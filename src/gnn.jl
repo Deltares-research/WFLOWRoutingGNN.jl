@@ -349,13 +349,9 @@ function (m::WflowGNN)(g::GNNGraph,
         return state .+ Δ
     else
         # Δ is (1, n_nodes): predicted Δq.
-        # h_new is derived analytically from the fully-implicit mass balance;
-        # its gradient is blocked so that the h MSE does not flow back through
-        # q and overwhelm the q training signal with a factor of dt (~86400 s).
+        # h_new is derived analytically from the fully-implicit mass balance.
         q_new = state[1:1, :] .+ Δ
-        h_new = Flux.ignore_derivatives() do
-            m.mass_balance(g, state, forcing, forcing_next, q_new)
-        end
+        h_new = m.mass_balance(g, state, forcing, forcing_next, q_new)
         return vcat(q_new, h_new)
     end
 end

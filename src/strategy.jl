@@ -175,14 +175,15 @@ end
 1-step-ahead MSE on a collated batch. Uses `batch[1]` as input and
 `batch[2].ndata.state` as target.
 """
-function one_step_loss(model::WflowGNN, batch::Vector{<:GNNGraph})
+function one_step_loss(model::WflowGNN, batch::Vector{<:GNNGraph},
+                       h_loss_weight::Float32 = 1f0)
     g, state, forcing, forcing_next, static, target = Flux.ignore_derivatives() do
         g = batch[1]
         g, g.ndata.state, g.ndata.forcing, batch[2].ndata.forcing, g.ndata.static, batch[2].ndata.state
     end
     pred = model(g, state, forcing, static, forcing_next)
     Flux.mse(pred[1:1, :], target[1:1, :]) +
-        Flux.mse(pred[2:2, :], target[2:2, :])
+        h_loss_weight * Flux.mse(pred[2:2, :], target[2:2, :])
 end
 
 """

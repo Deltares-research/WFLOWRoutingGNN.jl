@@ -171,12 +171,12 @@ function run_wflow_gnn(ds::DataSettings, ms::ModelSettings, ts::TrainSettings)
             Float32(norm_stats["river_inwater"].std),
             dt,
         )
-        # h_weight = mb.σ_h / (mb.dt * mb.σ_q)
-        # @info "Mass balance h_loss_weight = $(round(h_weight; sigdigits=3)) " *
-        #       "(σ_h=$(round(mb.σ_h; sigdigits=3)), σ_q=$(round(mb.σ_q; sigdigits=3)), dt=$(mb.dt) s)"
-        # ts.strategy.h_loss_weight = h_weight
-        @info "Mass balance enabled: h derived from physics constraint, h_loss_weight=0"
-        ts.strategy.h_loss_weight = 0f0
+        h_weight = mb.σ_h / (mb.dt * mb.σ_q)
+        @info "Mass balance h_loss_weight = $(round(h_weight; sigdigits=3)) " *
+              "(σ_h=$(round(mb.σ_h; sigdigits=3)), σ_q=$(round(mb.σ_q; sigdigits=3)), dt=$(mb.dt) s)"
+        ts.strategy.h_loss_weight = h_weight
+        # @info "Mass balance enabled: h derived from physics constraint, h_loss_weight=0"
+        # ts.strategy.h_loss_weight = 0f0
         model = dev_fn(WflowGNN(ms, mb))
     else
         model = dev_fn(WflowGNN(ms))
