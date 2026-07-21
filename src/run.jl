@@ -1,6 +1,7 @@
 import JLD2
 import Dates
 using CUDA, cuDNN
+using SparseArrays
 
 """
     run_wflow_gnn_from_toml(toml_path) -> model
@@ -157,7 +158,19 @@ function run_wflow_gnn(ds::DataSettings, ms::ModelSettings, ts::TrainSettings)
 
     # --- 4. Build model and train ---
     @info "Training model"
-    dev_fn = ts.device == :gpu ? Flux.gpu : identity
+    dev_fn  = ts.device == :gpu ? Flux.gpu : identity
+
+    # Build the sparse adjacency matrix from the graph topology.
+    # A[i,j] = 1 means node j is an upstream neighbour of node i.
+    # Self-loops are included so each node also aggregates its own state,
+    # matching the default GraphConv behaviour.
+    g0 = graphs[1]
+    n_nodes   = g0.num_nodes
+    src_edges, tgt_edges = edge_index(g0)
+    all_src   = vcat(src_edges, collect(1:n_nodes))
+    all_tgt   = vcat(tgt_edges, collect(1:n_nodes))
+    A_sparse  = sparse(all_tgt, all_src, ones(Float32, length(all_src)), n_nodes, n_nodes)
+
     if ms.domain == "river"
         dt = get_timestep(output_file)
         mb = MassBalanceLayer(
@@ -177,9 +190,9 @@ function run_wflow_gnn(ds::DataSettings, ms::ModelSettings, ts::TrainSettings)
         ts.strategy.h_loss_weight = h_weight
         # @info "Mass balance enabled: h derived from physics constraint, h_loss_weight=0"
         # ts.strategy.h_loss_weight = 0f0
-        model = dev_fn(WflowGNN(ms, mb))
+        model = dev_fn(WflowGNN(ms, mb, A_sparse))
     else
-        model = dev_fn(WflowGNN(ms))
+        model = dev_fn(WflowGNN(ms, A_sparse))
     end
     train_duration = @elapsed begin
         losses = train_model!(model, train_loader, val_loader, ts)

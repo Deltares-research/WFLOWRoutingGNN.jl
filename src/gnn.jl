@@ -238,12 +238,81 @@ function mb_diagnostics(l            ::MassBalanceLayer,
 end
 
 """
+    SparseConv(in_dim => out_dim, σ = identity; A)
+
+A graph convolution layer that uses a pre-stored (sparse) adjacency matrix `A`
+for neighbour aggregation instead of scatter operations over a `GNNGraph`.
+
+Equivalent to `GraphConv` with mean aggregation, but the topology is fixed at
+construction time, which allows BLAS/CUSPARSE matrix multiplications and avoids
+the overhead of graph scatter-gather at every forward pass.
+
+The layer is compatible with `GNNChain`: it accepts `(g::GNNGraph, h)` and
+returns `h_new`, ignoring `g` at runtime.
+
+`A` must be a `(n_nodes, n_nodes)` (sparse or dense) `Float32` matrix where
+`A[i, j] = 1` means node `j` contributes to the aggregated neighbourhood of
+node `i`.  Self-loops should be included explicitly if desired.
+
+`A` is **not** a trainable parameter; it is moved to GPU automatically by
+`Flux.gpu` / `fmap`.
+"""
+struct SparseConv{M <: AbstractMatrix{Float32}, V <: AbstractVector{Float32}, F}
+    W_self  :: M
+    W_neigh :: M
+    bias    :: V
+    σ       :: F
+    A       :: AbstractMatrix{Float32}  # topology — not trained, but gpu-movable
+end
+
+Flux.@layer SparseConv trainable=(W_self, W_neigh, bias)
+
+"""
+    SparseConv(ch::Pair{Int,Int}, σ = identity; A)
+
+Construct a `SparseConv` layer mapping `ch.first`-dimensional inputs to
+`ch.second`-dimensional outputs.  `W_self` and `W_neigh` are initialised with
+Glorot uniform; `bias` is zero-initialised.
+"""
+function SparseConv(ch::Pair{Int,Int}, σ = identity; A::AbstractMatrix{Float32})
+    in_d, out_d = ch
+    glorot(a, b) = Float32.(Flux.glorot_uniform(a, b))
+    SparseConv(
+        glorot(out_d, in_d),
+        glorot(out_d, in_d),
+        zeros(Float32, out_d),
+        σ,
+        A,
+    )
+end
+
+"""
+    (l::SparseConv)(g::GNNGraph, h::AbstractMatrix) -> AbstractMatrix
+
+Forward pass.  `g` is accepted for `GNNChain` compatibility but is ignored;
+neighbour aggregation is performed via the stored matrix `l.A`.
+"""
+function (l::SparseConv)(::GNNGraph, h::AbstractMatrix{Float32})
+    neigh = (l.A * h')'
+    l.σ.(l.W_self * h .+ l.W_neigh * neigh .+ l.bias)
+end
+# Single-argument method so that GNNChain._applylayer (which calls l(x) for
+# non-GNNLayer types) works correctly when SparseConv is used inside a GNNChain.
+(l::SparseConv)(h::AbstractMatrix{Float32}) = l(nothing, h)
+
+# Accept any first argument so that both `l(g, x)` and `l(nothing, x)` dispatch
+# to the same implementation.
+function (l::SparseConv)(::Any, h::AbstractMatrix{Float32})
+    neigh = (l.A * h')'
+    l.σ.(l.W_self * h .+ l.W_neigh * neigh .+ l.bias)
+end
+"""
     WflowGNN
 
 Encode-process-decode GNN for wflow routing emulation.
 
 - `encoder`      : `Dense` layer mapping `in_dim -> hidden_dim` with a configurable activation.
-- `processor`    : `GNNChain` of `GraphConv` layers operating at `hidden_dim`.
+- `processor`    : `GNNChain` of `GraphConv` or `SparseConv` layers operating at `hidden_dim`.
 - `decoder`      : `Dense` layer mapping `hidden_dim -> out_dim` (no activation).
 - `mass_balance` : optional `MassBalanceLayer` that hard-constrains `river_h` via the
                    kinematic-wave mass balance. When present the decoder outputs only
@@ -280,6 +349,33 @@ function WflowGNN(s::ModelSettings)
 end
 
 """
+    WflowGNN(settings::ModelSettings, A::AbstractMatrix{Float32})
+
+Construct a `WflowGNN` that uses `SparseConv` layers instead of `GraphConv`.
+The processor performs neighbour aggregation via the pre-stored (sparse) adjacency
+matrix `A` rather than GNNGraph scatter operations.  All other behaviour is
+identical to `WflowGNN(settings)`.
+
+`A` should be a `(n_nodes, n_nodes)` `Float32` matrix (dense or `SparseMatrixCSC`)
+with `A[i, j] = 1` indicating that node `j` is an upstream neighbour of node `i`.
+Self-loops must be included explicitly if desired.
+
+`A` is not trainable; it is moved to GPU automatically via `Flux.gpu`.
+"""
+function WflowGNN(s::ModelSettings, A::AbstractMatrix{Float32})
+    s.domain in keys(DOMAIN_VARS) ||
+        throw(ArgumentError("domain must be one of $(join(sort(collect(keys(DOMAIN_VARS))), ", ")), got \"$(s.domain)\""))
+    vars    = DOMAIN_VARS[s.domain]
+    in_dim  = length(vars["state"]) + length(vars["forcing"]) + length(vars["static"])
+    out_dim = length(vars["state"])
+    return WflowGNN(in_dim, s.hidden_dim, out_dim;
+                    nlayers         = s.nlayers,
+                    enc_activation  = s.enc_activation,
+                    proc_activation = s.proc_activation,
+                    adj_matrix      = A)
+end
+
+"""
     WflowGNN(settings, mass_balance) -> WflowGNN
 
 Construct a `WflowGNN` with a hard mass-balance constraint for the river domain.
@@ -298,7 +394,27 @@ function WflowGNN(s::ModelSettings, mb::MassBalanceLayer)
                     mass_balance    = mb)
 end
 
-# Internal constructor that also accepts a mass_balance keyword argument.
+"""
+    WflowGNN(settings, mass_balance, A) -> WflowGNN
+
+Construct a `WflowGNN` with both a hard mass-balance constraint and `SparseConv`
+layers (see `WflowGNN(settings, A)` and `WflowGNN(settings, mass_balance)`).
+"""
+function WflowGNN(s::ModelSettings, mb::MassBalanceLayer, A::AbstractMatrix{Float32})
+    s.domain in keys(DOMAIN_VARS) ||
+        throw(ArgumentError("domain must be one of $(join(sort(collect(keys(DOMAIN_VARS))), ", ")), got \"$(s.domain)\""))
+    vars   = DOMAIN_VARS[s.domain]
+    in_dim = length(vars["state"]) + length(vars["forcing"]) + length(vars["static"])
+    return WflowGNN(in_dim, s.hidden_dim, 1;
+                    nlayers         = s.nlayers,
+                    enc_activation  = s.enc_activation,
+                    proc_activation = s.proc_activation,
+                    mass_balance    = mb,
+                    adj_matrix      = A)
+end
+
+# Internal constructor — shared by all public constructors.
+# Pass `adj_matrix` to use SparseConv layers instead of GraphConv.
 function WflowGNN(
         in_dim    :: Int,
         hidden_dim:: Int,
@@ -306,11 +422,17 @@ function WflowGNN(
         nlayers         :: Int = 3,
         enc_activation        = swish,
         proc_activation       = swish,
-        mass_balance          = nothing)
+        mass_balance          = nothing,
+        adj_matrix            = nothing)
 
-    encoder   = Dense(in_dim => hidden_dim, enc_activation)
-    processor = GNNChain([GraphConv(hidden_dim => hidden_dim, proc_activation) for _ in 1:nlayers]...)
-    decoder   = Dense(hidden_dim => out_dim)
+    encoder = Dense(in_dim => hidden_dim, enc_activation)
+    if isnothing(adj_matrix)
+        processor = GNNChain([GraphConv(hidden_dim => hidden_dim, proc_activation) for _ in 1:nlayers]...)
+    else
+        A = adj_matrix :: AbstractMatrix{Float32}
+        processor = GNNChain([SparseConv(hidden_dim => hidden_dim, proc_activation; A=A) for _ in 1:nlayers]...)
+    end
+    decoder = Dense(hidden_dim => out_dim)
     return WflowGNN(encoder, processor, decoder, mass_balance)
 end
 

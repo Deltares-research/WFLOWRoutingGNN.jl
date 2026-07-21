@@ -11,7 +11,8 @@ export ldd_to_graph, build_wflow_graph, make_horizon_dataset, DOMAIN_VARS, LDD_O
        get_timestep
 
 include("gnn.jl")
-export WflowGNN, MassBalanceLayer, mb_diagnostics, ModelSettings, save_model_settings, load_model_settings, ACTIVATIONS
+export WflowGNN, MassBalanceLayer, mb_diagnostics, ModelSettings, save_model_settings, load_model_settings, ACTIVATIONS,
+       SparseConv
 
 include("strategy.jl")
 export TrainingStrategy, save_training_strategy, load_training_strategy,
