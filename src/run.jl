@@ -171,6 +171,10 @@ function run_wflow_gnn(ds::DataSettings, ms::ModelSettings, ts::TrainSettings)
     all_tgt   = vcat(tgt_edges, collect(1:n_nodes))
     A_sparse  = sparse(all_tgt, all_src, ones(Float32, length(all_src)), n_nodes, n_nodes)
 
+    # A is stored as a CPU SparseMatrixCSC in SparseConv.
+    # Flux.gpu(model) converts it to CuSparseMatrixCSR automatically via the
+    # overloaded Flux.gpu(::SparseConv) method in gnn.jl.
+
     if ms.domain == "river"
         dt = get_timestep(output_file)
         mb = MassBalanceLayer(
@@ -188,12 +192,17 @@ function run_wflow_gnn(ds::DataSettings, ms::ModelSettings, ts::TrainSettings)
         @info "Mass balance h_loss_weight = $(round(h_weight; sigdigits=3)) " *
               "(σ_h=$(round(mb.σ_h; sigdigits=3)), σ_q=$(round(mb.σ_q; sigdigits=3)), dt=$(mb.dt) s)"
         ts.strategy.h_loss_weight = h_weight
-        # @info "Mass balance enabled: h derived from physics constraint, h_loss_weight=0"
-        # ts.strategy.h_loss_weight = 0f0
-        model = dev_fn(WflowGNN(ms, mb, A_sparse))
+        model = WflowGNN(ms, mb, A_sparse)
     else
-        model = dev_fn(WflowGNN(ms, A_sparse))
+        model = WflowGNN(ms, A_sparse)
     end
+
+    # Pre-compute block-diagonal adjacency matrix for the training batch size.
+    # Must happen on CPU (before dev_fn) because blockdiag requires SparseMatrixCSC.
+    # After dev_fn the block-diagonal is on the same device as the weights.
+    train_batch_size = min(ts.batch_size, length(dataset.train))
+    model = precompute_batched(model, train_batch_size)
+    model = dev_fn(model)
     train_duration = @elapsed begin
         losses = train_model!(model, train_loader, val_loader, ts)
     end
