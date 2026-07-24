@@ -34,6 +34,9 @@ hidden_dim = 64
 # Number of message-passing layers in the processor
 nlayers = 3
 
+# Number of Dense layers in the encoder and decoder MLPs (1 = single layer)
+mlp_layers = 1
+
 # Activation function for the encoder MLP
 # Options: "relu", "sigmoid", "tanh", "swish", "identity"
 enc_activation  = "swish"

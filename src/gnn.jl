@@ -32,14 +32,16 @@ Hyperparameters for a `WflowGNN` model.
 
 - `domain`          : routing domain; must be a key of `DOMAIN_VARS`.
 - `hidden_dim`      : width of the hidden representation (default `64`).
-- `nlayers`         : number of `GraphConv` layers in the processor (default `3`).
-- `enc_activation`  : activation for the encoder `Dense` layer (default `swish`).
-- `proc_activation` : activation for each `GraphConv` layer (default `swish`).
+- `nlayers`         : number of message-passing layers in the processor (default `3`).
+- `mlp_layers`      : number of `Dense` layers in the encoder and decoder MLPs (default `1`).
+- `enc_activation`  : activation for encoder `Dense` layers (default `swish`).
+- `proc_activation` : activation for each processor layer (default `swish`).
 """
 Base.@kwdef struct ModelSettings
     domain          :: String
     hidden_dim      :: Int = 64
     nlayers         :: Int = 3
+    mlp_layers      :: Int = 1
     enc_activation         = swish
     proc_activation        = swish
 end
@@ -49,6 +51,7 @@ function Base.show(io::IO, s::ModelSettings)
     println(io, "  domain          : ", s.domain)
     println(io, "  hidden_dim      : ", s.hidden_dim)
     println(io, "  nlayers         : ", s.nlayers)
+    println(io, "  mlp_layers      : ", s.mlp_layers)
     println(io, "  enc_activation  : ", _activation_name(s.enc_activation))
     print(  io, "  proc_activation : ", _activation_name(s.proc_activation))
 end
@@ -64,6 +67,7 @@ function save_model_settings(path::String, s::ModelSettings)
         "domain"          => s.domain,
         "hidden_dim"      => s.hidden_dim,
         "nlayers"         => s.nlayers,
+        "mlp_layers"      => s.mlp_layers,
         "enc_activation"  => _activation_name(s.enc_activation),
         "proc_activation" => _activation_name(s.proc_activation),
     )
@@ -87,6 +91,7 @@ function load_model_settings(path::String)
         domain          = d["domain"],
         hidden_dim      = get(d, "hidden_dim", 64),
         nlayers         = get(d, "nlayers",    3),
+        mlp_layers      = get(d, "mlp_layers", 1),
         enc_activation  = ACTIVATIONS[enc_name],
         proc_activation = ACTIVATIONS[proc_name],
     )
@@ -386,7 +391,7 @@ function (l::SparseConv)(::GNNGraph, h::AbstractMatrix{Float32})
         neigh2 = h2 * l.A'
         neigh  = reshape(permutedims(reshape(neigh2, H, B, N_per), (1, 3, 2)), H, N_total)
     end
-    l.σ.(l.W_self * h .+ l.W_neigh * neigh .+ l.bias)
+    l.σ.(l.W_self * h .+ l.W_neigh * neigh .+ l.bias) .+ h
 end
 
 """
@@ -415,17 +420,17 @@ end
 
 Encode-process-decode GNN for wflow routing emulation.
 
-- `encoder`      : `Dense` layer mapping `in_dim -> hidden_dim` with a configurable activation.
+- `encoder`      : `Dense` or `Chain` of `Dense` layers mapping `in_dim -> hidden_dim`.
 - `processor`    : `GNNChain` of `GraphConv` or `SparseConv` layers operating at `hidden_dim`.
-- `decoder`      : `Dense` layer mapping `hidden_dim -> out_dim` (no activation).
+- `decoder`      : `Dense` or `Chain` of `Dense` layers mapping `hidden_dim -> out_dim`.
 - `mass_balance` : optional `MassBalanceLayer` that hard-constrains `river_h` via the
                    kinematic-wave mass balance. When present the decoder outputs only
                    `Δq` (`out_dim = 1`) and `river_h` is computed analytically.
 """
 struct WflowGNN
-    encoder      :: Dense
+    encoder      :: Union{Dense, Chain}
     processor    :: GNNChain
-    decoder      :: Dense
+    decoder      :: Union{Dense, Chain}
     mass_balance :: Union{Nothing, MassBalanceLayer}
 end
 
@@ -469,6 +474,7 @@ function WflowGNN(s::ModelSettings)
     out_dim = length(vars["state"])
     return WflowGNN(in_dim, s.hidden_dim, out_dim;
                     nlayers         = s.nlayers,
+                    mlp_layers      = s.mlp_layers,
                     enc_activation  = s.enc_activation,
                     proc_activation = s.proc_activation)
 end
@@ -495,6 +501,7 @@ function WflowGNN(s::ModelSettings, A::AbstractMatrix{Float32})
     out_dim = length(vars["state"])
     return WflowGNN(in_dim, s.hidden_dim, out_dim;
                     nlayers         = s.nlayers,
+                    mlp_layers      = s.mlp_layers,
                     enc_activation  = s.enc_activation,
                     proc_activation = s.proc_activation,
                     adj_matrix      = A)
@@ -514,6 +521,7 @@ function WflowGNN(s::ModelSettings, mb::MassBalanceLayer)
     in_dim = length(vars["state"]) + length(vars["forcing"]) + length(vars["static"])
     return WflowGNN(in_dim, s.hidden_dim, 1;
                     nlayers         = s.nlayers,
+                    mlp_layers      = s.mlp_layers,
                     enc_activation  = s.enc_activation,
                     proc_activation = s.proc_activation,
                     mass_balance    = mb)
@@ -532,6 +540,7 @@ function WflowGNN(s::ModelSettings, mb::MassBalanceLayer, A::AbstractMatrix{Floa
     in_dim = length(vars["state"]) + length(vars["forcing"]) + length(vars["static"])
     return WflowGNN(in_dim, s.hidden_dim, 1;
                     nlayers         = s.nlayers,
+                    mlp_layers      = s.mlp_layers,
                     enc_activation  = s.enc_activation,
                     proc_activation = s.proc_activation,
                     mass_balance    = mb,
@@ -540,24 +549,47 @@ end
 
 # Internal constructor — shared by all public constructors.
 # Pass `adj_matrix` to use SparseConv layers instead of GraphConv.
+# `mlp_layers` controls the number of Dense layers in the encoder and decoder.
 function WflowGNN(
         in_dim    :: Int,
         hidden_dim:: Int,
         out_dim   :: Int;
         nlayers         :: Int = 3,
+        mlp_layers      :: Int = 1,
         enc_activation        = swish,
         proc_activation       = swish,
         mass_balance          = nothing,
         adj_matrix            = nothing)
 
-    encoder = Dense(in_dim => hidden_dim, enc_activation)
+    mlp_layers >= 1 || throw(ArgumentError("mlp_layers must be >= 1, got $mlp_layers"))
+
+    # Encoder: in_dim → hidden_dim → ... → hidden_dim  (mlp_layers Dense layers)
+    if mlp_layers == 1
+        encoder = Dense(in_dim => hidden_dim, enc_activation)
+    else
+        enc_ls = Any[Dense(in_dim => hidden_dim, enc_activation)]
+        for _ in 2:mlp_layers
+            push!(enc_ls, Dense(hidden_dim => hidden_dim, enc_activation))
+        end
+        encoder = Chain(enc_ls...)
+    end
+
     if isnothing(adj_matrix)
         processor = GNNChain([GraphConv(hidden_dim => hidden_dim, proc_activation) for _ in 1:nlayers]...)
     else
         A = adj_matrix :: AbstractMatrix{Float32}
         processor = GNNChain([SparseConv(hidden_dim => hidden_dim, proc_activation; A=A) for _ in 1:nlayers]...)
     end
-    decoder = Dense(hidden_dim => out_dim)
+
+    # Decoder: hidden_dim → ... → hidden_dim → out_dim  (mlp_layers Dense layers)
+    if mlp_layers == 1
+        decoder = Dense(hidden_dim => out_dim)
+    else
+        dec_ls = Any[Dense(hidden_dim => hidden_dim, enc_activation) for _ in 1:(mlp_layers - 1)]
+        push!(dec_ls, Dense(hidden_dim => out_dim))
+        decoder = Chain(dec_ls...)
+    end
+
     return WflowGNN(encoder, processor, decoder, mass_balance)
 end
 

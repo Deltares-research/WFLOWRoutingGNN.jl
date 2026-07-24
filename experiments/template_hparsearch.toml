@@ -43,6 +43,8 @@ hidden_dim = 64
 
 nlayers = 3
 
+mlp_layers = 1
+
 enc_activation  = "swish"
 proc_activation = "swish"
 
@@ -81,6 +83,7 @@ search_type = "box"
 # Architecture size
 "model.hidden_dim" = [32, 64, 128]
 "model.nlayers"    = [2, 3]
+"model.mlp_layers" = [1, 2]
 
 # Learning rate
 "train.lr_start" = [1e-3, 5e-4]

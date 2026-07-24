@@ -70,6 +70,7 @@ function run_wflow_gnn_from_toml(toml_path::String)
         domain          = md["domain"],
         hidden_dim      = get(md, "hidden_dim",      64),
         nlayers         = get(md, "nlayers",          3),
+        mlp_layers      = get(md, "mlp_layers",       1),
         enc_activation  = ACTIVATIONS[get(md, "enc_activation",  "swish")],
         proc_activation = ACTIVATIONS[get(md, "proc_activation", "swish")],
     )
