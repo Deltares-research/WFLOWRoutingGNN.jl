@@ -54,8 +54,9 @@ function rollout(model, g0::GNNGraph, forcing::AbstractArray{<:Real, 3};
 
     t_total = time() - t_start
     mean_step = sum(step_times) / T
-    @info @sprintf("rollout: %d steps  total=%.3f s  mean/step=%.4f s  min=%.4f s  max=%.4f s",
-                   T, t_total, mean_step, minimum(step_times), maximum(step_times))
+    std_step  = sqrt(sum((step_times .- mean_step).^2) / T)
+    @info @sprintf("rollout: %d steps  total=%.3f s  mean/step=%.4f s  std/step=%.4f s  min=%.4f s  max=%.4f s",
+                   T, t_total, mean_step, std_step, minimum(step_times), maximum(step_times))
 
     return Array{Float32}(Flux.cpu(states_d))
 end

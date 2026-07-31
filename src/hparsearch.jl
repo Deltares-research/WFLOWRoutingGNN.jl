@@ -215,6 +215,8 @@ function hpar_search(toml_path::String)
             wflow_model_path = resolve(dd["wflow_model_path"]),
             train_frac       = dd["train_frac"],
             val_frac         = dd["val_frac"],
+            output_run_dir   = get(dd, "output_run_dir", "run_default"),
+            wflow_schema     = get(dd, "wflow_schema",   "v1"),
         )
 
         md = d["model"]
@@ -222,6 +224,7 @@ function hpar_search(toml_path::String)
             domain          = md["domain"],
             hidden_dim      = get(md, "hidden_dim",      64),
             nlayers         = get(md, "nlayers",          3),
+            mlp_layers      = get(md, "mlp_layers",       1),
             enc_activation  = ACTIVATIONS[get(md, "enc_activation",  "swish")],
             proc_activation = ACTIVATIONS[get(md, "proc_activation", "swish")],
         )

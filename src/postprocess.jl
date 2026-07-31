@@ -74,13 +74,14 @@ function write_regrid_to_netcdf(
         grids           :: Dict{String, Array{Float32,3}},
         staticmaps_file :: String,
         timestamps      :: AbstractVector,
-        path            :: String)
+        path            :: String;
+        schema          :: WflowSchema = SCHEMA_V1)
 
     isempty(grids) && throw(ArgumentError("grids must not be empty"))
 
     # Read lon/lat coordinate vectors from staticmaps (dim1=lon, dim2=lat)
     lon_vals, lat_vals = NCDataset(staticmaps_file, "r") do ds
-        dn = dimnames(ds["local_drain_direction"])
+        dn = dimnames(ds[schema.ldd_var])
         Float64.(ds[dn[1]][:]), Float64.(ds[dn[2]][:])
     end
 

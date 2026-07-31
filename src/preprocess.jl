@@ -60,14 +60,14 @@ Cells with `missing` values (nodata) and cells with value `5` (pit/outlet) are
 excluded — they have no downstream neighbour. Out-of-bounds neighbours (raster
 edges) are silently skipped.
 """
-function ldd_to_graph(ncfile::String, domain::String)
+function ldd_to_graph(ncfile::String, domain::String, schema::WflowSchema = SCHEMA_V1)
     domain in keys(DOMAIN_VARS) || throw(ArgumentError("domain must be one of $(join(sort(collect(keys(DOMAIN_VARS))), ", ")), got \"$domain\""))
 
     NCDataset(ncfile, "r") do ds
-        ldd_raw = ds["local_drain_direction"][:, :]  # Array{Union{Missing, Int}, 2}  (nrows × ncols)
+        ldd_raw = ds[schema.ldd_var][:, :]  # Array{Union{Missing, Int}, 2}  (nrows × ncols)
 
         # river uses river_mask to define active cells; land and subsurface use all non-nodata cells
-        river_mask = domain == "river" ? ds["river_mask"][:, :] : nothing
+        river_mask = domain == "river" ? ds[schema.mask_var][:, :] : nothing
 
         is_active(r, c) = domain == "river" ?
             (!ismissing(river_mask[r, c]) && river_mask[r, c] != 0) :
@@ -136,14 +136,19 @@ to remap node indices when reading from `output_file`.
 function check_and_correct_grid_alignment(
         staticmaps_file :: String,
         output_file     :: String,
-        domain          :: String)
+        domain          :: String,
+        schema          :: WflowSchema = SCHEMA_V1)
 
-    vars      = DOMAIN_VARS[domain]
-    ref_vname = isempty(vars["state"]) ? first(vars["forcing"]) : first(vars["state"])
+    # Find the first output-sourced variable to use as the spatial grid reference
+    all_out = filter(p -> p.second.source == :output,
+                     vcat(schema.state_vars, schema.forcing_vars, schema.static_vars))
+    isempty(all_out) && throw(ArgumentError(
+        "schema has no output-sourced variables; cannot check grid alignment"))
+    ref_vname = first(all_out).second.ncdf_name
 
     sm_coords, out_coords = NCDataset(staticmaps_file, "r") do sm_ds
         NCDataset(output_file, "r") do out_ds
-            sm_sdims  = [d for d in dimnames(sm_ds["local_drain_direction"])
+            sm_sdims  = [d for d in dimnames(sm_ds[schema.ldd_var])
                          if d ∉ ("time", "layer")]
             out_sdims = [d for d in dimnames(out_ds[ref_vname])
                          if d ∉ ("time", "layer")]
@@ -192,13 +197,14 @@ end
 #
 # Signature: f!(slice, rows, cols, staticmaps_file) -> inv_scales
 
-function scale_river_q!(slice       :: AbstractMatrix{Float32},
-                        rows        :: Vector{Int},
-                        cols        :: Vector{Int},
-                        staticmaps_file :: String)
+function scale_river_q!(slice           :: AbstractMatrix{Float32},
+                        rows            :: Vector{Int},
+                        cols            :: Vector{Int},
+                        staticmaps_file :: String,
+                        schema          :: WflowSchema = SCHEMA_V1)
     NCDataset(staticmaps_file, "r") do ds
         coerce(x) = ismissing(x) ? NaN32 : Float32(x)
-        area = ds["meta_upstream_area"][:, :]
+        area = ds[schema.upstream_area_var][:, :]
         inv  = Vector{Float32}(undef, length(rows))
         for i in eachindex(rows)
             a = coerce(area[rows[i], cols[i]])
@@ -213,15 +219,16 @@ function scale_river_q!(slice       :: AbstractMatrix{Float32},
     end
 end
 
-function scale_river_h!(slice       :: AbstractMatrix{Float32},
-                        rows        :: Vector{Int},
-                        cols        :: Vector{Int},
-                        staticmaps_file :: String)
+function scale_river_h!(slice           :: AbstractMatrix{Float32},
+                        rows            :: Vector{Int},
+                        cols            :: Vector{Int},
+                        staticmaps_file :: String,
+                        schema          :: WflowSchema = SCHEMA_V1)
     NCDataset(staticmaps_file, "r") do ds
         coerce(x) = ismissing(x) ? NaN32 : Float32(x)
-        area  = ds["meta_upstream_area"][:, :]
-        width = ds["river_width"][:, :]
-        len   = ds["river_length"][:, :]
+        area  = ds[schema.upstream_area_var][:, :]
+        width = ds[schema.river_width_var][:, :]
+        len   = ds[schema.river_length_var][:, :]
         inv   = Vector{Float32}(undef, length(rows))
         for i in eachindex(rows)
             r, c = rows[i], cols[i]
@@ -285,32 +292,28 @@ Construct a `GNNGraph` for the wflow routing domain with standardized node featu
   normalisation for `river_q`, storage-proxy scaling for `river_h`).
   Pass this to `evaluate_trajectory` as `postscale` to recover physical units.
 """
-function build_wflow_graph(staticmaps_file::String, output_file::String, domain::String)
-    vars         = DOMAIN_VARS[domain]   # domain validated inside ldd_to_graph
-    state_vars   = vars["state"]
-    forcing_vars = vars["forcing"]
-    static_vars  = vars["static"]
-
+function build_wflow_graph(staticmaps_file::String, output_file::String, domain::String;
+                           schema::WflowSchema = SCHEMA_V1)
     # ── 0. Check grid alignment; detect reversed axes ────────────────────────
-    alignment  = check_and_correct_grid_alignment(staticmaps_file, output_file, domain)
+    alignment  = check_and_correct_grid_alignment(staticmaps_file, output_file, domain, schema)
     dim1_flip  = alignment.dim1_flip
     dim2_flip  = alignment.dim2_flip
 
     # ── 1. Get sparse linear-index edge list ────────────────────────────────
-    src_raw, tgt_raw = ldd_to_graph(staticmaps_file, domain)
+    src_raw, tgt_raw = ldd_to_graph(staticmaps_file, domain, schema)
 
     # ── 2. Build compact node index mapping (all active domain cells) ────────
     # Derive node_ids from the mask directly so that isolated/outlet cells
     # (e.g. LDD pit cells with value 5) are still included as graph nodes.
     node_ids = NCDataset(staticmaps_file, "r") do ds
         if domain == "river"
-            mask = ds["river_mask"][:, :]
+            mask = ds[schema.mask_var][:, :]
             nr, nc = size(mask)
             sort([((c - 1) * nr + r)
                   for c in 1:nc, r in 1:nr
                   if !ismissing(mask[r, c]) && mask[r, c] != 0])
         else
-            ldd = ds["local_drain_direction"][:, :]
+            ldd = ds[schema.ldd_var][:, :]
             nr, nc = size(ldd)
             sort([((c - 1) * nr + r)
                   for c in 1:nc, r in 1:nr
@@ -325,7 +328,7 @@ function build_wflow_graph(staticmaps_file::String, output_file::String, domain:
 
     # ── 3. Recover (row, col) for each node ─────────────────────────────────
     nrows, ncols = NCDataset(staticmaps_file, "r") do ds
-        size(ds["local_drain_direction"])
+        size(ds[schema.ldd_var])
     end
 
     rows = [(id - 1) % nrows + 1 for id in node_ids]
@@ -347,51 +350,81 @@ function build_wflow_graph(staticmaps_file::String, output_file::String, domain:
     stats     = Dict{String, @NamedTuple{mean::Float32, std::Float32}}()
     postscale = Dict{String, Vector{Float32}}()
 
-    # ── 4. Extract time-varying features from output.nc ─────────────────────────
-    state, forcing = NCDataset(output_file, "r") do ds
-        ref_var = isempty(state_vars) ? first(forcing_vars) : first(state_vars)
-        ntimes  = size(ds[ref_var], 3)
+    # ── 4 & 5. Extract all features, routing each variable to its source file ──
+    # Both files are opened once; each VarSpec carries the ncdf_name and source.
+    state, forcing, static = NCDataset(staticmaps_file, "r") do sm_ds
+        NCDataset(output_file, "r") do out_ds
 
-        function extract_timeseries(varnames)
-            n   = length(varnames)
-            arr = Array{Float32}(undef, n, n_nodes, ntimes)
-            for (vi, vname) in enumerate(varnames)
-                data = ds[vname][:, :, :]
-                for (i, (r, c)) in enumerate(zip(rows, cols))
-                    r_out = dim1_flip ? nrows - r + 1 : r
-                    c_out = dim2_flip ? ncols - c + 1 : c
-                    for t in 1:ntimes
-                        arr[vi, i, t] = coerce(data[r_out, c_out, t])
+            # ntimes from the first output-sourced state/forcing variable
+            all_tv  = vcat(schema.state_vars, schema.forcing_vars)
+            ref_idx = findfirst(p -> p.second.source == :output, all_tv)
+            isnothing(ref_idx) && throw(ArgumentError(
+                "schema has no output-sourced state/forcing variables"))
+            ntimes = size(out_ds[all_tv[ref_idx].second.ncdf_name], 3)
+
+            # Extract time-varying variables; VarSpec carries ncdf_name and source.
+            function extract_timeseries(var_pairs)
+                n   = length(var_pairs)
+                arr = Array{Float32}(undef, n, n_nodes, ntimes)
+                for (vi, (lname, spec)) in enumerate(var_pairs)
+                    if spec.source == :output
+                        data = out_ds[spec.ncdf_name][:, :, :]
+                        for (i, (r, c)) in enumerate(zip(rows, cols))
+                            r_out = dim1_flip ? nrows - r + 1 : r
+                            c_out = dim2_flip ? ncols - c + 1 : c
+                            for t in 1:ntimes
+                                arr[vi, i, t] = coerce(data[r_out, c_out, t])
+                            end
+                        end
+                    else  # :staticmaps — time-invariant; broadcast across timesteps
+                        data = sm_ds[spec.ncdf_name][:, :]
+                        for (i, (r, c)) in enumerate(zip(rows, cols))
+                            val = coerce(data[r, c])
+                            for t in 1:ntimes
+                                arr[vi, i, t] = val
+                            end
+                        end
                     end
+                    # Apply domain/variable-specific preprocessing via VAR_SCALERS
+                    domain_scalers = get(VAR_SCALERS, domain, Dict{String,Function}())
+                    if haskey(domain_scalers, lname)
+                        postscale[lname] = domain_scalers[lname](
+                            @view(arr[vi, :, :]), rows, cols, staticmaps_file, schema)
+                    end
+                    μ, σ = standardize!(@view arr[vi, :, :])
+                    stats[lname] = (mean = μ, std = σ)
                 end
-                # Apply domain/variable-specific preprocessing via VAR_SCALERS
-                domain_scalers = get(VAR_SCALERS, domain, Dict{String,Function}())
-                if haskey(domain_scalers, vname)
-                    postscale[vname] = domain_scalers[vname](
-                        @view(arr[vi, :, :]), rows, cols, staticmaps_file)
+                arr
+            end
+
+            # Extract static variables; source-routed per variable.
+            function extract_static(var_pairs)
+                n   = length(var_pairs)
+                arr = Array{Float32}(undef, n, n_nodes)
+                for (vi, (lname, spec)) in enumerate(var_pairs)
+                    if spec.source == :staticmaps
+                        data = sm_ds[spec.ncdf_name][:, :]
+                        for (i, (r, c)) in enumerate(zip(rows, cols))
+                            arr[vi, i] = coerce(data[r, c])
+                        end
+                    else  # :output — apply flip correction; take first timestep (static in time)
+                        data = out_ds[spec.ncdf_name][:, :, 1]
+                        for (i, (r, c)) in enumerate(zip(rows, cols))
+                            r_out = dim1_flip ? nrows - r + 1 : r
+                            c_out = dim2_flip ? ncols - c + 1 : c
+                            arr[vi, i] = coerce(data[r_out, c_out])
+                        end
+                    end
+                    μ, σ = standardize!(@view arr[vi, :])
+                    stats[lname] = (mean = μ, std = σ)
                 end
-                μ, σ = standardize!(@view arr[vi, :, :])
-                stats[vname] = (mean = μ, std = σ)
+                arr
             end
-            arr
-        end
 
-        extract_timeseries(state_vars), extract_timeseries(forcing_vars)
-    end
-
-    # ── 5. Extract static features from staticmaps.nc ───────────────────────
-    static = NCDataset(staticmaps_file, "r") do ds
-        n   = length(static_vars)
-        arr = Array{Float32}(undef, n, n_nodes)
-        for (vi, vname) in enumerate(static_vars)
-            data = ds[vname][:, :]
-            for (i, (r, c)) in enumerate(zip(rows, cols))
-                arr[vi, i] = coerce(data[r, c])
-            end
-            μ, σ = standardize!(@view arr[vi, :])
-            stats[vname] = (mean = μ, std = σ)
+            extract_timeseries(schema.state_vars),
+            extract_timeseries(schema.forcing_vars),
+            extract_static(schema.static_vars)
         end
-        arr
     end
 
     # ── 6. Construct one GNNGraph per timestep ───────────────────────────────
@@ -478,6 +511,11 @@ Fields:
 - `wflow_model_path` : path to the wflow model directory.
 - `train_frac`       : fraction of windows used for training.
 - `val_frac`         : fraction of windows used for validation.
+- `output_run_dir`   : subdirectory inside `wflow_model_path` containing `output.nc`
+                       (default `"run_default"`).
+- `wflow_schema`     : schema preset name (e.g. `"v1"`) or path to a schema TOML file
+                       that maps logical variable names to NetCDF names and source files
+                       (default `"v1"`).
 """
 struct DataSettings
     run_name         :: String
@@ -485,26 +523,33 @@ struct DataSettings
     wflow_model_path :: String
     train_frac       :: Float64
     val_frac         :: Float64
+    output_run_dir   :: String
+    wflow_schema     :: String
 end
 
 """
-    DataSettings(; run_name, runs_dir, wflow_model_path, train_frac, val_frac) -> DataSettings
+    DataSettings(; run_name, runs_dir, wflow_model_path, train_frac, val_frac,
+                   output_run_dir = "run_default", wflow_schema = "v1") -> DataSettings
 """
 function DataSettings(;
         run_name         :: String,
         runs_dir         :: String,
         wflow_model_path :: String,
         train_frac       :: Real,
-        val_frac         :: Real)
+        val_frac         :: Real,
+        output_run_dir   :: String = "run_default",
+        wflow_schema     :: String = "v1")
 
-    isempty(run_name)   && throw(ArgumentError("run_name must not be empty"))
+    isempty(run_name)       && throw(ArgumentError("run_name must not be empty"))
+    isempty(output_run_dir) && throw(ArgumentError("output_run_dir must not be empty"))
     train_frac > 0      || throw(ArgumentError("train_frac must be positive"))
     val_frac   > 0      || throw(ArgumentError("val_frac must be positive"))
     train_frac + val_frac < 1 ||
         throw(ArgumentError("train_frac + val_frac must be < 1"))
 
     DataSettings(run_name, runs_dir, wflow_model_path,
-                 Float64(train_frac), Float64(val_frac))
+                 Float64(train_frac), Float64(val_frac),
+                 output_run_dir, wflow_schema)
 end
 
 function Base.show(io::IO, s::DataSettings)
@@ -513,7 +558,9 @@ function Base.show(io::IO, s::DataSettings)
     println(io, "  runs_dir         : ", s.runs_dir)
     println(io, "  wflow_model_path : ", s.wflow_model_path)
     println(io, "  train_frac       : ", s.train_frac)
-    print(  io, "  val_frac         : ", s.val_frac)
+    println(io, "  val_frac         : ", s.val_frac)
+    println(io, "  output_run_dir   : ", s.output_run_dir)
+    print(  io, "  wflow_schema     : ", s.wflow_schema)
 end
 
 """
@@ -528,6 +575,8 @@ function save_data_settings(path::String, s::DataSettings)
         "wflow_model_path" => s.wflow_model_path,
         "train_frac"       => s.train_frac,
         "val_frac"         => s.val_frac,
+        "output_run_dir"   => s.output_run_dir,
+        "wflow_schema"     => s.wflow_schema,
     )
     open(path, "w") do io
         TOML.print(io, dict)
@@ -547,5 +596,7 @@ function load_data_settings(path::String)
         wflow_model_path = d["wflow_model_path"],
         train_frac       = d["train_frac"],
         val_frac         = d["val_frac"],
+        output_run_dir   = get(d, "output_run_dir", "run_default"),
+        wflow_schema     = get(d, "wflow_schema",   "v1"),
     )
 end

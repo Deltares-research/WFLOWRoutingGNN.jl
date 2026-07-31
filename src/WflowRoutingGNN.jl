@@ -3,6 +3,10 @@ module WflowRoutingGNN
 using Printf
 using Statistics
 
+include("schema.jl")
+export VarSpec, WflowSchema, SCHEMA_V1, SCHEMAS, save_schema, load_schema,
+       logical_names, ncdf_names
+
 include("preprocess.jl")
 export ldd_to_graph, build_wflow_graph, make_horizon_dataset, DOMAIN_VARS, LDD_OFFSETS,
        check_and_correct_grid_alignment,

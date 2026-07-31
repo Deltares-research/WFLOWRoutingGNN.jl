@@ -63,6 +63,8 @@ function run_wflow_gnn_from_toml(toml_path::String)
         wflow_model_path = resolve(dd["wflow_model_path"]),
         train_frac       = dd["train_frac"],
         val_frac         = dd["val_frac"],
+        output_run_dir   = get(dd, "output_run_dir", "run_default"),
+        wflow_schema     = get(dd, "wflow_schema",   "v1"),
     )
 
     md = d["model"]
@@ -135,15 +137,34 @@ function run_wflow_gnn(ds::DataSettings, ms::ModelSettings, ts::TrainSettings)
 
     # --- 1. Build time-series graphs ---
     staticmaps_file = joinpath(ds.wflow_model_path, "staticmaps.nc")
-    output_file     = joinpath(ds.wflow_model_path, "run_default", "output.nc")
+    output_file     = joinpath(ds.wflow_model_path, ds.output_run_dir, "output.nc")
 
     @info "Building Graph"
-    graphs, norm_stats, grid, postscale = build_wflow_graph(staticmaps_file, output_file, ms.domain)
+    schema = load_schema(ds.wflow_schema)
+    graphs, norm_stats, grid, postscale = build_wflow_graph(staticmaps_file, output_file, ms.domain; schema)
+
+    g0        = graphs[1]
+    n_nodes   = g0.num_nodes
+    n_edges   = g0.num_edges
+    n_times   = length(graphs)
+    @info @sprintf("Graph: %d nodes  %d edges  %d timesteps", n_nodes, n_edges, n_times)
 
     # --- 2. Sliding-window horizon dataset ---
     @info "Building datasets"
     nhorizon = maximum(ts.strategy.steps) + 1
     dataset  = make_horizon_dataset(graphs, nhorizon; at = (ds.train_frac, ds.val_frac))
+
+    n_train_windows = length(dataset.train)
+    n_val_windows   = length(dataset.val)
+    n_test_windows  = length(dataset.test)
+    n_state   = size(g0.ndata.state,   1)
+    n_forcing = size(g0.ndata.forcing, 1)
+    n_static  = size(g0.ndata.static,  1)
+    bytes_per_window = nhorizon * n_nodes * (n_state + n_forcing + n_static) * sizeof(Float32)
+    @info @sprintf("Dataset: %d train windows  %d val windows  %d test windows  (horizon=%d)",
+                   n_train_windows, n_val_windows, n_test_windows, nhorizon)
+    @info @sprintf("Window size: %d steps × %d nodes × (%d state + %d forcing + %d static) = %.1f KB",
+                   nhorizon, n_nodes, n_state, n_forcing, n_static, bytes_per_window / 1024)
 
     # --- 3. DataLoaders ---
     train_loader = DataLoader(dataset.train;
@@ -165,8 +186,6 @@ function run_wflow_gnn(ds::DataSettings, ms::ModelSettings, ts::TrainSettings)
     # A[i,j] = 1 means node j is an upstream neighbour of node i.
     # Self-loops are included so each node also aggregates its own state,
     # matching the default GraphConv behaviour.
-    g0 = graphs[1]
-    n_nodes   = g0.num_nodes
     src_edges, tgt_edges = edge_index(g0)
     all_src   = vcat(src_edges, collect(1:n_nodes))
     all_tgt   = vcat(tgt_edges, collect(1:n_nodes))
@@ -178,9 +197,15 @@ function run_wflow_gnn(ds::DataSettings, ms::ModelSettings, ts::TrainSettings)
 
     if ms.domain == "river"
         dt = get_timestep(output_file)
+        pq_vec = postscale["river_q"]
+        ph_vec = postscale["river_h"]
+        # Routing-only adjacency (no self-loops): A_routing[i,j]=1 means j flows into i.
+        A_routing = sparse(all_tgt[1:length(src_edges)], all_src[1:length(src_edges)],
+                           ones(Float32, length(src_edges)), n_nodes, n_nodes)
         mb = MassBalanceLayer(
-            postscale["river_q"],
-            postscale["river_h"],
+            pq_vec,
+            ph_vec,
+            ph_vec ./ pq_vec,
             Float32(norm_stats["river_q"].mean),
             Float32(norm_stats["river_q"].std),
             Float32(norm_stats["river_h"].mean),
@@ -188,6 +213,7 @@ function run_wflow_gnn(ds::DataSettings, ms::ModelSettings, ts::TrainSettings)
             Float32(norm_stats["river_inwater"].mean),
             Float32(norm_stats["river_inwater"].std),
             dt,
+            A_routing,
         )
         h_weight = mb.σ_h / (mb.dt * mb.σ_q)
         @info "Mass balance h_loss_weight = $(round(h_weight; sigdigits=3)) " *
@@ -203,6 +229,12 @@ function run_wflow_gnn(ds::DataSettings, ms::ModelSettings, ts::TrainSettings)
     # After dev_fn the block-diagonal is on the same device as the weights.
     train_batch_size = min(ts.batch_size, length(dataset.train))
     model = precompute_batched(model, train_batch_size)
+
+    n_params = sum(length, Flux.params(model))
+    @info @sprintf("Model: %d MP layers  hidden_dim=%d  mlp_layers=%d  trainable params=%s",
+                   ms.nlayers, ms.hidden_dim, ms.mlp_layers,
+                   replace(string(n_params), r"(?<=\d)(?=(\d{3})+$)" => "_"))
+
     model = dev_fn(model)
     train_duration = @elapsed begin
         losses = train_model!(model, train_loader, val_loader, ts)
@@ -284,9 +316,9 @@ function run_wflow_gnn(ds::DataSettings, ms::ModelSettings, ts::TrainSettings)
                        for i in 1:n_frames]
 
         write_regrid_to_netcdf(p_grids, staticmaps_file, split_times,
-                               joinpath(run_dir, "$(split_name)_pred.nc"))
+                               joinpath(run_dir, "$(split_name)_pred.nc"); schema)
         write_regrid_to_netcdf(t_grids, staticmaps_file, split_times,
-                               joinpath(run_dir, "$(split_name)_true.nc"))
+                               joinpath(run_dir, "$(split_name)_true.nc"); schema)
 
         if split_name == "val"
             plot_validation_movie(p_grids, t_grids, ms.domain;

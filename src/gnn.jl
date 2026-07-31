@@ -121,6 +121,7 @@ Fields (all per-node constants, not optimised):
 struct MassBalanceLayer{V <: AbstractVector{Float32}}
     postscale_q  :: V
     postscale_h  :: V
+    ph_over_pq   :: V   # postscale_h ./ postscale_q — precomputed constant
     μ_q          :: Float32
     σ_q          :: Float32
     μ_h          :: Float32
@@ -128,10 +129,34 @@ struct MassBalanceLayer{V <: AbstractVector{Float32}}
     μ_inwater    :: Float32
     σ_inwater    :: Float32
     dt           :: Float32
+    A_routing    :: AbstractMatrix{Float32}  # (n_nodes × n_nodes) upstream adjacency, no self-loops
 end
 
 Flux.@layer MassBalanceLayer
 Flux.trainable(::MassBalanceLayer) = (;)  # physics constants, not optimised
+# Restrict Functors traversal to the per-node vectors; exclude A_routing
+# (not writable in-place on GPU). Device transfer is handled by the explicit
+# Flux.gpu / Flux.cpu overloads below.
+Functors.@functor MassBalanceLayer (postscale_q, postscale_h, ph_over_pq)
+function Flux.gpu(l::MassBalanceLayer)
+    MassBalanceLayer(
+        Flux.gpu(l.postscale_q),
+        Flux.gpu(l.postscale_h),
+        Flux.gpu(l.ph_over_pq),
+        l.μ_q, l.σ_q, l.μ_h, l.σ_h, l.μ_inwater, l.σ_inwater, l.dt,
+        _to_cusparse(l.A_routing),
+    )
+end
+
+function Flux.cpu(l::MassBalanceLayer)
+    MassBalanceLayer(
+        Flux.cpu(l.postscale_q),
+        Flux.cpu(l.postscale_h),
+        Flux.cpu(l.ph_over_pq),
+        l.μ_q, l.σ_q, l.μ_h, l.σ_h, l.μ_inwater, l.σ_inwater, l.dt,
+        _to_cpu_sparse(l.A_routing),
+    )
+end
 
 """
     (l::MassBalanceLayer)(g, state, forcing, q_norm_new) -> h_norm_new
@@ -160,9 +185,17 @@ function (l::MassBalanceLayer)(g            ::GNNGraph,
     n_per = length(l.postscale_q)
     n_rep = n ÷ n_per
 
-    # Tile per-node constants to cover the whole batch  (1 × n_nodes)
-    pq = reshape(repeat(l.postscale_q, n_rep), 1, n)
-    ph = reshape(repeat(l.postscale_h, n_rep), 1, n)
+    # Tile per-node constants to cover the whole batch  (1 × n_nodes).
+    # When n_rep == 1 (always true during rollout), reshape is a zero-copy view.
+    if n_rep == 1
+        pq  = reshape(l.postscale_q,  1, n)
+        ph  = reshape(l.postscale_h,  1, n)
+        phr = reshape(l.ph_over_pq,   1, n)
+    else
+        pq  = reshape(repeat(l.postscale_q,  n_rep), 1, n)
+        ph  = reshape(repeat(l.postscale_h,  n_rep), 1, n)
+        phr = reshape(repeat(l.ph_over_pq,   n_rep), 1, n)
+    end
 
     # Physical discharge at current and predicted timesteps  [m³/s]
     # q_phys_new is floored at 0 in physical space (z-scored 0 ≠ physical 0).
@@ -171,18 +204,18 @@ function (l::MassBalanceLayer)(g            ::GNNGraph,
     # Lateral inflow at t+1  [m³/s]  (row 1 = river_inwater)  — fully-implicit
     inwater_phys = forcing_next[1:1, :] .* l.σ_inwater .+ l.μ_inwater
 
-    # Sum upstream Q[t+1] into each node via the river network edges  [m³/s]
-    # Fully-implicit: both upstream and outflow use the predicted q at t+1.
-    upstream_q = propagate((xi, xj, e) -> xj, g, +; xj = q_phys_new)
+    # Sum upstream Q[t+1] into each node via CuSPARSE SpMM — much faster than
+    # GNNGraph scatter-gather for large graphs.
+    upstream_q = (l.A_routing * q_phys_new')'
 
     # Physical h at current step  [m]
     # h_phys = postscale_h · (norm_h · σ_h + μ_h)
     h_phys_curr = ph .* (state[2:2, :] .* l.σ_h .+ l.μ_h)
 
     # Mass balance  [m]:  Δh = dt · (1/(w·l)) · net_flux
-    #   1/(w·l) = a/(w·l) / a = postscale_h / postscale_q
+    #   1/(w·l) = a/(w·l) / a = postscale_h / postscale_q  (precomputed as ph_over_pq)
     h_phys_new = h_phys_curr .+
-                 l.dt .* (ph ./ pq) .* (upstream_q .+ inwater_phys .- q_phys_new)
+                 l.dt .* phr .* (upstream_q .+ inwater_phys .- q_phys_new)
 
     # Water depth cannot be negative (dry-channel floor)
     h_phys_new = max.(0f0, h_phys_new)
@@ -223,12 +256,12 @@ function mb_diagnostics(l            ::MassBalanceLayer,
     st  = Array(state)
     fn  = Array(forcing_next)
     qn  = Array(q_norm_new)
-    g_c = g isa GNNGraph ? Flux.cpu(g) : g
 
     q_phys_curr  = pq .* (st[1:1, :] .* l.σ_q .+ l.μ_q)   # for diagnostics only
     q_phys_new   = max.(0f0, pq .* (qn .* l.σ_q .+ l.μ_q))
     inwater_phys = fn[1:1, :] .* l.σ_inwater .+ l.μ_inwater
-    upstream_q   = propagate((xi, xj, e) -> xj, g_c, +; xj = q_phys_new)
+    A_cpu        = _to_cpu_sparse(l.A_routing)
+    upstream_q   = (A_cpu * q_phys_new')'
     h_phys_curr  = ph .* (st[2:2, :] .* l.σ_h .+ l.μ_h)
     net_flux     = upstream_q .+ inwater_phys .- q_phys_new
     h_phys_raw   = h_phys_curr .+ l.dt .* (ph ./ pq) .* net_flux
@@ -646,8 +679,6 @@ function (m::WflowGNN)(g::GNNGraph,
     if isnothing(m.mass_balance)
         return state .+ Δ
     else
-        # Δ is (1, n_nodes): predicted Δq.
-        # h_new is derived analytically from the fully-implicit mass balance.
         q_new = state[1:1, :] .+ Δ
         h_new = m.mass_balance(g, state, forcing, forcing_next, q_new)
         return vcat(q_new, h_new)

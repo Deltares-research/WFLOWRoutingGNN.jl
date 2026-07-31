@@ -17,6 +17,13 @@ runs_dir         = "../runs"
 # Must contain staticmaps.nc and run_default/output.nc
 wflow_model_path = "../wflow_model/wflow_test_full"
 
+# Subdirectory inside wflow_model_path containing output.nc
+output_run_dir = "run_default"
+
+# Wflow output schema: "v1" (default) or a path to a schema TOML file.
+# Change this when using a different wflow version whose variable names differ.
+wflow_schema = "v1"
+
 # Fraction of sliding windows used for training (remainder → test)
 train_frac = 0.6
 
