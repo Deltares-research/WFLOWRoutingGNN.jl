@@ -119,17 +119,19 @@ Fields (all per-node constants, not optimised):
 - `dt`            : model timestep in seconds
 """
 struct MassBalanceLayer{V <: AbstractVector{Float32}}
-    postscale_q  :: V
-    postscale_h  :: V
-    ph_over_pq   :: V   # postscale_h ./ postscale_q — precomputed constant
-    μ_q          :: Float32
-    σ_q          :: Float32
-    μ_h          :: Float32
-    σ_h          :: Float32
-    μ_inwater    :: Float32
-    σ_inwater    :: Float32
-    dt           :: Float32
-    A_routing    :: AbstractMatrix{Float32}  # (n_nodes × n_nodes) upstream adjacency, no self-loops
+    postscale_q       :: V
+    postscale_h       :: V
+    ph_over_pq        :: V   # postscale_h ./ postscale_q — precomputed constant
+    μ_q               :: Float32
+    σ_q               :: Float32
+    μ_h               :: Float32
+    σ_h               :: Float32
+    μ_inwater         :: Float32
+    σ_inwater         :: Float32
+    dt                :: Float32
+    A_routing         :: AbstractMatrix{Float32}  # (N×N) upstream adjacency, no self-loops
+    A_routing_batched :: Union{Nothing, AbstractMatrix{Float32}}  # block-diagonal (B·N×B·N)
+    batch_size        :: Int                                       # B for A_routing_batched; 0 = none
 end
 
 Flux.@layer MassBalanceLayer
@@ -145,6 +147,8 @@ function Flux.gpu(l::MassBalanceLayer)
         Flux.gpu(l.ph_over_pq),
         l.μ_q, l.σ_q, l.μ_h, l.σ_h, l.μ_inwater, l.σ_inwater, l.dt,
         _to_cusparse(l.A_routing),
+        isnothing(l.A_routing_batched) ? nothing : _to_cusparse(l.A_routing_batched),
+        l.batch_size,
     )
 end
 
@@ -155,6 +159,8 @@ function Flux.cpu(l::MassBalanceLayer)
         Flux.cpu(l.ph_over_pq),
         l.μ_q, l.σ_q, l.μ_h, l.σ_h, l.μ_inwater, l.σ_inwater, l.dt,
         _to_cpu_sparse(l.A_routing),
+        isnothing(l.A_routing_batched) ? nothing : _to_cpu_sparse(l.A_routing_batched),
+        l.batch_size,
     )
 end
 
@@ -204,9 +210,19 @@ function (l::MassBalanceLayer)(g            ::GNNGraph,
     # Lateral inflow at t+1  [m³/s]  (row 1 = river_inwater)  — fully-implicit
     inwater_phys = forcing_next[1:1, :] .* l.σ_inwater .+ l.μ_inwater
 
-    # Sum upstream Q[t+1] into each node via CuSPARSE SpMM — much faster than
-    # GNNGraph scatter-gather for large graphs.
-    upstream_q = (l.A_routing * q_phys_new')'
+    # Sum upstream Q[t+1] into each node via CuSPARSE SpMM.
+    # Three dispatch paths mirror SparseConv:
+    #  1. Single graph (n_rep==1): direct (N×N) SpMM.
+    #  2. Batched with precomputed block-diagonal: single (B·N×B·N) SpMM.
+    #  3. Batched fallback: reshape trick (no precomputation needed).
+    N_per = length(l.postscale_q)
+    if n_rep == 1
+        upstream_q = (l.A_routing * q_phys_new')'
+    elseif !isnothing(l.A_routing_batched) && n == l.batch_size * N_per
+        upstream_q = (l.A_routing_batched * q_phys_new')'
+    else
+        upstream_q = reshape(reshape(q_phys_new, n_rep, N_per) * l.A_routing', 1, n)
+    end
 
     # Physical h at current step  [m]
     # h_phys = postscale_h · (norm_h · σ_h + μ_h)
@@ -642,7 +658,29 @@ function precompute_batched(model::WflowGNN, B::Int)
     new_layers = map(model.processor.layers) do l
         l isa SparseConv ? precompute_batched(l, B) : l
     end
-    WflowGNN(model.encoder, GNNChain(new_layers...), model.decoder, model.mass_balance)
+    new_mb = if !isnothing(model.mass_balance)
+        precompute_batched(model.mass_balance, B)
+    else
+        nothing
+    end
+    WflowGNN(model.encoder, GNNChain(new_layers...), model.decoder, new_mb)
+end
+
+"""
+    precompute_batched(layer::MassBalanceLayer, batch_size::Int) -> MassBalanceLayer
+
+Return a new `MassBalanceLayer` with a pre-computed block-diagonal routing matrix
+`A_routing_batched = blockdiag(A_routing, ..., A_routing)` (`batch_size` copies).
+Mirrors `precompute_batched(::SparseConv, B)`. Call **before** `Flux.gpu`.
+"""
+function precompute_batched(l::MassBalanceLayer, B::Int)
+    A_cpu = _to_cpu_sparse(l.A_routing)
+    A_blk = SparseMatrixCSC{Float32, Int32}(blockdiag(fill(A_cpu, B)...))
+    MassBalanceLayer(
+        l.postscale_q, l.postscale_h, l.ph_over_pq,
+        l.μ_q, l.σ_q, l.μ_h, l.σ_h, l.μ_inwater, l.σ_inwater, l.dt,
+        A_cpu, A_blk, B,
+    )
 end
 
 """

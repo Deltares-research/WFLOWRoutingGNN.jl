@@ -214,6 +214,8 @@ function run_wflow_gnn(ds::DataSettings, ms::ModelSettings, ts::TrainSettings)
             Float32(norm_stats["river_inwater"].std),
             dt,
             A_routing,
+            nothing,  # A_routing_batched — set via precompute_batched
+            0,        # batch_size
         )
         h_weight = mb.σ_h / (mb.dt * mb.σ_q)
         @info "Mass balance h_loss_weight = $(round(h_weight; sigdigits=3)) " *
