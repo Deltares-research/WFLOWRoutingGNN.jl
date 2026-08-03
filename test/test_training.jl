@@ -14,7 +14,7 @@ const TR_OUTPUT_NC  = joinpath(@__DIR__, "..", "test_data", "test_model", "run_d
 const TR_NHORIZON = 3   # must be >= max(strategy.steps) + 1 = 2 + 1
 const TR_EPOCHS   = 4
 
-const TR_GRAPHS, TR_STATS, TR_GRID, TR_POSTSCALE = build_wflow_graph(TR_STATICMAPS, TR_OUTPUT_NC, "river")
+const TR_GRAPHS, TR_STATS, TR_GRID, TR_POSTSCALE, TR_STATIC = build_wflow_graph(TR_STATICMAPS, TR_OUTPUT_NC, "river")
 
 const TR_N_NODES   = TR_GRAPHS[1].num_nodes
 const TR_N_STATE   = length(DOMAIN_VARS["river"]["state"])
@@ -110,7 +110,7 @@ end
     ts    = TrainSettings(; VALID_TS_KWARGS..., epochs = TR_EPOCHS, lr_steps = 2)
     model = deepcopy(TR_MODEL)
 
-    losses = train_model!(model, TR_TRAIN_LOADER, TR_VAL_LOADER, ts)
+    losses = train_model!(model, TR_TRAIN_LOADER, TR_VAL_LOADER, ts, TR_STATIC)
     train_rollout = losses.train_rollout
     val_rollout   = losses.val_rollout
     train_1step   = losses.train_1step

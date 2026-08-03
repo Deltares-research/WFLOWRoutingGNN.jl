@@ -78,12 +78,12 @@ end
                       nlayers    = GNN_NLAYERS)
     m = WflowGNN(s)
 
+    static = rand(Float32, GNN_N_STATIC, GNN_N_NODES)
     g = rand_graph(GNN_N_NODES, GNN_N_EDGES,
                    ndata = (state   = rand(Float32, GNN_N_STATE,   GNN_N_NODES),
-                            forcing = rand(Float32, GNN_N_FORCING, GNN_N_NODES),
-                            static  = rand(Float32, GNN_N_STATIC,  GNN_N_NODES)))
+                            forcing = rand(Float32, GNN_N_FORCING, GNN_N_NODES)))
 
-    out = m(g)
+    out = m(g, g.ndata.state, g.ndata.forcing, static, g.ndata.forcing)
 
     @testset "output has shape (n_state, n_nodes)" begin
         @test size(out) == (GNN_N_STATE, GNN_N_NODES)

@@ -3,6 +3,26 @@ using Functors
 using GraphNeuralNetworks
 using SparseArrays
 import TOML
+import ChainRulesCore
+
+# ---------------------------------------------------------------------------
+# Topology-aware sparse multiply — prevents Zygote from allocating a dense
+# (N×N) or (B·N×B·N) gradient matrix for the fixed-structure adjacency.
+#
+# The forward pass is identical to `A * B`.  The custom rrule returns
+# `NoTangent()` for `A` so Zygote never tries to materialise ∂A, while the
+# gradient ∂B = Aᵀ ⋅ ∂Y flows back correctly to the learnable node features.
+# ---------------------------------------------------------------------------
+_topology_mul(A, B) = A * B
+
+function ChainRulesCore.rrule(::typeof(_topology_mul), A, B)
+    Y = _topology_mul(A, B)
+    function _topology_mul_pullback(dY)
+        Δ = ChainRulesCore.unthunk(dY)
+        return (ChainRulesCore.NoTangent(), ChainRulesCore.NoTangent(), transpose(A) * Δ)
+    end
+    return Y, _topology_mul_pullback
+end
 
 # Registry of serialisable activation function names.
 const ACTIVATIONS = Dict(
@@ -217,11 +237,11 @@ function (l::MassBalanceLayer)(g            ::GNNGraph,
     #  3. Batched fallback: reshape trick (no precomputation needed).
     N_per = length(l.postscale_q)
     if n_rep == 1
-        upstream_q = (l.A_routing * q_phys_new')'
+        upstream_q = (_topology_mul(l.A_routing, q_phys_new'))'
     elseif !isnothing(l.A_routing_batched) && n == l.batch_size * N_per
-        upstream_q = (l.A_routing_batched * q_phys_new')'
+        upstream_q = (_topology_mul(l.A_routing_batched, q_phys_new'))'
     else
-        upstream_q = reshape(reshape(q_phys_new, n_rep, N_per) * l.A_routing', 1, n)
+        upstream_q = reshape(_topology_mul(l.A_routing, reshape(q_phys_new, N_per, n_rep))', 1, n)
     end
 
     # Physical h at current step  [m]
@@ -428,16 +448,16 @@ function (l::SparseConv)(::GNNGraph, h::AbstractMatrix{Float32})
     N_per = size(l.A, 1)
     if N_total == N_per
         # Single graph: direct (N×N) SpMM.
-        neigh = (l.A * h')'
+        neigh = (_topology_mul(l.A, h'))'
     elseif !isnothing(l.A_batched) && N_total == l.batch_size * N_per
         # Batched: single (B·N × B·N) SpMM on the pre-stored block-diagonal.
-        neigh = (l.A_batched * h')'
+        neigh = (_topology_mul(l.A_batched, h'))'
     else
         # Batched fallback: reshape trick — no block-diagonal materialisation.
         #   h (H, N·B) → (H·B, N) → * A' → (H·B, N) → (H, N·B)
         B      = N_total ÷ N_per
         h2     = reshape(permutedims(reshape(h, H, N_per, B), (1, 3, 2)), H * B, N_per)
-        neigh2 = h2 * l.A'
+        neigh2 = (_topology_mul(l.A, h2'))'
         neigh  = reshape(permutedims(reshape(neigh2, H, B, N_per), (1, 3, 2)), H, N_total)
     end
     l.σ.(l.W_self * h .+ l.W_neigh * neigh .+ l.bias) .+ h
@@ -684,21 +704,6 @@ function precompute_batched(l::MassBalanceLayer, B::Int)
 end
 
 """
-    (m::WflowGNN)(g::GNNGraph)
-
-Forward pass using node features stored in `g.ndata`.
-
-1. Concatenate `g.ndata.state`, `g.ndata.forcing`, and `g.ndata.static` along the
-   feature dimension to form the input `x` of shape `(in_dim, n_nodes)`.
-2. Encode -> process -> decode: `Delta = decoder(processor(g, encoder(x)))`.
-3. Add the decoded output back to the state features (residual connection):
-   returns `g.ndata.state .+ Delta` of shape `(n_state, n_nodes)`.
-"""
-function (m::WflowGNN)(g::GNNGraph)
-    m(g, g.ndata.state, g.ndata.forcing, g.ndata.static)
-end
-
-"""
     (m::WflowGNN)(g, state, forcing, static)
 
 Array-based forward pass. `g` provides the graph topology; `state`, `forcing`,
@@ -710,6 +715,15 @@ function (m::WflowGNN)(g::GNNGraph,
                        forcing      ::AbstractMatrix,
                        static       ::AbstractMatrix,
                        forcing_next ::AbstractMatrix = forcing)
+    # `static` holds per-node constants for a single graph (N columns). For a
+    # batched graph the dynamic inputs span B·N columns, so tile the static
+    # block B times to match. The batched node ordering is block-wise
+    # [graph1 | graph2 | …], each block the same N nodes in the same order, so a
+    # plain column-repeat is the correct alignment. When widths already match
+    # (single graph / batch size 1) this is a no-op with no allocation.
+    n_dyn  = size(state, 2)
+    static = size(static, 2) == n_dyn ? static :
+             repeat(static, 1, n_dyn ÷ size(static, 2))
     x = vcat(state, forcing, static)
     h = m.encoder(x)
     h = m.processor(g, h)

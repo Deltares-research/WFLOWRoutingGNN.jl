@@ -59,13 +59,28 @@ epochs = 50
 # Number of horizon windows per mini-batch
 batch_size = 8
 
-# Initial learning rate
+# Peak learning rate of the FIRST curriculum phase.  The schedule is a
+# curriculum-aligned cosine warm-restart: each phase warms up from lr_final to
+# its peak, then cosine-decays back toward lr_final.  Tune with the LR range
+# test (scripts/lr_range_test.jl) or let scripts/autotune_train.jl set it.
 lr_start = 1e-3
 
-# Final (minimum) learning rate after decay
+# Schedule floor: the lowest learning rate each phase decays toward, and the
+# floor for later (decayed) phase peaks.  Option-1 heuristic: lr_start / 100.
 lr_final = 1e-5
 
-# Number of epochs between each learning-rate decay step
+# Number of warmup epochs at the start of every phase (linear ramp from
+# lr_final up to that phase's peak).
+lr_warmup_epochs = 1
+
+# Geometric shrink applied to each successive phase peak:
+#   peak(phase p) = max(lr_start * lr_peak_decay^(p-1), lr_final)
+# Since Adam is largely invariant to gradient magnitude, a gentle decay (~0.8)
+# is usually enough as the rollout horizon grows.
+lr_peak_decay = 0.8
+
+# Deprecated: retained for backward-compatibility only; the curriculum
+# warm-restart schedule ignores this field.
 lr_steps = 10
 
 # Compute device: "cpu" or "gpu"

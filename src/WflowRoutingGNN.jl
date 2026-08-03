@@ -26,7 +26,7 @@ include("training.jl")
 export TrainSettings, save_train_settings, load_train_settings, train_model!
 
 include("run.jl")
-export run_wflow_gnn, run_wflow_gnn_from_toml
+export run_wflow_gnn, run_wflow_gnn_from_toml, parse_run_config, build_gnn_model
 
 include("hparsearch.jl")
 export HParSearchSettings, save_hpar_search_settings, load_hpar_search_settings, hpar_search

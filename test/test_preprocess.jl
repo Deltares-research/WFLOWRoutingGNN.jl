@@ -152,7 +152,7 @@ function _raw_nodes(ncfile::String, vname::String)
     end
 end
 
-const BG_GRAPHS, BG_STATS, BG_GRID, BG_POSTSCALE = build_wflow_graph(STATICMAPS, OUTPUT_NC, "river")
+const BG_GRAPHS, BG_STATS, BG_GRID, BG_POSTSCALE, BG_STATIC = build_wflow_graph(STATICMAPS, OUTPUT_NC, "river")
 
 const REF_NCOLS = NCDataset(STATICMAPS, "r") do ds
     size(ds["local_drain_direction"], 2)
@@ -178,8 +178,7 @@ const STATIC_VARS  = DOMAIN_VARS["river"]["static"]
         g = BG_GRAPHS[1]
         @test size(g.ndata.state)   == (length(STATE_VARS),   REF_N_NODES)
         @test size(g.ndata.forcing) == (length(FORCING_VARS), REF_N_NODES)
-        @test size(g.ndata.static)  == (length(STATIC_VARS),  REF_N_NODES)
-        @test BG_GRAPHS[1].ndata.static === BG_GRAPHS[end].ndata.static
+        @test size(BG_STATIC)       == (length(STATIC_VARS),  REF_N_NODES)
     end
 
     @testset "normalization stats match raw-data reference" begin
@@ -236,7 +235,7 @@ const STATIC_VARS  = DOMAIN_VARS["river"]["static"]
             Float32(ds["river_length"][REF_ROWS[spot_i], REF_COLS[spot_i]])
         end
         expected_len = (raw_len - BG_STATS["river_length"].mean) / BG_STATS["river_length"].std
-        @test BG_GRAPHS[1].ndata.static[1, spot_i] ≈ expected_len  atol=1f-5
+        @test BG_STATIC[1, spot_i] ≈ expected_len  atol=1f-5
     end
 
     @testset "grid: dimensions and node positions" begin

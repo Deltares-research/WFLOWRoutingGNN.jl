@@ -6,7 +6,7 @@ output     = joinpath(root, "wflow_model", "wflow_test_full", "run_default", "ou
 isfile(staticmaps) || (staticmaps = joinpath(root, "models", "sava_small", "staticmaps.nc"))
 isfile(output)     || (output     = joinpath(root, "models", "sava_small", "run_default", "output.nc"))
 
-graphs, norm_stats, grid, postscale = build_wflow_graph(staticmaps, output, "river")
+graphs, norm_stats, grid, postscale, static_arr = build_wflow_graph(staticmaps, output, "river")
 g0 = graphs[1]
 n  = g0.num_nodes
 s, t = edge_index(g0)
@@ -33,7 +33,7 @@ println("CPU A_batched size:  ", size(model_pre.processor.layers[1].A_batched),
 
 n_state   = size(g0.ndata.state,   1)
 n_forcing = size(g0.ndata.forcing, 1)
-n_static  = size(g0.ndata.static,  1)
+n_static  = size(static_arr,       1)
 
 if CUDA.functional()
     model_gpu = Flux.gpu(model_pre)
@@ -54,7 +54,7 @@ if CUDA.functional()
     g0_gpu      = g0 |> Flux.gpu
     state_gpu   = g0_gpu.ndata.state
     forcing_gpu = g0_gpu.ndata.forcing
-    static_gpu  = g0_gpu.ndata.static
+    static_gpu  = Flux.gpu(static_arr)
     out_single  = model_gpu(g0_gpu, state_gpu, forcing_gpu, static_gpu, forcing_gpu)
     println("Single-graph GPU forward: ", size(out_single), "  expected ($(n_state), $n)")
 
@@ -63,7 +63,7 @@ if CUDA.functional()
     forcing_arr = Array{Float32}(undef, n_forcing, n, 2)
     forcing_arr[:, :, 1] = graphs[1].ndata.forcing
     forcing_arr[:, :, 2] = graphs[2].ndata.forcing
-    pred = rollout(model_pre, g0, forcing_arr; device = :gpu, timesteps = 2)
+    pred = rollout(model_pre, g0, static_arr, forcing_arr; device = :gpu, timesteps = 2)
     println("rollout GPU output:  ", size(pred), "  expected ($(n_state), $n, 2)")
 else
     println("CUDA not functional — skipping GPU checks")

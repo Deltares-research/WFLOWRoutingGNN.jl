@@ -266,7 +266,7 @@ const VAR_SCALERS = Dict(
 
 """
     build_wflow_graph(staticmaps_file, output_file, domain)
-        -> (graphs, stats, grid, postscale)
+        -> (graphs, stats, grid, postscale, static)
 
 Construct a `GNNGraph` for the wflow routing domain with standardized node features.
 
@@ -275,10 +275,11 @@ Construct a `GNNGraph` for the wflow routing domain with standardized node featu
 - Node indices are compacted to a contiguous 1-based range.
 - Variable names for each feature group are taken from `DOMAIN_VARS[domain]`.
 - Node features extracted from `output_file` (all simulated timesteps):
-  - `ndata.state`:   `Float32` array of shape `(n_state,   n_nodes, ntimes)`
-  - `ndata.forcing`: `Float32` array of shape `(n_forcing, n_nodes, ntimes)`
+  - `ndata.state`:   `Float32` array of shape `(n_state,   n_nodes)` per graph
+  - `ndata.forcing`: `Float32` array of shape `(n_forcing, n_nodes)` per graph
 - Static node features extracted from `staticmaps_file`:
-  - `ndata.static`:  `Float32` array of shape `(n_static,  n_nodes)`
+  - `static`:  `Float32` array of shape `(n_static, n_nodes)`, returned as the
+    fifth value (shared across all timesteps, not stored in GNNGraph ndata).
 - All features are z-score standardized per variable (mean 0, std 1).
 - `missing` values are coerced to `NaN32` before standardization.
 - The second return value maps each variable name to its `(mean, std)` named tuple,
@@ -291,6 +292,7 @@ Construct a `GNNGraph` for the wflow routing domain with standardized node featu
   variable-specific transform applied before z-score normalisation (e.g. area
   normalisation for `river_q`, storage-proxy scaling for `river_h`).
   Pass this to `evaluate_trajectory` as `postscale` to recover physical units.
+- The fifth return value is the shared `static` feature matrix.
 """
 function build_wflow_graph(staticmaps_file::String, output_file::String, domain::String;
                            schema::WflowSchema = SCHEMA_V1)
@@ -433,15 +435,14 @@ function build_wflow_graph(staticmaps_file::String, output_file::String, domain:
         GNNGraph(sources, targets;
                  num_nodes = n_nodes,
                  ndata = (state   = state[:, :, t],
-                          forcing = forcing[:, :, t],
-                          static  = static))
+                          forcing = forcing[:, :, t]))
         for t in 1:ntimes
     ]
     grid = (rows  = rows,
             cols  = cols,
             nrows = nrows,
             ncols = ncols)
-    return graphs, stats, grid, postscale
+    return graphs, stats, grid, postscale, static
 end
 
 """

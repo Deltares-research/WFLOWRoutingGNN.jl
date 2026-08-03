@@ -61,8 +61,15 @@ epochs = 50
 
 batch_size = 8
 
+# Peak LR of the first curriculum phase (see template.toml for schedule details)
 lr_start = 1e-3
+# Schedule floor each phase decays toward (option-1 heuristic: lr_start / 100)
 lr_final = 1e-5
+# Linear warmup epochs at the start of every phase
+lr_warmup_epochs = 1
+# Geometric shrink of each successive phase peak (gentle ≈ 0.8 for Adam)
+lr_peak_decay = 0.8
+# Deprecated: ignored by the curriculum warm-restart schedule
 lr_steps = 10
 
 device = "cpu"

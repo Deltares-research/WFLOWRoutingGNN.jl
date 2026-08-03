@@ -40,7 +40,7 @@ const OUTPUT_NC  = get(ARGS, 2,
 
 # ── 1. Build graph with existing functionality ────────────────────────────────
 @info "Building wflow graph …"
-graphs, _, _, _ = build_wflow_graph(STATICMAPS, OUTPUT_NC, "river")
+graphs, _, _, _, static_arr = build_wflow_graph(STATICMAPS, OUTPUT_NC, "river")
 
 g0_raw  = graphs[1]
 # Add self-loops so each node also aggregates from itself during message passing.
@@ -53,7 +53,7 @@ n_edges = g0.num_edges
 @info "Graph: $n_nodes nodes, $n_edges edges (incl. $(n_nodes) self-loops)"
 
 # Concatenated input features: (in_dim, n_nodes)
-X_cpu  = vcat(g0.ndata.state, g0.ndata.forcing, g0.ndata.static)
+X_cpu  = vcat(g0.ndata.state, g0.ndata.forcing, static_arr)
 in_dim = size(X_cpu, 1)
 
 # ── 2. Build adjacency matrix ─────────────────────────────────────────────────

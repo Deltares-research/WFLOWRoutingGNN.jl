@@ -134,7 +134,8 @@ Returns mean MSE across all steps.
 """
 function loss_function(model    ::WflowGNN,
                        batch    ::Vector{<:GNNGraph},
-                       strategy ::TrainingStrategy)
+                       strategy ::TrainingStrategy,
+                       static   ::AbstractMatrix)
     nsteps      = strategy.current_steps
     noise_scale = strategy.noise_scale
     length(batch) >= nsteps + 1 ||
@@ -143,25 +144,34 @@ function loss_function(model    ::WflowGNN,
     # Extract all arrays from GNNGraph.ndata outside the diff path.
     # GNNGraph.ndata uses a Dict internally; Zygote cannot accumulate Dict
     # tangents, so we mark these reads as non-differentiable constants.
-    g_topo, state, static, forcings, forcings_next, targets = Flux.ignore_derivatives() do
+    g_topo, state, forcings, forcings_next, targets = Flux.ignore_derivatives() do
         g    = batch[1]
         st   = g.ndata.state
-        sl   = g.ndata.static
         fs   = [batch[t].ndata.forcing     for t in 1:nsteps]
         fsn  = [batch[t + 1].ndata.forcing for t in 1:nsteps]  # fully-implicit: iw[t+1]
         tgts = [batch[t + 1].ndata.state   for t in 1:nsteps]
-        g, st, sl, fs, fsn, tgts
+        g, st, fs, fsn, tgts
     end
+
+    # Gradient checkpointing pays off only for multi-step rollouts: it trades a
+    # recomputed forward pass for not storing each step's activation stack, so
+    # peak tape memory becomes ~O(1 step) instead of O(nsteps). For a single
+    # step there is nothing to save, so skip the recompute overhead.
+    use_ckpt = nsteps > 1
 
     loss = 0f0
     for t in 1:nsteps
         forcing      = forcings[t]
         forcing_next = forcings_next[t]
         if noise_scale > 0f0
+            # Draw noise OUTSIDE the checkpoint boundary so the recomputed
+            # forward pass sees identical inputs (exact gradients).
             state   = state   .+ noise_scale .* randn(Float32, size(state))
             forcing = forcing .+ noise_scale .* randn(Float32, size(forcing))
         end
-        pred_state = model(g_topo, state, forcing, static, forcing_next)
+        pred_state = use_ckpt ?
+            Flux.Zygote.checkpointed(model, g_topo, state, forcing, static, forcing_next) :
+            model(g_topo, state, forcing, static, forcing_next)
         loss += Flux.mse(pred_state[1:1, :], targets[t][1:1, :]) +
                 strategy.h_loss_weight * Flux.mse(pred_state[2:2, :], targets[t][2:2, :])
         state      = pred_state
@@ -176,10 +186,11 @@ end
 `batch[2].ndata.state` as target.
 """
 function one_step_loss(model::WflowGNN, batch::Vector{<:GNNGraph},
+                       static::AbstractMatrix,
                        h_loss_weight::Float32 = 1f0)
-    g, state, forcing, forcing_next, static, target = Flux.ignore_derivatives() do
+    g, state, forcing, forcing_next, target = Flux.ignore_derivatives() do
         g = batch[1]
-        g, g.ndata.state, g.ndata.forcing, batch[2].ndata.forcing, g.ndata.static, batch[2].ndata.state
+        g, g.ndata.state, g.ndata.forcing, batch[2].ndata.forcing, batch[2].ndata.state
     end
     pred = model(g, state, forcing, static, forcing_next)
     Flux.mse(pred[1:1, :], target[1:1, :]) +
@@ -194,11 +205,11 @@ the state. Returns `(nothing, nothing)` when the model has no mass balance.
 
 Runs entirely under `Flux.ignore_derivatives` — for diagnostic reporting only.
 """
-function loss_components(model::WflowGNN, batch::Vector{<:GNNGraph})
+function loss_components(model::WflowGNN, batch::Vector{<:GNNGraph}, static::AbstractMatrix)
     isnothing(model.mass_balance) && return (nothing, nothing)
     Flux.ignore_derivatives() do
         g      = batch[1]
-        pred   = model(g, g.ndata.state, g.ndata.forcing, g.ndata.static, batch[2].ndata.forcing)
+        pred   = model(g, g.ndata.state, g.ndata.forcing, static, batch[2].ndata.forcing)
         target = batch[2].ndata.state
         Flux.mse(pred[1:1, :], target[1:1, :]),
         Flux.mse(pred[2:2, :], target[2:2, :])

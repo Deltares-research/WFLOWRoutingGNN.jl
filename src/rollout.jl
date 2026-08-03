@@ -1,5 +1,5 @@
 """
-    rollout(model, g0, forcing; device = :cpu, timesteps = nothing) -> Array{Float32, 3}
+    rollout(model, g0, static, forcing; device = :cpu, timesteps = nothing) -> Array{Float32, 3}
 
 Perform an autoregressive rollout over `timesteps` steps (default: all steps
 in `forcing`).
@@ -7,18 +7,20 @@ in `forcing`).
 Arguments:
 - `model`     : a `WflowGNN`.
 - `g0`        : initial `GNNGraph` with `ndata.state` (n_state × n_nodes) giving
-                the state at t = 0, `ndata.static` (n_static × n_nodes) for the
-                time-invariant features, and the graph topology.
+                the state at t = 0, and the graph topology.
+- `static`    : `AbstractMatrix{Float32}` of shape `(n_static, n_nodes)` with
+                time-invariant node features (shared across all timesteps).
 - `forcing`   : `AbstractArray` of shape `(n_forcing, n_nodes, T)` with the
                 forcing inputs for timesteps t = 1 … T.
-- `device`    : `:cpu` or `:gpu`. The model, graph, and forcing are moved to this
-                device before the rollout; results are always returned on CPU.
+- `device`    : `:cpu` or `:gpu`. The model, graph, static, and forcing are moved
+                to this device before the rollout; results are always returned on CPU.
 - `timesteps` : number of autoregressive steps to perform. Must be ≤ `T`.
                 `nothing` (default) means all `T` steps.
 
 Returns an `Array{Float32, 3}` of shape `(n_state, n_nodes, timesteps)` on the CPU.
 """
-function rollout(model, g0::GNNGraph, forcing::AbstractArray{<:Real, 3};
+function rollout(model, g0::GNNGraph, static::AbstractMatrix{Float32},
+                 forcing::AbstractArray{<:Real, 3};
                  device::Symbol = :cpu,
                  timesteps::Union{Int, Nothing} = nothing)
     device in (:cpu, :gpu) || throw(ArgumentError("device must be :cpu or :gpu"))
@@ -26,6 +28,7 @@ function rollout(model, g0::GNNGraph, forcing::AbstractArray{<:Real, 3};
 
     model_d   = dev_fn(model)
     g0_d      = dev_fn(g0)
+    static_d  = dev_fn(Array{Float32}(static))
     forcing_d = dev_fn(Array{Float32}(forcing))
 
     T_max = size(forcing_d, 3)
@@ -33,7 +36,6 @@ function rollout(model, g0::GNNGraph, forcing::AbstractArray{<:Real, 3};
             (1 ≤ timesteps ≤ T_max ? timesteps :
              throw(ArgumentError("timesteps ($timesteps) must be between 1 and $T_max")))
 
-    static = g0_d.ndata.static
     state  = g0_d.ndata.state
 
     n_state = size(state, 1)
@@ -47,7 +49,7 @@ function rollout(model, g0::GNNGraph, forcing::AbstractArray{<:Real, 3};
     for t in 1:T
         t_step = time()
         forcing_next_t    = forcing_d[:, :, min(t + 1, T_max)]
-        state             = model_d(g0_d, state, forcing_d[:, :, t], static, forcing_next_t)
+        state             = model_d(g0_d, state, forcing_d[:, :, t], static_d, forcing_next_t)
         states_d[:, :, t] = state
         step_times[t] = time() - t_step
     end
@@ -62,7 +64,7 @@ function rollout(model, g0::GNNGraph, forcing::AbstractArray{<:Real, 3};
 end
 
 """
-    evaluate_trajectory(model, split, norm_stats, domain; device = :cpu)
+    evaluate_trajectory(model, split, norm_stats, domain, static; device = :cpu)
         -> (pred_states, true_states)
 
 Evaluate the model on an entire split of `make_horizon_dataset` by performing
@@ -84,13 +86,16 @@ Arguments:
 - `norm_stats` : normalisation statistics as returned by `build_wflow_graph`,
                  mapping variable names to `(mean, std)` named tuples.
 - `domain`     : routing domain string (key of `DOMAIN_VARS`).
+- `static`     : `AbstractMatrix{Float32}` of shape `(n_static, n_nodes)` with
+                 time-invariant node features (fifth return value of `build_wflow_graph`).
 - `device`     : `:cpu` or `:gpu`. Passed to `rollout`; model and data are
                  moved to this device regardless of their current location.
 
 Returns `(pred_states, true_states)`, each an `Array{Float32,3}` of shape
 `(n_state, n_nodes, T-1)` in physical (un-normalised) units on the CPU.
 """
-function evaluate_trajectory(model, split, norm_stats, domain::String;
+function evaluate_trajectory(model, split, norm_stats, domain::String,
+                             static::AbstractMatrix{Float32};
                              device::Symbol = :cpu,
                              postscale::Dict{String,Vector{Float32}} = Dict{String,Vector{Float32}}())
     isempty(split) && throw(ArgumentError("split must not be empty"))
@@ -114,7 +119,7 @@ function evaluate_trajectory(model, split, norm_stats, domain::String;
     end
 
     # --- 3. Autoregressive rollout (always returns CPU array) ---------------
-    pred_states = rollout(model, g0, forcing; device)
+    pred_states = rollout(model, g0, static, forcing; device)
 
     # --- 4. Ground-truth states at t = 2 … T --------------------------------
     true_states = Array{Float32}(undef, n_state, n_nodes, T - 1)
@@ -158,7 +163,7 @@ Returns a NamedTuple with matrices of shape `(n_nodes, T)`:
 - `h_raw`       [m]:    h before the ≥0 floor (using predicted q)
 - `mb_verify_h` [m]:    h from MB fed true q/h — verifies the equation itself
 """
-function rollout_mb_diagnostics(model::WflowGNN, split)
+function rollout_mb_diagnostics(model::WflowGNN, split, static::AbstractMatrix{Float32})
     isnothing(model.mass_balance) &&
         throw(ArgumentError("rollout_mb_diagnostics requires a MassBalanceLayer"))
     mb = model.mass_balance
@@ -170,7 +175,6 @@ function rollout_mb_diagnostics(model::WflowGNN, split)
 
     g0      = graphs[1]
     n_nodes = g0.num_nodes
-    static  = g0.ndata.static
 
     # Output matrices (n_nodes × T)
     pred_q      = Matrix{Float32}(undef, n_nodes, T)

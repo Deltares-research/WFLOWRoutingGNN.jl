@@ -18,13 +18,13 @@ const ST_TOPO = rand_graph(ST_N_NODES, ST_N_EDGES)
 function make_st_graph()
     GNNGraph(ST_TOPO;
              ndata = (state   = rand(Float32, ST_N_STATE,   ST_N_NODES),
-                      forcing = rand(Float32, ST_N_FORCING, ST_N_NODES),
-                      static  = rand(Float32, ST_N_STATIC,  ST_N_NODES)))
+                      forcing = rand(Float32, ST_N_FORCING, ST_N_NODES)))
 end
 
 # A batch of 3 consecutive graphs (supports up to 2-step rollout)
-const ST_BATCH = [make_st_graph() for _ in 1:3]
-const ST_MODEL = WflowGNN(ModelSettings(domain = "river", hidden_dim = 8, nlayers = 1))
+const ST_BATCH  = [make_st_graph() for _ in 1:3]
+const ST_STATIC = rand(Float32, ST_N_STATIC, ST_N_NODES)
+const ST_MODEL  = WflowGNN(ModelSettings(domain = "river", hidden_dim = 8, nlayers = 1))
 
 # ---------------------------------------------------------------------------
 # TrainingStrategy constructor validation
@@ -132,14 +132,14 @@ end
     strat_2.current_steps = 2
 
     @testset "returns a finite non-negative Float32 (1-step)" begin
-        l = loss_function(ST_MODEL, ST_BATCH, strat_1)
+        l = loss_function(ST_MODEL, ST_BATCH, strat_1, ST_STATIC)
         @test l isa Float32
         @test isfinite(l)
         @test l >= 0
     end
 
     @testset "returns a finite non-negative Float32 (2-step)" begin
-        l = loss_function(ST_MODEL, ST_BATCH, strat_2)
+        l = loss_function(ST_MODEL, ST_BATCH, strat_2, ST_STATIC)
         @test l isa Float32
         @test isfinite(l)
         @test l >= 0
@@ -149,7 +149,7 @@ end
         strat_3 = TrainingStrategy([2], [1])
         strat_3.current_steps = 2
         short_batch = [make_st_graph(), make_st_graph()]   # length 2, need >= 3
-        @test_throws ArgumentError loss_function(ST_MODEL, short_batch, strat_3)
+        @test_throws ArgumentError loss_function(ST_MODEL, short_batch, strat_3, ST_STATIC)
     end
 
 end
@@ -161,7 +161,7 @@ end
 @testset "one_step_loss" begin
 
     @testset "returns a finite non-negative Float32" begin
-        l = one_step_loss(ST_MODEL, ST_BATCH)
+        l = one_step_loss(ST_MODEL, ST_BATCH, ST_STATIC)
         @test l isa Float32
         @test isfinite(l)
         @test l >= 0
@@ -169,7 +169,7 @@ end
 
     @testset "equals loss_function with current_steps=1" begin
         strat_1 = TrainingStrategy([1], [10])
-        @test one_step_loss(ST_MODEL, ST_BATCH) ≈ loss_function(ST_MODEL, ST_BATCH, strat_1)  atol=1f-6
+        @test one_step_loss(ST_MODEL, ST_BATCH, ST_STATIC) ≈ loss_function(ST_MODEL, ST_BATCH, strat_1, ST_STATIC)  atol=1f-6
     end
 
 end
@@ -181,7 +181,7 @@ end
 @testset "noise_scale effect" begin
 
     strat_noisy = TrainingStrategy([1], [10], 10.0)
-    losses = [loss_function(ST_MODEL, ST_BATCH, strat_noisy) for _ in 1:10]
+    losses = [loss_function(ST_MODEL, ST_BATCH, strat_noisy, ST_STATIC) for _ in 1:10]
 
     @testset "noisy losses are finite and non-negative" begin
         @test all(isfinite, losses)
@@ -194,8 +194,8 @@ end
 
     @testset "zero noise gives deterministic loss" begin
         strat_clean = TrainingStrategy([1], [10], 0.0)
-        l1 = loss_function(ST_MODEL, ST_BATCH, strat_clean)
-        l2 = loss_function(ST_MODEL, ST_BATCH, strat_clean)
+        l1 = loss_function(ST_MODEL, ST_BATCH, strat_clean, ST_STATIC)
+        l2 = loss_function(ST_MODEL, ST_BATCH, strat_clean, ST_STATIC)
         @test l1 == l2
     end
 
