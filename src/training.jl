@@ -25,6 +25,27 @@ Fields:
                      shrinks at each successive curriculum phase
                      (`peak_p = lr_start * lr_peak_decay^(p-1)`, floored at
                      `lr_final`). Must be in `(0, 1]`.
+- `grad_clip`      : global gradient-L2-norm clip applied before each optimiser
+                     step (`Optimisers.ClipNorm`). `0` disables clipping. This is
+                     a safety net for curriculum-phase restarts, where a newly
+                     deepened BPTT graph can produce a transient gradient spike.
+- `h_loss_scale`   : how the water-depth (`h`) term of the loss is normalised
+                     (river domain only). `:absolute` (default) weights the
+                     z-scored h-MSE by `σ_h/(dt·σ_q)` so the two loss magnitudes
+                     match. `:increment` measures h-error on the mass-balance
+                     increment scale (`dt·σ_q`) instead of the absolute-depth
+                     scale (`σ_h`), i.e. weight `(σ_h/(dt·σ_q))²`, which makes
+                     `∂h_norm/∂q_norm ≈ O(1)` and removes the stiff
+                     gradient amplification of the hard mass-balance decoder.
+- `phase_backoff_factor` : runtime safety net for curriculum warm restarts. At a
+                     phase boundary the deepened rollout can destabilise even a
+                     well-tuned LR (something an untrained offline range test
+                     cannot predict). When an epoch is detected as unstable
+                     (non-finite gradient, skipped batches, or a grad-norm spike
+                     far above the phase's running median), the current phase's
+                     LR is multiplied by this factor for the remaining epochs of
+                     the phase, then reset at the next boundary. Must be in
+                     `(0, 1]`; `1.0` disables the backoff.
 - `strategy`       : training curriculum (rollout steps and noise schedule).
 - `device`         : compute device; `:cpu` or `:gpu`. If `:gpu` is requested but
                      CUDA is unavailable, falls back to `:cpu` with a warning.
@@ -41,6 +62,9 @@ struct TrainSettings
     lr_steps         :: Int
     lr_warmup_epochs :: Int
     lr_peak_decay    :: Float32
+    grad_clip        :: Float32
+    h_loss_scale     :: Symbol
+    phase_backoff_factor :: Float32
     strategy         :: TrainingStrategy
     device           :: Symbol
     val_daterange    :: Union{Nothing, Tuple{Dates.DateTime, Dates.DateTime}}
@@ -48,7 +72,8 @@ end
 
 """
     TrainSettings(; epochs, batch_size, lr_start, lr_final, lr_steps, strategy,
-                    lr_warmup_epochs = 1, lr_peak_decay = 0.7,
+                    lr_warmup_epochs = 1, lr_peak_decay = 0.7, grad_clip = 1.0,
+                    h_loss_scale = :absolute, phase_backoff_factor = 0.5,
                     device = :cpu, val_daterange = nothing) -> TrainSettings
 """
 function TrainSettings(;
@@ -60,6 +85,9 @@ function TrainSettings(;
         strategy         :: TrainingStrategy,
         lr_warmup_epochs :: Int = 1,
         lr_peak_decay    :: Real = 0.7,
+        grad_clip        :: Real = 1.0,
+        h_loss_scale     :: Symbol = :absolute,
+        phase_backoff_factor :: Real = 0.5,
         device           :: Symbol = :cpu,
         val_daterange    :: Union{Nothing, Tuple{Dates.DateTime, Dates.DateTime}} = nothing)
 
@@ -71,6 +99,11 @@ function TrainSettings(;
     lr_final  <= lr_start || throw(ArgumentError("lr_final must be <= lr_start"))
     lr_warmup_epochs >= 0 || throw(ArgumentError("lr_warmup_epochs must be non-negative"))
     0 < lr_peak_decay <= 1 || throw(ArgumentError("lr_peak_decay must be in (0, 1]"))
+    grad_clip >= 0 || throw(ArgumentError("grad_clip must be non-negative (0 disables clipping)"))
+    h_loss_scale in (:absolute, :increment) ||
+        throw(ArgumentError("h_loss_scale must be :absolute or :increment"))
+    0 < phase_backoff_factor <= 1 ||
+        throw(ArgumentError("phase_backoff_factor must be in (0, 1] (1 disables backoff)"))
     device in (:cpu, :gpu) || throw(ArgumentError("device must be :cpu or :gpu"))
 
     if device == :gpu
@@ -88,8 +121,8 @@ function TrainSettings(;
 
     TrainSettings(epochs, batch_size,
                   Float32(lr_start), Float32(lr_final),
-                  lr_steps, lr_warmup_epochs, Float32(lr_peak_decay),
-                  strategy, device, val_daterange)
+                  lr_steps, lr_warmup_epochs, Float32(lr_peak_decay), Float32(grad_clip),
+                  h_loss_scale, Float32(phase_backoff_factor), strategy, device, val_daterange)
 end
 
 function Base.show(io::IO, s::TrainSettings)
@@ -101,6 +134,9 @@ function Base.show(io::IO, s::TrainSettings)
     println(io, "  lr_steps         : ", s.lr_steps)
     println(io, "  lr_warmup_epochs : ", s.lr_warmup_epochs)
     println(io, "  lr_peak_decay    : ", s.lr_peak_decay)
+    println(io, "  grad_clip        : ", s.grad_clip)
+    println(io, "  h_loss_scale     : ", s.h_loss_scale)
+    println(io, "  phase_backoff_factor : ", s.phase_backoff_factor)
     println(io, "  device           : ", s.device)
     println(io, "  val_daterange : ", isnothing(s.val_daterange) ? "nothing" :
                                      string(s.val_daterange[1], " – ", s.val_daterange[2]))
@@ -122,6 +158,9 @@ function save_train_settings(path::String, s::TrainSettings)
         "lr_steps"   => s.lr_steps,
         "lr_warmup_epochs" => s.lr_warmup_epochs,
         "lr_peak_decay"    => Float64(s.lr_peak_decay),
+        "grad_clip"        => Float64(s.grad_clip),
+        "h_loss_scale"     => String(s.h_loss_scale),
+        "phase_backoff_factor" => Float64(s.phase_backoff_factor),
         "device"     => String(s.device),
         "strategy"   => Dict(
             "steps"       => s.strategy.steps,
@@ -158,6 +197,9 @@ function load_train_settings(path::String)
         lr_steps      = d["lr_steps"],
         lr_warmup_epochs = get(d, "lr_warmup_epochs", 1),
         lr_peak_decay    = Float32(get(d, "lr_peak_decay", 0.7)),
+        grad_clip        = Float32(get(d, "grad_clip", 1.0)),
+        h_loss_scale     = Symbol(get(d, "h_loss_scale", "absolute")),
+        phase_backoff_factor = Float32(get(d, "phase_backoff_factor", 0.5)),
         strategy      = strategy,
         device        = Symbol(get(d, "device", "cpu")),
         val_daterange = if haskey(d, "val_daterange")
@@ -286,7 +328,15 @@ function train_model!(model,
     val_loader_d   = dev_fn(val_loader)
     static_d       = dev_fn(static_cpu)
 
-    opt_state = Flux.setup(Adam(ts.lr_start), model)
+    # Optimiser: optionally clip the global gradient L2 norm before each Adam
+    # step. `grad_clip <= 0` disables clipping. `throw = false` leaves a
+    # non-finite gradient untouched (those steps are filtered out in the loop).
+    rule = ts.grad_clip > 0 ?
+        Flux.Optimisers.OptimiserChain(
+            Flux.Optimisers.ClipNorm(Float32(ts.grad_clip); throw = false),
+            Adam(ts.lr_start)) :
+        Adam(ts.lr_start)
+    opt_state = Flux.setup(rule, model)
 
     train_rollout = Float32[]
     val_rollout   = Float32[]
@@ -300,12 +350,30 @@ function train_model!(model,
 
     has_components = !isnothing(model.mass_balance)
 
+    # Adaptive per-phase LR backoff state. `lr_scale` multiplies the scheduled
+    # curriculum LR; it resets to 1 at each curriculum-phase boundary (fresh warm
+    # restart) and is shrunk by `ts.phase_backoff_factor` whenever an epoch is
+    # flagged unstable. `phase_gnorms` holds this phase's finite epoch grad norms
+    # so a spike can be judged relative to the phase's own running median.
+    lr_scale     = 1.0
+    prev_steps   = strategy.current_steps
+    phase_gnorms = Float64[]
+    backoff_on   = ts.phase_backoff_factor < 1
+    const_spike_factor = 10.0   # grad norm this far above the phase median = spike
+    const_scale_floor  = 1f-3   # never shrink the phase LR below this fraction
+
     prog = Progress(ts.epochs; desc = "Training ", showspeed = true)
 
     for epoch in 1:ts.epochs
 
         update_steps!(strategy, epoch)
-        lr = curriculum_lr(ts, epoch)
+        # New curriculum phase: reset the warm-restart backoff state.
+        if strategy.current_steps != prev_steps
+            prev_steps = strategy.current_steps
+            lr_scale   = 1.0
+            empty!(phase_gnorms)
+        end
+        lr = curriculum_lr(ts, epoch) * lr_scale
         Flux.adjust!(opt_state, lr)
 
         # Training pass
@@ -315,11 +383,20 @@ function train_model!(model,
         ep_train_h_1step = 0f0
         ep_grad_norm     = 0.0
         n_batches        = 0
+        n_skipped        = 0
 
         for batch in train_loader_d
             train_loss, grads = Flux.withgradient(m -> loss_function(m, batch, strategy, static_d), model)
+            gn = _grad_l2norm(grads[1])
+            # Skip updates from a non-finite loss/gradient (e.g. a curriculum-phase
+            # restart spike) so a single bad step cannot poison the weights.
+            # ClipNorm above tames the merely-large-but-finite steps.
+            if !isfinite(train_loss) || !isfinite(gn)
+                n_skipped += 1
+                continue
+            end
             Flux.update!(opt_state, model, grads[1])
-            ep_grad_norm     += _grad_l2norm(grads[1])
+            ep_grad_norm     += gn
             ep_train_rollout += train_loss
             ep_train_1step   += one_step_loss(model, batch, static_d, strategy.h_loss_weight)
             if has_components
@@ -329,11 +406,34 @@ function train_model!(model,
             end
             n_batches        += 1
         end
-        ep_train_rollout /= n_batches
-        ep_train_1step   /= n_batches
-        ep_train_q_1step /= n_batches
-        ep_train_h_1step /= n_batches
-        ep_grad_norm     /= n_batches
+        if n_skipped > 0
+            @warn "Epoch $epoch: skipped $n_skipped non-finite update(s) (loss/grad)."
+        end
+        denom = max(n_batches, 1)
+        ep_train_rollout /= denom
+        ep_train_1step   /= denom
+        ep_train_q_1step /= denom
+        ep_train_h_1step /= denom
+        ep_grad_norm     /= denom
+
+        # Adaptive backoff: if this epoch looks unstable (non-finite grad, any
+        # skipped batch, or a grad-norm spike well above the phase median),
+        # shrink the LR for the rest of the phase. This reacts to a destabilised
+        # warm restart that an offline range test cannot foresee, and composes
+        # with the ClipNorm + non-finite skip above.
+        if backoff_on
+            spike = !isempty(phase_gnorms) &&
+                    ep_grad_norm > const_spike_factor * median(phase_gnorms)
+            if !isfinite(ep_grad_norm) || n_skipped > 0 || spike
+                new_scale = max(lr_scale * ts.phase_backoff_factor, const_scale_floor)
+                if new_scale < lr_scale
+                    @warn @sprintf("Epoch %d (steps=%d): unstable epoch; backing off phase LR ×%.3g (scale → %.3g).",
+                                   epoch, strategy.current_steps, ts.phase_backoff_factor, new_scale)
+                    lr_scale = new_scale
+                end
+            end
+        end
+        isfinite(ep_grad_norm) && push!(phase_gnorms, ep_grad_norm)
 
         # Validation pass
         ep_val_rollout = mean(loss_function(model, b, strategy, static_d) for b in val_loader_d)

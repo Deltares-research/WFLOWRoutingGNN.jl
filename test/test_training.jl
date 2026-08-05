@@ -75,6 +75,17 @@ const VALID_TS_KWARGS = (
         @test_throws ArgumentError TrainSettings(; VALID_TS_KWARGS..., device = :tpu)
     end
 
+    @testset "invalid h_loss_scale throws" begin
+        @test_throws ArgumentError TrainSettings(; VALID_TS_KWARGS..., h_loss_scale = :relative)
+        @test TrainSettings(; VALID_TS_KWARGS..., h_loss_scale = :increment) isa TrainSettings
+    end
+
+    @testset "invalid phase_backoff_factor throws" begin
+        @test_throws ArgumentError TrainSettings(; VALID_TS_KWARGS..., phase_backoff_factor = 0.0)
+        @test_throws ArgumentError TrainSettings(; VALID_TS_KWARGS..., phase_backoff_factor = 1.5)
+        @test TrainSettings(; VALID_TS_KWARGS..., phase_backoff_factor = 1.0) isa TrainSettings
+    end
+
 end
 
 # ---------------------------------------------------------------------------
@@ -98,6 +109,22 @@ end
     @test s2.strategy.durations   == s.strategy.durations
     @test s2.strategy.noise_scale == s.strategy.noise_scale
     @test s2.device               == s.device
+    @test s2.h_loss_scale         == s.h_loss_scale
+    @test s2.phase_backoff_factor == s.phase_backoff_factor
+
+    # Non-default scale survives the round-trip too.
+    si   = TrainSettings(; VALID_TS_KWARGS..., h_loss_scale = :increment)
+    save_train_settings(path, si)
+    si2  = load_train_settings(path)
+    rm(path)
+    @test si2.h_loss_scale == :increment
+
+    # Non-default backoff factor survives too.
+    sb   = TrainSettings(; VALID_TS_KWARGS..., phase_backoff_factor = 0.25)
+    save_train_settings(path, sb)
+    sb2  = load_train_settings(path)
+    rm(path)
+    @test sb2.phase_backoff_factor ≈ 0.25f0
 
 end
 

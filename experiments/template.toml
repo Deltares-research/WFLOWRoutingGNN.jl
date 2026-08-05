@@ -83,6 +83,29 @@ lr_peak_decay = 0.8
 # warm-restart schedule ignores this field.
 lr_steps = 10
 
+# Global gradient-L2-norm clip applied before each optimiser step (0 disables).
+# A safety net for curriculum-phase restarts where a newly deepened BPTT graph
+# can produce a transient gradient spike.
+grad_clip = 1.0
+
+# How the water-depth (h) term of the loss is normalised (river domain only):
+#   "absolute"  - weight sigma_h/(dt*sigma_q); balances the q- and h-loss
+#                 magnitudes (default; historical behaviour).
+#   "increment" - weight (sigma_h/(dt*sigma_q))^2; measures h-error on the
+#                 mass-balance increment scale (dt*sigma_q) so d(h_norm)/d(q_norm)
+#                 ~ O(1). Removes the stiff gradient amplification of the hard
+#                 mass-balance decoder, at the cost of weaker h-supervision once
+#                 discharge is well fit.
+h_loss_scale = "absolute"
+
+# Runtime per-phase adaptive LR backoff (curriculum warm restarts). Must be in
+# (0, 1]; 1.0 disables. When an epoch is flagged unstable (non-finite gradient,
+# skipped batches, or a grad-norm spike far above the phase's running median),
+# the current phase's LR is multiplied by this factor for the rest of the phase,
+# then reset at the next phase boundary. Reacts to a destabilised deepened
+# rollout that an offline (untrained) range test cannot foresee.
+phase_backoff_factor = 0.5
+
 # Compute device: "cpu" or "gpu"
 device = "cpu"
 

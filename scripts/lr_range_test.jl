@@ -120,7 +120,8 @@ function make_model_loader(gd, ds, ms, ts; horizon::Int, batch_size::Int)
                                 h_loss_weight = ts.strategy.h_loss_weight)
 
     model = build_gnn_model(ms, gd.graphs, gd.norm_stats, gd.postscale,
-                            gd.output_file, bs; strategy = strategy)
+                            gd.output_file, bs; strategy = strategy,
+                            h_loss_scale = ts.h_loss_scale)
 
     dev_fn = ts.device == :gpu ? Flux.gpu : identity
     return (; model    = dev_fn(model),
@@ -189,7 +190,7 @@ function lr_range_test(setup; num_steps::Int, lr_min::Float64, lr_max::Float64,
 
         push!(lrs, lr); push!(losses, smooth); push!(gnorms, gn)
 
-        if isnan(smooth) || isinf(smooth) || (step > 1 && smooth > diverge_factor * best)
+        if isnan(smooth) || isinf(smooth) || !isfinite(gn) || (step > 1 && smooth > diverge_factor * best)
             @info @sprintf("Diverged at step %d (lr=%.3e); stopping range test.", step, lr)
             break
         end
@@ -200,15 +201,71 @@ function lr_range_test(setup; num_steps::Int, lr_min::Float64, lr_max::Float64,
     return lrs, losses, gnorms
 end
 
+# ---------------------------------------------------------------------------
+# Gradient-growth probe (for setting lr_peak_decay across curriculum phases)
+# ---------------------------------------------------------------------------
+
+# Median gradient L2 norm over a handful of steps at a FIXED small LR and a fixed
+# rollout `horizon`. Unlike the LR range test — which RAMPS the LR and, at deep
+# horizons on an UNTRAINED model, drives the free-running rollout into artificial
+# blow-up — this holds a small constant LR and merely records the gradient norm.
+#
+# The ABSOLUTE value is still inflated by the untrained rollout, so it is NOT a
+# usable LR. It is used only for a RELATIVE comparison across horizons: the ratio
+# g(shallow)/g(deep) sets `lr_peak_decay`, and because a deeper horizon over-
+# reports its gradient growth, the derived peak-shrink errs on the conservative
+# (smaller deep-phase peak) side — the safe direction.
+function gradient_growth_probe(setup; num_steps::Int = 12, warmup::Int = 2,
+                               lr::Float64 = 1e-5)
+    model    = setup.model
+    strategy = setup.strategy
+    static_d = setup.static_d
+    opt_state = Flux.setup(Adam(Float32(lr)), model)
+
+    gnorms = Float64[]
+    step = 0
+    for batch in Iterators.cycle(setup.loader)
+        step += 1
+        step > warmup + num_steps && break
+        _l, grads = Flux.withgradient(m -> loss_function(m, batch, strategy, static_d), model)
+        gn = _grad_l2norm(grads[1])
+        isfinite(gn) && Flux.update!(opt_state, model, grads[1])
+        step > warmup && isfinite(gn) && push!(gnorms, gn)
+    end
+    return isempty(gnorms) ? NaN : median(gnorms)
+end
+
 # Suggested LRs from the recorded curve.
 #
-# `steep` is the classic "point of steepest descent" (minimum of d(loss)/d(log lr)),
-# but computed robustly: the EMA-biased first few points and the diverging tail
-# are trimmed, and the slope is smoothed over a small window so a single noisy
-# segment cannot win. `min_over_10` is the conservative fallback (min-loss LR / 10).
-function recommend_lr(lrs, losses; skip_start::Int = 5, skip_end::Int = 5, smooth_win::Int = 3)
+# Returns three estimates plus a single conservative pick:
+#   * `steep`       - classic "point of steepest descent" (minimum of
+#                     d(loss)/d(log lr)), computed robustly: the EMA-biased head
+#                     and the diverging tail are trimmed and the slope is smoothed
+#                     over a small window so a single noisy segment cannot win.
+#   * `min_over_10` - fast.ai fallback (min-loss LR / 10). Optimistic when the
+#                     loss minimum sits right under the divergence cliff (its
+#                     apparent position is pushed HIGH by the EMA lag, so this is
+#                     the estimate biased high - not `steep`).
+#   * `gnorm_cap`   - the LR at which the gradient norm first blows past a
+#                     multiple of its early-training plateau, backed off by a
+#                     safety factor. Gradient-norm blow-up is the earliest,
+#                     most reliable divergence signal and is not masked by the
+#                     EMA-lagged loss curve.
+#   * `gnorm_ref`   - median gradient norm over the healthy (pre-blow-up) region;
+#                     a scale for setting a ClipNorm threshold.
+#   * `safe = min(steep, min_over_10, gnorm_cap)` - the value to use for
+#                     `lr_start`. The range test runs on an UNTRAINED model, so
+#                     the peak LR must survive the harshest regime it will ever
+#                     see, with no chance to re-tune once training has begun.
+function recommend_lr(lrs, losses, gnorms = nothing;
+                      skip_start::Int = 5, skip_end::Int = 5, smooth_win::Int = 3,
+                      gnorm_factor::Float64 = 3.0, gnorm_backoff::Float64 = 3.0)
     n = length(lrs)
-    n >= 8 || return (steep = NaN, min_over_10 = n >= 1 ? lrs[argmin(losses)] / 10 : NaN)
+    if n < 8
+        m10 = n >= 1 ? lrs[argmin(losses)] / 10 : NaN
+        return (steep = NaN, min_over_10 = m10, gnorm_cap = Inf,
+                gnorm_ref = NaN, safe = m10)
+    end
 
     loglr = log10.(lrs)
     slope = diff(losses) ./ diff(loglr)           # d(loss)/d(log10 lr), length n-1
@@ -228,7 +285,31 @@ function recommend_lr(lrs, losses; skip_start::Int = 5, skip_end::Int = 5, smoot
     i   = lo + argmin(seg) - 1                     # steepest descent within interior
     steep = sqrt(lrs[i] * lrs[i + 1])              # geometric midpoint of the segment
     imin  = argmin(losses)
-    return (steep = steep, min_over_10 = lrs[imin] / 10)
+    min_over_10 = lrs[imin] / 10
+
+    # Gradient-norm blow-up detector: the earliest reliable divergence signal.
+    gnorm_cap = Inf
+    gnorm_ref = NaN
+    if gnorms !== nothing && length(gnorms) == n
+        # Plateau reference = median grad norm over the trustworthy head
+        # (after the EMA warmup, before any blow-up).
+        head_hi   = clamp(skip_start + max(1, (n - skip_start) ÷ 3), skip_start + 1, n)
+        ref_slice = filter(isfinite, collect(@view gnorms[(skip_start + 1):head_hi]))
+        gnorm_ref = isempty(ref_slice) ? NaN : median(ref_slice)
+        if isfinite(gnorm_ref) && gnorm_ref > 0
+            thresh = gnorm_factor * gnorm_ref
+            for k in (skip_start + 1):n
+                if !isfinite(gnorms[k]) || gnorms[k] > thresh
+                    gnorm_cap = lrs[k] / gnorm_backoff
+                    break
+                end
+            end
+        end
+    end
+
+    safe = minimum(filter(isfinite, Float64[steep, min_over_10, gnorm_cap]))
+    return (steep = steep, min_over_10 = min_over_10, gnorm_cap = gnorm_cap,
+            gnorm_ref = gnorm_ref, safe = safe)
 end
 
 function print_curve(lrs, losses, gnorms; rows::Int = 20)
@@ -368,10 +449,13 @@ function main()
                             @sprintf("lr_range_test_h%d_b%d.csv", horizon, setup.batch_size))
         write_csv(out_path, lrs, losses, gnorms)
 
-        rec = recommend_lr(lrs, losses)
+        rec = recommend_lr(lrs, losses, gnorms)
         println()
-        @info @sprintf("Suggested max LR (steepest descent): %.3e", rec.steep)
-        @info @sprintf("Conservative alt (min-loss LR / 10) : %.3e", rec.min_over_10)
+        @info @sprintf("Recommended lr_start (safe)     : %.3e", rec.safe)
+        @info @sprintf("  steepest descent              : %.3e", rec.steep)
+        @info @sprintf("  min-loss LR / 10              : %.3e", rec.min_over_10)
+        @info @sprintf("  grad-norm blow-up cap         : %.3e", rec.gnorm_cap)
+        @info @sprintf("  healthy grad-norm reference   : %.3e", rec.gnorm_ref)
         println("""
 
   How to use this for the curriculum schedule:

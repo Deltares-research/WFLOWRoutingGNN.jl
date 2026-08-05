@@ -243,6 +243,8 @@ function hpar_search(toml_path::String)
             lr_final      = td["lr_final"],
             lr_steps      = td["lr_steps"],
             strategy      = strategy,
+            h_loss_scale  = Symbol(get(td, "h_loss_scale", "absolute")),
+            phase_backoff_factor = get(td, "phase_backoff_factor", 0.5),
             device        = Symbol(get(td, "device", "cpu")),
             val_daterange = if haskey(td, "val_daterange")
                 r = td["val_daterange"]

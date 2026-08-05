@@ -109,6 +109,9 @@ function parse_run_config(toml_path::String)
         lr_steps         = get(td, "lr_steps", 10),
         lr_warmup_epochs = get(td, "lr_warmup_epochs", 1),
         lr_peak_decay    = get(td, "lr_peak_decay", 0.7),
+        grad_clip        = get(td, "grad_clip", 1.0),
+        h_loss_scale     = Symbol(get(td, "h_loss_scale", "absolute")),
+        phase_backoff_factor = get(td, "phase_backoff_factor", 0.5),
         strategy         = strategy,
         device           = Symbol(get(td, "device", "cpu")),
         val_daterange    = if haskey(td, "val_daterange")
@@ -124,19 +127,27 @@ end
 
 """
     build_gnn_model(ms, graphs, norm_stats, postscale, output_file, batch_size;
-                    strategy = nothing) -> WflowGNN
+                    strategy = nothing, h_loss_scale = :absolute) -> WflowGNN
 
 Construct a `WflowGNN` (with block-diagonal adjacency pre-computed for
 `batch_size`) from a built graph time series. For the `"river"` domain this also
 builds the `MassBalanceLayer` and, when `strategy` is supplied, sets
 `strategy.h_loss_weight` to the mass-balance-consistent value.
 
+`h_loss_scale` selects how the water-depth term of the loss is normalised:
+- `:absolute`  → weight `σ_h/(dt·σ_q)` (balances the q- and h-loss magnitudes).
+- `:increment` → weight `(σ_h/(dt·σ_q))²`, i.e. h-error measured on the
+  mass-balance increment scale `dt·σ_q`. This makes `∂h_norm/∂q_norm ≈ O(1)`
+  and removes the stiff gradient amplification of the hard mass-balance decoder
+  (at the cost of weaker h-supervision once discharge is well fit).
+
 Shared by [`run_wflow_gnn`](@ref) and standalone tuning scripts so the model is
 built identically everywhere.
 """
 function build_gnn_model(ms::ModelSettings, graphs, norm_stats, postscale,
                          output_file::AbstractString, batch_size::Int;
-                         strategy::Union{Nothing,TrainingStrategy} = nothing)
+                         strategy::Union{Nothing,TrainingStrategy} = nothing,
+                         h_loss_scale::Symbol = :absolute)
     g0      = graphs[1]
     n_nodes = g0.num_nodes
 
@@ -169,8 +180,15 @@ function build_gnn_model(ms::ModelSettings, graphs, norm_stats, postscale,
             nothing,  # A_routing_batched — set via precompute_batched
             0,        # batch_size
         )
-        h_weight = mb.σ_h / (mb.dt * mb.σ_q)
+        # Base weight balances the q- and h-loss magnitudes; ∂h_norm/∂q_norm of
+        # the hard mass-balance decoder equals `dt·σ_q/σ_h = 1/base`, so the
+        # h-branch injects a q-gradient amplified by `1/base` at :absolute.
+        # :increment squares the weight (measures h on the `dt·σ_q` increment
+        # scale), cancelling that amplification so ∂h_norm/∂q_norm ≈ O(1).
+        base_weight = mb.σ_h / (mb.dt * mb.σ_q)
+        h_weight    = h_loss_scale === :increment ? base_weight^2 : base_weight
         @info "Mass balance h_loss_weight = $(round(h_weight; sigdigits=3)) " *
+              "[scale=$(h_loss_scale)]  " *
               "(σ_h=$(round(mb.σ_h; sigdigits=3)), σ_q=$(round(mb.σ_q; sigdigits=3)), dt=$(mb.dt) s)"
         strategy === nothing || (strategy.h_loss_weight = h_weight)
         model = WflowGNN(ms, mb, A_sparse)
@@ -264,7 +282,8 @@ function run_wflow_gnn(ds::DataSettings, ms::ModelSettings, ts::TrainSettings)
 
     train_batch_size = min(ts.batch_size, length(dataset.train))
     model = build_gnn_model(ms, graphs, norm_stats, postscale, output_file,
-                            train_batch_size; strategy = ts.strategy)
+                            train_batch_size; strategy = ts.strategy,
+                            h_loss_scale = ts.h_loss_scale)
 
     n_params = sum(length, Flux.params(model))
     @info @sprintf("Model: %d MP layers  hidden_dim=%d  mlp_layers=%d  trainable params=%s",
