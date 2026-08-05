@@ -16,13 +16,18 @@ Arguments:
                 to this device before the rollout; results are always returned on CPU.
 - `timesteps` : number of autoregressive steps to perform. Must be ≤ `T`.
                 `nothing` (default) means all `T` steps.
+- `return_timing` : when `true`, return a `NamedTuple`
+                `(states, step_times, total_time, n_steps)` instead of just the
+                state array — `step_times` is the per-timestep wall time (s).
 
-Returns an `Array{Float32, 3}` of shape `(n_state, n_nodes, timesteps)` on the CPU.
+Returns an `Array{Float32, 3}` of shape `(n_state, n_nodes, timesteps)` on the CPU
+(or the timing `NamedTuple` when `return_timing = true`).
 """
 function rollout(model, g0::GNNGraph, static::AbstractMatrix{Float32},
                  forcing::AbstractArray{<:Real, 3};
                  device::Symbol = :cpu,
-                 timesteps::Union{Int, Nothing} = nothing)
+                 timesteps::Union{Int, Nothing} = nothing,
+                 return_timing::Bool = false)
     device in (:cpu, :gpu) || throw(ArgumentError("device must be :cpu or :gpu"))
     dev_fn = device == :gpu ? Flux.gpu : Flux.cpu
 
@@ -73,8 +78,140 @@ function rollout(model, g0::GNNGraph, static::AbstractMatrix{Float32},
     @info @sprintf("rollout: %d steps  total=%.3f s  median/step=%.4f s  mean/step=%.4f s  std/step=%.4f s  min=%.4f s  max=%.4f s",
                    T, t_total, med_step, mean_step, std_step, minimum(step_times), maximum(step_times))
 
-    return Array{Float32}(Flux.cpu(states_d))
+    states_cpu = Array{Float32}(Flux.cpu(states_d))
+    return return_timing ?
+        (states = states_cpu, step_times = step_times, total_time = t_total, n_steps = T) :
+        states_cpu
 end
+
+"""
+    rollout_ensemble(model, g0, static, forcing;
+                     states0 = nothing, device = :cpu, timesteps = nothing) -> Array{Float32, 4}
+
+Perform `B` autoregressive rollouts in parallel — one per ensemble member —
+using the block-diagonal batching machinery.  All members share the graph
+topology of `g0`; they differ in their per-member forcing (and, optionally,
+initial state).  Because the members occupy disjoint diagonal blocks of the
+batched adjacency, they never interact — each block is an independent rollout,
+but every timestep is evaluated with a single batched forward pass, amortising
+kernel-launch latency across the ensemble (the dominant per-step cost on GPU).
+
+The block-diagonal adjacency for `B` is precomputed once so every step takes the
+single-SpMM path; the reshape-fallback path is deliberately not used here.
+
+Arguments:
+- `model`   : a `WflowGNN`.
+- `g0`      : initial `GNNGraph` giving the shared topology.  Its `ndata.state`
+              is used as the initial condition for every member when `states0`
+              is `nothing`.
+- `static`  : `(n_static, n_nodes)` time-invariant node features (shared).
+- `forcing` : `(n_forcing, n_nodes, T, B)` per-member forcing for t = 1 … T.
+              The ensemble size `B` is `size(forcing, 4)`.
+
+Keyword arguments:
+- `states0`    : optional `(n_state, n_nodes, B)` per-member initial state.
+                 `nothing` (default) replicates `g0.ndata.state` across members.
+- `device`     : `:cpu` or `:gpu`.
+- `timesteps`  : number of steps (≤ `T`); `nothing` means all `T`.
+- `return_timing` : when `true`, return a `NamedTuple`
+                 `(states, step_times, total_time, n_steps, n_members)` instead
+                 of just the state array — `step_times` is the per-timestep wall
+                 time (s) for the whole batched step (all `B` members together).
+
+Returns an `Array{Float32, 4}` of shape `(n_state, n_nodes, timesteps, B)` on CPU
+(or the timing `NamedTuple` when `return_timing = true`).
+"""
+function rollout_ensemble(model, g0::GNNGraph, static::AbstractMatrix{Float32},
+                          forcing::AbstractArray{<:Real, 4};
+                          states0::Union{Nothing, AbstractArray{<:Real, 3}} = nothing,
+                          device::Symbol = :cpu,
+                          timesteps::Union{Int, Nothing} = nothing,
+                          return_timing::Bool = false)
+    device in (:cpu, :gpu) || throw(ArgumentError("device must be :cpu or :gpu"))
+    dev_fn = device == :gpu ? Flux.gpu : Flux.cpu
+
+    N = g0.num_nodes
+    B = size(forcing, 4)
+    size(forcing, 2) == N ||
+        throw(ArgumentError("forcing has $(size(forcing, 2)) nodes but g0 has $N"))
+
+    T_max = size(forcing, 3)
+    T     = isnothing(timesteps) ? T_max :
+            (1 ≤ timesteps ≤ T_max ? timesteps :
+             throw(ArgumentError("timesteps ($timesteps) must be between 1 and $T_max")))
+
+    # Base per-member initial state (n_state × n_nodes).
+    base_state = isnothing(states0) ? g0.ndata.state : nothing
+    if !isnothing(states0)
+        size(states0, 2) == N || throw(ArgumentError("states0 has $(size(states0, 2)) nodes but g0 has $N"))
+        size(states0, 3) == B || throw(ArgumentError("states0 has $(size(states0, 3)) members but forcing has $B"))
+    end
+    n_state = isnothing(states0) ? size(base_state, 1) : size(states0, 1)
+
+    # Batched B·N-node graph: B disjoint copies of g0's topology.  The mass
+    # balance layer reads `g.num_nodes`, so this must equal B·N.
+    gB = GNNGraphs.batch([g0 for _ in 1:B])
+
+    # Precompute the block-diagonal adjacency for B *before* moving to device so
+    # every step takes the correct single-SpMM path (the reshape fallback does
+    # not preserve per-member independence and is intentionally avoided).
+    model_b = precompute_batched(model, B)
+
+    model_d   = dev_fn(model_b)
+    gB_d      = dev_fn(gB)
+    static_d  = dev_fn(Array{Float32}(static))
+    forcing_d = dev_fn(Array{Float32}(forcing))
+
+    # Initial state stacked in block order [member1 (N cols) | member2 | … ].
+    # reshape of an (n_state, N, B) array collapses (N, B) column-major → N fast,
+    # B slow, which is exactly block order.
+    state = if isnothing(states0)
+        repeat(dev_fn(Array{Float32}(base_state)), 1, B)   # identical IC per member
+    else
+        reshape(dev_fn(Array{Float32}(states0)), n_state, N * B)
+    end
+
+    states_d = similar(state, n_state, N * B, T)
+
+    sync_dev() = device == :gpu ? CUDA.synchronize() : nothing
+
+    # Per-step forcing slice → block order (n_forcing, N·B).  The slice is
+    # materialised (not a view) because reshaping a non-contiguous view of a
+    # 4-D array is unsupported on the GPU.
+    nf = size(forcing_d, 1)
+    fslice(t) = reshape(forcing_d[:, :, t, :], nf, N * B)
+
+    # Warm-up (discard) so timings exclude first-call compilation.
+    model_d(gB_d, state, fslice(1), static_d, fslice(min(2, T_max)))
+    sync_dev()
+
+    t_start = time()
+    step_times = Vector{Float64}(undef, T)
+
+    for t in 1:T
+        t_step = time()
+        f_t               = fslice(t)
+        f_next            = fslice(min(t + 1, T_max))
+        state             = model_d(gB_d, state, f_t, static_d, f_next)
+        states_d[:, :, t] = state
+        sync_dev()
+        step_times[t] = time() - t_step
+    end
+
+    t_total  = time() - t_start
+    med_step = median(step_times)
+    @info @sprintf("rollout_ensemble: B=%d members  %d steps  total=%.3f s  median/step=%.4f s  min=%.4f s  max=%.4f s",
+                   B, T, t_total, med_step, minimum(step_times), maximum(step_times))
+
+    # Un-stack: (n_state, N·B, T) → (n_state, N, B, T) → (n_state, N, T, B).
+    states_cpu = Array{Float32}(Flux.cpu(states_d))
+    result = permutedims(reshape(states_cpu, n_state, N, B, T), (1, 2, 4, 3))
+    return return_timing ?
+        (states = result, step_times = step_times, total_time = t_total,
+         n_steps = T, n_members = B) :
+        result
+end
+
 
 """
     evaluate_trajectory(model, split, norm_stats, domain, static; device = :cpu)

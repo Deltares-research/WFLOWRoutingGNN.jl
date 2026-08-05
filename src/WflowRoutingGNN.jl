@@ -36,7 +36,7 @@ export plot_losses, plot_validation_movie, plot_timeseries, plot_downstream_time
        plot_mb_diagnostics
 
 include("rollout.jl")
-export rollout, evaluate_trajectory, rollout_mb_diagnostics
+export rollout, evaluate_trajectory, rollout_mb_diagnostics, rollout_ensemble
 
 include("postprocess.jl")
 export regrid, write_regrid_to_netcdf
