@@ -43,6 +43,17 @@ function rollout(model, g0::GNNGraph, static::AbstractMatrix{Float32},
 
     states_d = similar(state, n_state, n_nodes, T)
 
+    # Device synchronisation: on GPU, model calls launch asynchronously, so
+    # per-step wall-clock deltas are meaningless without a sync.  No-op on CPU.
+    sync_dev() = device == :gpu ? CUDA.synchronize() : nothing
+
+    # Warm-up: run (and discard) one step so the reported timings exclude
+    # first-call JIT compilation, which otherwise inflates the mean.
+    let fwarm = forcing_d[:, :, min(2, T_max)]
+        model_d(g0_d, state, forcing_d[:, :, 1], static_d, fwarm)
+    end
+    sync_dev()
+
     t_start = time()
     step_times = Vector{Float64}(undef, T)
 
@@ -51,14 +62,16 @@ function rollout(model, g0::GNNGraph, static::AbstractMatrix{Float32},
         forcing_next_t    = forcing_d[:, :, min(t + 1, T_max)]
         state             = model_d(g0_d, state, forcing_d[:, :, t], static_d, forcing_next_t)
         states_d[:, :, t] = state
+        sync_dev()
         step_times[t] = time() - t_step
     end
 
     t_total = time() - t_start
+    med_step  = median(step_times)
     mean_step = sum(step_times) / T
     std_step  = sqrt(sum((step_times .- mean_step).^2) / T)
-    @info @sprintf("rollout: %d steps  total=%.3f s  mean/step=%.4f s  std/step=%.4f s  min=%.4f s  max=%.4f s",
-                   T, t_total, mean_step, std_step, minimum(step_times), maximum(step_times))
+    @info @sprintf("rollout: %d steps  total=%.3f s  median/step=%.4f s  mean/step=%.4f s  std/step=%.4f s  min=%.4f s  max=%.4f s",
+                   T, t_total, med_step, mean_step, std_step, minimum(step_times), maximum(step_times))
 
     return Array{Float32}(Flux.cpu(states_d))
 end
