@@ -355,7 +355,10 @@ function train_model!(model,
     # restart) and is shrunk by `ts.phase_backoff_factor` whenever an epoch is
     # flagged unstable. `phase_gnorms` holds this phase's finite epoch grad norms
     # so a spike can be judged relative to the phase's own running median.
-    lr_scale     = 1.0
+    # Keep `lr_scale` Float32: `Flux.adjust!` rebuilds each optimiser rule with
+    # the eta's type, so a Float64 eta would try to store an `Adam{Float64}` leaf
+    # into the `Adam{Float32}` optimiser tree and fail to convert.
+    lr_scale     = 1.0f0
     prev_steps   = strategy.current_steps
     phase_gnorms = Float64[]
     backoff_on   = ts.phase_backoff_factor < 1
@@ -370,11 +373,11 @@ function train_model!(model,
         # New curriculum phase: reset the warm-restart backoff state.
         if strategy.current_steps != prev_steps
             prev_steps = strategy.current_steps
-            lr_scale   = 1.0
+            lr_scale   = 1.0f0
             empty!(phase_gnorms)
         end
         lr = curriculum_lr(ts, epoch) * lr_scale
-        Flux.adjust!(opt_state, lr)
+        Flux.adjust!(opt_state, Float32(lr))
 
         # Training pass
         ep_train_rollout = 0f0
