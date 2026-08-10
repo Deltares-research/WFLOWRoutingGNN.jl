@@ -142,9 +142,9 @@ function timeit(f, sync, warmup, reps)
     end
     ts_ms = Vector{Float64}(undef, reps)
     for r in 1:reps
-        t0 = time()
-        f(); sync()
-        ts_ms[r] = (time() - t0) * 1e3
+        t0 = time_ns()                      # nanosecond counter: ~2 ms GPU steps
+        f(); sync()                         # would be lost to time()'s ~1 ms grid
+        ts_ms[r] = (time_ns() - t0) / 1e6
     end
     return ts_ms
 end
@@ -168,6 +168,15 @@ for dev in devices
     f_now = g0.ndata.forcing
     f_nxt = batch_d[2].ndata.forcing
 
+    # 3-D forcing buffer + 3-D output buffer so the rollout-step closure below
+    # performs the same array slicing/copying as the real `rollout` loop body:
+    # slice forcing[:,:,t] and forcing[:,:,t+1], and store state into states[:,:,t].
+    n_state   = size(state, 1)
+    n_nodes   = size(state, 2)
+    n_forcing = size(f_now, 1)
+    forcing3  = dev_fn(Array{Float32}(cat(Array(Flux.cpu(f_now)), Array(Flux.cpu(f_nxt)); dims = 3)))
+    states3   = similar(state, n_state, n_nodes, 1)
+
     # Fresh optimiser identical to train_model! (ClipNorm ∘ Adam).
     rule = ts.grad_clip > 0 ?
         Flux.Optimisers.OptimiserChain(
@@ -176,9 +185,20 @@ for dev in devices
         Adam(ts.lr_start)
     opt_state = Flux.setup(rule, model_d)
 
-    # 1. forward-only inference (one rollout step)
+    # 1. forward-only inference (pure model call, no bookkeeping)
     fwd() = model_d(g0, state, f_now, static_d, f_nxt)
     t_fwd = timeit(fwd, sync, warmup, reps)
+
+    # 1b. rollout step: forward + forcing slices + state store (the real
+    #     `rollout` loop body). Extra ops vs. `fwd` are two forcing slices and
+    #     one store into the output buffer — each a separate GPU kernel launch.
+    function roll()
+        f_next = forcing3[:, :, 2]
+        st     = model_d(g0, state, forcing3[:, :, 1], static_d, f_next)
+        states3[:, :, 1] = st
+        return st
+    end
+    t_roll = timeit(roll, sync, warmup, reps)
 
     # 2. forward + backward (gradient), same loss as training
     grad() = Flux.withgradient(m -> loss_function(m, batch_d, strategy, static_d), model_d)
@@ -191,9 +211,10 @@ for dev in devices
     end
     t_step = timeit(step, sync, warmup, reps)
 
-    push!(results, (device = dev, kind = "forward (inference)", t = t_fwd))
-    push!(results, (device = dev, kind = "fwd+bwd (gradient)",  t = t_grad))
-    push!(results, (device = dev, kind = "full train step",     t = t_step))
+    push!(results, (device = dev, kind = "forward (pure model)",  t = t_fwd))
+    push!(results, (device = dev, kind = "rollout step",          t = t_roll))
+    push!(results, (device = dev, kind = "fwd+bwd (gradient)",    t = t_grad))
+    push!(results, (device = dev, kind = "full train step",       t = t_step))
 end
 
 # ── Report ────────────────────────────────────────────────────────────────────
@@ -212,15 +233,17 @@ for r in results
 end
 println("-"^92)
 
-# Ratios per device: how much a training step costs relative to one forward pass.
+# Ratios per device: how much each step costs relative to one pure forward pass.
 for dev in devices
-    fi = findfirst(r -> r.device == dev && r.kind == "forward (inference)", results)
-    gi = findfirst(r -> r.device == dev && r.kind == "fwd+bwd (gradient)",  results)
-    si = findfirst(r -> r.device == dev && r.kind == "full train step",     results)
-    if !isnothing(fi) && !isnothing(gi) && !isnothing(si)
-        f = median(results[fi].t); g = median(results[gi].t); s = median(results[si].t)
-        @printf("%-6s  gradient / forward = %.2fx   |   full train step / forward = %.2fx\n",
-                string(dev), g / f, s / f)
+    fi = findfirst(r -> r.device == dev && r.kind == "forward (pure model)", results)
+    ri = findfirst(r -> r.device == dev && r.kind == "rollout step",         results)
+    gi = findfirst(r -> r.device == dev && r.kind == "fwd+bwd (gradient)",   results)
+    si = findfirst(r -> r.device == dev && r.kind == "full train step",      results)
+    if !isnothing(fi) && !isnothing(ri) && !isnothing(gi) && !isnothing(si)
+        f = median(results[fi].t); r = median(results[ri].t)
+        g = median(results[gi].t); s = median(results[si].t)
+        @printf("%-6s  rollout/fwd = %.2fx   |   gradient/fwd = %.2fx   |   full train step/fwd = %.2fx\n",
+                string(dev), r / f, g / f, s / f)
     end
 end
 println("="^92)

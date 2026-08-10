@@ -1,6 +1,28 @@
 using CairoMakie
 import CairoMakie: record
 
+# Derive a `.csv` path from a figure `path` by swapping the extension.
+# Returns `nothing` when `path` is `nothing`.
+_csv_from_path(path) = isnothing(path) ? nothing : string(splitext(path)[1], ".csv")
+
+# Write named columns to a CSV file (no external dependency; mirrors the manual
+# CSV writers in `hparsearch.jl` / `lr_range_test.jl`). `header` is a Vector of
+# column names; `columns` is a Vector of equal-length column vectors.
+function _write_plot_csv(path::AbstractString, header::Vector{<:AbstractString}, columns::Vector)
+    isempty(columns) && return
+    n = length(first(columns))
+    all(c -> length(c) == n, columns) ||
+        throw(ArgumentError("all CSV columns must have the same length"))
+    mkpath(dirname(abspath(path)))
+    open(path, "w") do io
+        println(io, join(header, ","))
+        for i in 1:n
+            println(io, join((string(col[i]) for col in columns), ","))
+        end
+    end
+    return path
+end
+
 """
     plot_losses(train_rollout, val_rollout, train_1step, val_1step;
                 path = nothing) -> Figure
@@ -18,6 +40,11 @@ Arguments:
 - `val_1step`     : `Vector{Float32}` -- validation 1-step loss per epoch.
 - `path`          : optional file path; if given the figure is saved there
                     (format inferred from the extension, e.g. `.png`, `.pdf`).
+- `csv`           : when `true` (default) and a `path` (or `csv_path`) is
+                    available, the plotted per-epoch loss arrays are written to
+                    a CSV file alongside the figure.
+- `csv_path`      : optional explicit CSV output path; defaults to `path` with
+                    its extension swapped for `.csv`.
 
 Returns the `Figure` object.
 """
@@ -26,7 +53,9 @@ function plot_losses(train_rollout, val_rollout, train_1step, val_1step;
                      val_q_1step   = nothing,
                      train_h_1step = nothing,
                      val_h_1step   = nothing,
-                     path = nothing)
+                     path = nothing,
+                     csv  = true,
+                     csv_path = nothing)
     epochs         = 1:length(train_rollout)
     has_components = !isnothing(train_q_1step) &&
                      !isempty(train_q_1step)   &&
@@ -61,6 +90,18 @@ function plot_losses(train_rollout, val_rollout, train_1step, val_1step;
     end
 
     isnothing(path) || save(path, fig)
+
+    # Write the plotted per-epoch arrays to CSV.
+    csv_out = isnothing(csv_path) ? _csv_from_path(path) : csv_path
+    if csv && !isnothing(csv_out)
+        header  = ["epoch", "train_rollout", "val_rollout", "train_1step", "val_1step"]
+        columns = Any[collect(epochs), train_rollout, val_rollout, train_1step, val_1step]
+        if has_components
+            append!(header, ["train_q_1step", "val_q_1step", "train_h_1step", "val_h_1step"])
+            push!(columns, train_q_1step, val_q_1step, train_h_1step, val_h_1step)
+        end
+        _write_plot_csv(csv_out, header, columns)
+    end
 
     return fig
 end
@@ -220,6 +261,11 @@ Arguments:
 - `domain`     : routing domain string (key of `DOMAIN_VARS`).
 - `row`, `col` : 1-based raster position of the cell to inspect.
 - `path`       : optional output file path; format inferred from extension.
+- `csv`        : when `true` (default) and a `path` (or `csv_path`) is available,
+                 the plotted timeseries (truth, prediction and absolute error per
+                 state variable) are written to a CSV file alongside the figure.
+- `csv_path`   : optional explicit CSV output path; defaults to `path` with its
+                 extension swapped for `.csv`.
 
 Returns the `Figure` object.
 """
@@ -230,7 +276,9 @@ function plot_timeseries(
         row        :: Int,
         col        :: Int;
         path       = nothing,
-        timestamps = nothing)
+        timestamps = nothing,
+        csv        = true,
+        csv_path   = nothing)
 
     state_vars = DOMAIN_VARS[domain]["state"]
     isempty(state_vars) && throw(ArgumentError("domain \"$domain\" has no state variables"))
@@ -242,6 +290,11 @@ function plot_timeseries(
         @warn "Cell ($row, $col) is inactive (all NaN); plot will be empty"
 
     fig = Figure(size = (1600, 300 * nvars))
+
+    # Accumulate the plotted series for optional CSV export. First column is the
+    # time axis; then truth / prediction / absolute error per state variable.
+    csv_header  = [isnothing(timestamps) ? "timestep" : "time"]
+    csv_columns = Any[isnothing(timestamps) ? collect(ts) : string.(collect(timestamps))]
 
     for (vi, vname) in enumerate(state_vars)
         truth = true_grids[vname][row, col, :]
@@ -289,6 +342,9 @@ function plot_timeseries(
             isempty(v) ? NaN32 : Float32(sqrt(mean(v .^ 2)))
         end
 
+        append!(csv_header, ["$(vname)_truth", "$(vname)_pred", "$(vname)_abserr"])
+        push!(csv_columns, collect(truth), collect(pred), collect(abserr))
+
         ax_err = Axis(fig[vi, 3];
                       title              = "$vname  —  absolute error",
                       xlabel             = isnothing(timestamps) ? "Timestep" : "Time",
@@ -314,6 +370,10 @@ function plot_timeseries(
     end
 
     isnothing(path) || save(path, fig)
+
+    csv_out = isnothing(csv_path) ? _csv_from_path(path) : csv_path
+    (csv && !isnothing(csv_out)) && _write_plot_csv(csv_out, csv_header, csv_columns)
+
     return fig
 end
 
@@ -336,6 +396,10 @@ Arguments:
                     (length = number of graph nodes), e.g. from `meta_upstream_area`
                     in staticmaps. NaN values are ignored.
 - `path`          : optional output file path.
+- `csv`           : when `true` (default) and a `path` (or `csv_path`) is
+                    available, the plotted timeseries are written to CSV
+                    (forwarded to `plot_timeseries`).
+- `csv_path`      : optional explicit CSV output path.
 
 Returns the `Figure` object.
 """
@@ -346,7 +410,9 @@ function plot_downstream_timeseries(
         grid          :: NamedTuple,
         upstream_area :: AbstractVector{<:Real};
         path          = nothing,
-        timestamps    = nothing)
+        timestamps    = nothing,
+        csv           = true,
+        csv_path      = nothing)
 
     # Most downstream node = largest upstream catchment area (ignore NaN)
     outlet_idx = argmax(i -> isnan(upstream_area[i]) ? -Inf : upstream_area[i],
@@ -355,7 +421,8 @@ function plot_downstream_timeseries(
     row = grid.rows[outlet_idx]
     col = grid.cols[outlet_idx]
 
-    return plot_timeseries(pred_grids, true_grids, domain, row, col; path, timestamps)
+    return plot_timeseries(pred_grids, true_grids, domain, row, col;
+                           path, timestamps, csv, csv_path)
 end
 
 """

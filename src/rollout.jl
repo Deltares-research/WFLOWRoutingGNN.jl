@@ -59,19 +59,23 @@ function rollout(model, g0::GNNGraph, static::AbstractMatrix{Float32},
     end
     sync_dev()
 
-    t_start = time()
+    # Use `time_ns()` (not `time()`): GPU steps are only a few ms and Windows
+    # `time()` quantises to ~1 ms, which would corrupt them.  Same nanosecond
+    # counter + sync-after-call convention as scripts/benchmark_inference_vs_train.jl,
+    # so per-step numbers here are conceptually identical to that benchmark.
+    t_start = time_ns()
     step_times = Vector{Float64}(undef, T)
 
     for t in 1:T
-        t_step = time()
+        t_step = time_ns()
         forcing_next_t    = forcing_d[:, :, min(t + 1, T_max)]
         state             = model_d(g0_d, state, forcing_d[:, :, t], static_d, forcing_next_t)
         states_d[:, :, t] = state
         sync_dev()
-        step_times[t] = time() - t_step
+        step_times[t] = (time_ns() - t_step) / 1e9
     end
 
-    t_total = time() - t_start
+    t_total = (time_ns() - t_start) / 1e9
     med_step  = median(step_times)
     mean_step = sum(step_times) / T
     std_step  = sqrt(sum((step_times .- mean_step).^2) / T)
@@ -185,20 +189,23 @@ function rollout_ensemble(model, g0::GNNGraph, static::AbstractMatrix{Float32},
     model_d(gB_d, state, fslice(1), static_d, fslice(min(2, T_max)))
     sync_dev()
 
-    t_start = time()
+    # Nanosecond counter + sync-after-call, matching
+    # scripts/benchmark_inference_vs_train.jl (see note in `rollout`): avoids the
+    # ~1 ms Windows `time()` quantisation on few-ms GPU steps.
+    t_start = time_ns()
     step_times = Vector{Float64}(undef, T)
 
     for t in 1:T
-        t_step = time()
+        t_step = time_ns()
         f_t               = fslice(t)
         f_next            = fslice(min(t + 1, T_max))
         state             = model_d(gB_d, state, f_t, static_d, f_next)
         states_d[:, :, t] = state
         sync_dev()
-        step_times[t] = time() - t_step
+        step_times[t] = (time_ns() - t_step) / 1e9
     end
 
-    t_total  = time() - t_start
+    t_total  = (time_ns() - t_start) / 1e9
     med_step = median(step_times)
     @info @sprintf("rollout_ensemble: B=%d members  %d steps  total=%.3f s  median/step=%.4f s  min=%.4f s  max=%.4f s",
                    B, T, t_total, med_step, minimum(step_times), maximum(step_times))

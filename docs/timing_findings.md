@@ -20,20 +20,40 @@ and median reporting — it did **not** touch the compute path.
 
 ## 2. Direct measurement (same model, graph, device)
 
-Measured with `scripts/benchmark_inference_vs_train.jl` (40 reps, warm-up 3,
-`CUDA.synchronize()` after every timed call), per-step in ms:
+Measured with `scripts/benchmark_inference_vs_train.jl` (100 reps, warm-up 3,
+`time_ns()` timer, `CUDA.synchronize()` after every timed call), per-step in ms:
 
 | device | operation | min | median | mean | std | max |
 |--------|-----------|----:|-------:|-----:|----:|----:|
-| cpu | forward (inference) | 24 | 25   | 26.4  | 7.0   | 65  |
-| cpu | fwd+bwd (gradient)  | 62 | 70   | 112.9 | 149.4 | 846 |
-| cpu | full train step     | 63 | 68.5 | 101.8 | 114.9 | 586 |
-| gpu | forward (inference) | 1  | 2    | 4.6   | 10.0  | 55  |
-| gpu | fwd+bwd (gradient)  | 4  | 5    | 7.7   | 9.4   | 60  |
-| gpu | full train step     | 6  | 6    | 12.0  | 21.7  | 124 |
+| cpu | forward (pure model) | 31.3 | 34.9  | 37.6  | 12.3  | 137.7 |
+| cpu | rollout step         | 30.4 | 36.0  | 37.4  | 6.6   | 66.1  |
+| cpu | fwd+bwd (gradient)   | 84.2 | 99.8  | 126.7 | 111.7 | 701.7 |
+| cpu | full train step      | 84.2 | 102.8 | 126.9 | 108.9 | 765.8 |
+| gpu | forward (pure model) | 1.03 | 2.57  | 4.03  | 12.5  | 117.4 |
+| gpu | rollout step         | 1.09 | 1.38  | 2.23  | 4.6   | 38.3  |
+| gpu | fwd+bwd (gradient)   | 5.62 | 6.63  | 8.32  | 8.2   | 77.7  |
+| gpu | full train step      | 6.88 | 8.53  | 10.36 | 8.9   | 87.7  |
 
-Ratios: GPU gradient/forward = 2.5×, full-step/forward = 3.0×; CPU ≈ 2.8×.
-This is the textbook forward:(forward+backward) ratio — nothing anomalous.
+Ratios (median): CPU rollout/fwd = 1.03×, gradient/fwd = 2.86×, full-step/fwd =
+2.94×; GPU rollout/fwd ≈ 1×, gradient/fwd = 2.58×, full-step/fwd = 3.32×. The
+forward:(forward+backward) ratio is the textbook ~2.5–3× — nothing anomalous.
+
+### `forward (pure model)` vs. `rollout step`
+
+The two top rows isolate what the rollout loop adds on top of the bare model call.
+The `rollout step` closure runs exactly the `rollout` loop body: two forcing
+slices (`forcing[:,:,t]`, `forcing[:,:,t+1]`) plus a store into the output buffer
+(`states[:,:,t] = state`). The extra cost is negligible:
+
+- **CPU:** identical within noise (1.03×) — the slices/copy are microseconds
+  against a ~35 ms compute.
+- **GPU:** also ≈1× (the min values, 1.03 vs. 1.09 ms, are the stable comparison;
+  the medians swap order only because run-to-run launch jitter is large relative
+  to a ~1–2 ms step). The slices/store are tiny arrays, but each is a separate
+  CUDA kernel launch — so any difference is launch latency, not data movement.
+
+Upshot: the rollout's array slicing/copying does **not** materially change the
+per-step cost. A rollout step ≈ one model forward pass, on both devices.
 
 ### Why the training loop is even slower than a single gradient step
 
