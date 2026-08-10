@@ -54,6 +54,11 @@ mlp_layers = 1
 enc_activation  = "swish"
 proc_activation = "swish"
 
+# Enforce the kinematic-wave mass balance (river domain only). When false,
+# river_q and river_h are predicted independently by the decoder. Sweep this
+# (see [hparsearch.search_space] below) to compare against the hard constraint.
+enforce_mass_balance = true
+
 
 [train]
 # Base training settings — individual values may be overridden by [hparsearch]
@@ -97,6 +102,10 @@ search_type = "box"
 "model.hidden_dim" = [32, 64, 128]
 "model.nlayers"    = [2, 3]
 "model.mlp_layers" = [1, 2]
+
+# Mass balance: compare the hard kinematic-wave constraint (true) against
+# independent river_q / river_h prediction (false).
+"model.enforce_mass_balance" = [true, false]
 
 # Learning rate
 "train.lr_start" = [1e-3, 5e-4]

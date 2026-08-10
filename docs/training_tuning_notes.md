@@ -46,6 +46,31 @@ the node-feature gradient `∂B = Aᵀ · ΔY`. All 6 SpMM sites (3 in `SparseCo
 Also relevant: `Functors.@functor` field restriction on `MassBalanceLayer` /
 `SparseConv` keeps the sparse matrices off the Flux/Optimisers traversal path.
 
+### Why `@functor` restriction doesn't remove the need for the `rrule`
+These solve two problems at two different layers, and neither substitutes for the
+other:
+
+- **`Functors.@functor` (and `Flux.trainable`)** act on the **parameter-traversal**
+  layer: they decide which fields `Optimisers.setup` walks to build optimiser
+  state and which fields `Flux.update!` writes. Restricting traversal to
+  `(W_self, W_neigh, bias)` means `A` gets no Adam moments and is never updated.
+  This is purely about *what gets optimised* — it happens **after** gradients are
+  already computed.
+- **The custom `rrule`** acts on the **autodiff/backward-pass** layer. Zygote
+  differentiates the *function that ran* (`A * B`), not the parameter list. Its
+  generic `*` rule produces cotangents for **both** operands — including the dense
+  `∂A = ΔY · Bᵀ` (the ~17 GB block-diagonal outer product) — and materializes it
+  *before* anything checks whether `A` is trainable. Traversal restriction can't
+  prevent that allocation because it happens later. The `rrule` returns
+  `NoTangent()` for `A`, so `∂A` is never built at all.
+
+So: `@functor` keeps `A` out of the **optimiser**; the `rrule` keeps `∂A` out of
+the **backward pass**. Drop the `rrule` and training is still numerically correct
+(the discarded `∂A` is harmless), but every step allocates the dense adjacency
+gradient — OOM at the batched `(B·N)×(B·N)` size. Drop the `@functor` restriction
+and Optimisers tries to treat `A` as a trainable parameter (and traverse the
+non-in-place-writable `CuSparseMatrixCSR`). They are complementary, not redundant.
+
 ---
 
 ## 2. Where the GPU memory actually goes

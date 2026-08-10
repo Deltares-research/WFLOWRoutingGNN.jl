@@ -363,9 +363,13 @@ function rollout_mb_diagnostics(model::WflowGNN, split, static::AbstractMatrix{F
         net_flux[:,   t] = d.net_flux
         h_raw[:,      t] = d.h_phys_raw
 
-        # --- Ground truth (physical units, denorm) ---------------------------
-        true_q[:, t] = vec(target_state[1:1, :]) .* mb.σ_q .+ mb.μ_q
-        true_h[:, t] = vec(target_state[2:2, :]) .* mb.σ_h .+ mb.μ_h
+        # --- Ground truth (physical units, denorm + postscale) ---------------
+        # Undo z-score AND the variable postscale so these match every other
+        # series here (all sourced from mb_diagnostics, which applies postscale).
+        true_q[:, t] = (vec(target_state[1:1, :]) .* mb.σ_q .+ mb.μ_q) .*
+                       Array(mb.postscale_q)
+        true_h[:, t] = (vec(target_state[2:2, :]) .* mb.σ_h .+ mb.μ_h) .*
+                       Array(mb.postscale_h)
 
         # --- Verification: MB fed true q, from true previous state -----------
         d_v = mb_diagnostics(mb, g0, graphs[t].ndata.state, forcing_t, forcing_next,

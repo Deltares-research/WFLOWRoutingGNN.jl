@@ -92,6 +92,7 @@ function parse_run_config(toml_path::String)
         mlp_layers      = get(md, "mlp_layers",       1),
         enc_activation  = ACTIVATIONS[get(md, "enc_activation",  "swish")],
         proc_activation = ACTIVATIONS[get(md, "proc_activation", "swish")],
+        enforce_mass_balance = get(md, "enforce_mass_balance", true),
     )
 
     td = d["train"]
@@ -158,7 +159,7 @@ function build_gnn_model(ms::ModelSettings, graphs, norm_stats, postscale,
     all_tgt  = vcat(tgt_edges, collect(1:n_nodes))
     A_sparse = sparse(all_tgt, all_src, ones(Float32, length(all_src)), n_nodes, n_nodes)
 
-    if ms.domain == "river"
+    if ms.domain == "river" && ms.enforce_mass_balance
         dt     = get_timestep(output_file)
         pq_vec = postscale["river_q"]
         ph_vec = postscale["river_h"]
@@ -193,6 +194,11 @@ function build_gnn_model(ms::ModelSettings, graphs, norm_stats, postscale,
         strategy === nothing || (strategy.h_loss_weight = h_weight)
         model = WflowGNN(ms, mb, A_sparse)
     else
+        if ms.domain == "river" && !ms.enforce_mass_balance
+            @info "Mass balance DISABLED: river_q and river_h are predicted " *
+                  "independently (decoder out_dim = " *
+                  "$(length(DOMAIN_VARS["river"]["state"])))"
+        end
         model = WflowGNN(ms, A_sparse)
     end
 

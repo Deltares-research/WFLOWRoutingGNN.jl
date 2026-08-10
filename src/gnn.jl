@@ -56,14 +56,20 @@ Hyperparameters for a `WflowGNN` model.
 - `mlp_layers`      : number of `Dense` layers in the encoder and decoder MLPs (default `1`).
 - `enc_activation`  : activation for encoder `Dense` layers (default `swish`).
 - `proc_activation` : activation for each processor layer (default `swish`).
+- `enforce_mass_balance` : for the `"river"` domain, enforce the kinematic-wave
+                   mass balance as a hard constraint (decoder predicts only `Δq`;
+                   `river_h` is derived analytically). When `false`, `river_q`
+                   and `river_h` are predicted independently by the decoder
+                   (default `true`). Ignored for non-river domains.
 """
 Base.@kwdef struct ModelSettings
-    domain          :: String
-    hidden_dim      :: Int = 64
-    nlayers         :: Int = 3
-    mlp_layers      :: Int = 1
-    enc_activation         = swish
-    proc_activation        = swish
+    domain               :: String
+    hidden_dim           :: Int = 64
+    nlayers              :: Int = 3
+    mlp_layers           :: Int = 1
+    enc_activation              = swish
+    proc_activation             = swish
+    enforce_mass_balance :: Bool = true
 end
 
 function Base.show(io::IO, s::ModelSettings)
@@ -73,7 +79,8 @@ function Base.show(io::IO, s::ModelSettings)
     println(io, "  nlayers         : ", s.nlayers)
     println(io, "  mlp_layers      : ", s.mlp_layers)
     println(io, "  enc_activation  : ", _activation_name(s.enc_activation))
-    print(  io, "  proc_activation : ", _activation_name(s.proc_activation))
+    println(io, "  proc_activation : ", _activation_name(s.proc_activation))
+    print(  io, "  enforce_mass_balance : ", s.enforce_mass_balance)
 end
 
 """
@@ -90,6 +97,7 @@ function save_model_settings(path::String, s::ModelSettings)
         "mlp_layers"      => s.mlp_layers,
         "enc_activation"  => _activation_name(s.enc_activation),
         "proc_activation" => _activation_name(s.proc_activation),
+        "enforce_mass_balance" => s.enforce_mass_balance,
     )
     open(path, "w") do io
         TOML.print(io, dict)
@@ -114,6 +122,7 @@ function load_model_settings(path::String)
         mlp_layers      = get(d, "mlp_layers", 1),
         enc_activation  = ACTIVATIONS[enc_name],
         proc_activation = ACTIVATIONS[proc_name],
+        enforce_mass_balance = get(d, "enforce_mass_balance", true),
     )
 end
 

@@ -51,6 +51,13 @@ enc_activation  = "swish"
 # Activation function for the processor GNN layers
 proc_activation = "swish"
 
+# Enforce the kinematic-wave mass balance as a hard constraint (river domain only).
+# When true (default) the decoder predicts only the discharge increment Δq and
+# river_h is derived analytically from the mass balance. When false, river_q and
+# river_h are predicted independently by the decoder (no physical coupling) —
+# useful as a baseline to measure the benefit of the mass-balance constraint.
+enforce_mass_balance = true
+
 
 [train]
 # Total number of training epochs

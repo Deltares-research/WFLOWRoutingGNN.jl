@@ -227,6 +227,7 @@ function hpar_search(toml_path::String)
             mlp_layers      = get(md, "mlp_layers",       1),
             enc_activation  = ACTIVATIONS[get(md, "enc_activation",  "swish")],
             proc_activation = ACTIVATIONS[get(md, "proc_activation", "swish")],
+            enforce_mass_balance = get(md, "enforce_mass_balance", true),
         )
 
         td = d["train"]
@@ -260,6 +261,7 @@ function hpar_search(toml_path::String)
             run_name                        = ds.run_name,
             hidden_dim                      = ms.hidden_dim,
             nlayers                         = ms.nlayers,
+            enforce_mass_balance            = ms.enforce_mass_balance,
             batch_size                      = ts.batch_size,
             epochs                          = ts.epochs,
             n_params                        = metrics.n_params,
