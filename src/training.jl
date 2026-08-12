@@ -494,7 +494,7 @@ function train_model!(model,
             (:val_q_1step,   round(ep_val_q_1step,   sigdigits = 4)),
             (:train_h_1step, round(ep_train_h_1step, sigdigits = 4)),
             (:val_h_1step,   round(ep_val_h_1step,   sigdigits = 4)),
-            (:q→h_amp,       round(ep_val_amp,       sigdigits = 3)),
+            (Symbol("q→h_amp"), round(ep_val_amp,    sigdigits = 3)),
         ] : []
         next!(prog; showvalues = vcat(base_vals, comp_vals))
     end
