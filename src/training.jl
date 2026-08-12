@@ -296,14 +296,19 @@ _grad_l2norm(grads) = sqrt(_gn_sq(grads))
 
 """
     train_model!(model, train_loader, val_loader, ts)
-        -> (train_rollout, val_rollout, train_1step, val_1step)
+        -> NamedTuple of per-epoch Vector{Float32}
 
-Train `model` in-place and return four `Vector{Float32}` arrays with
-per-epoch losses:
+Train `model` in-place and return a `NamedTuple` of per-epoch history arrays:
 1. `train_rollout` - multi-step rollout loss on the training set.
 2. `val_rollout`   - multi-step rollout loss on the validation set.
 3. `train_1step`   - 1-step-ahead MSE on the training set.
 4. `val_1step`     - 1-step-ahead MSE on the validation set.
+
+For mass-balance models it also returns the per-component 1-step MSE
+(`train_q_1step`, `val_q_1step`, `train_h_1step`, `val_h_1step`), the q→h error
+amplification diagnostic (`train_amp`, `val_amp`; see [`mb_amplification`](@ref))
+and its analytic reference gain (`mb_gain`), plus `grad_norm`. Non-mass-balance
+models fill those with `NaN32`.
 
 `model` must already reside on the target compute device before this call
 (move it with `Flux.gpu` / `Flux.cpu` at the call site). The data loaders are
@@ -346,6 +351,9 @@ function train_model!(model,
     val_q_1step   = Float32[]
     train_h_1step = Float32[]
     val_h_1step   = Float32[]
+    train_amp     = Float32[]   # q→h error amplification through the mass balance
+    val_amp       = Float32[]
+    mb_gain       = Float32[]   # analytic self-gain θ·dt·σ_q/σ_h (reference)
     grad_norm     = Float32[]
 
     has_components = !isnothing(model.mass_balance)
@@ -384,6 +392,8 @@ function train_model!(model,
         ep_train_1step   = 0f0
         ep_train_q_1step = 0f0
         ep_train_h_1step = 0f0
+        ep_train_amp     = 0f0
+        ep_mb_gain       = NaN32
         ep_grad_norm     = 0.0
         n_batches        = 0
         n_skipped        = 0
@@ -406,6 +416,9 @@ function train_model!(model,
                 qc, hc = loss_components(model, batch, static_d)
                 ep_train_q_1step += qc
                 ep_train_h_1step += hc
+                amp, gain = mb_amplification(model, batch, static_d)
+                ep_train_amp += amp
+                ep_mb_gain    = gain
             end
             n_batches        += 1
         end
@@ -417,6 +430,7 @@ function train_model!(model,
         ep_train_1step   /= denom
         ep_train_q_1step /= denom
         ep_train_h_1step /= denom
+        ep_train_amp     /= denom
         ep_grad_norm     /= denom
 
         # Adaptive backoff: if this epoch looks unstable (non-finite grad, any
@@ -445,9 +459,11 @@ function train_model!(model,
             val_comps      = [loss_components(model, b, static_d) for b in val_loader_d]
             ep_val_q_1step = mean(c[1] for c in val_comps)
             ep_val_h_1step = mean(c[2] for c in val_comps)
+            ep_val_amp     = mean(mb_amplification(model, b, static_d)[1] for b in val_loader_d)
         else
             ep_val_q_1step = NaN32
             ep_val_h_1step = NaN32
+            ep_val_amp     = NaN32
         end
 
         push!(train_rollout, ep_train_rollout)
@@ -458,6 +474,9 @@ function train_model!(model,
         push!(val_q_1step,   ep_val_q_1step)
         push!(train_h_1step, has_components ? ep_train_h_1step : NaN32)
         push!(val_h_1step,   ep_val_h_1step)
+        push!(train_amp,     has_components ? ep_train_amp : NaN32)
+        push!(val_amp,       ep_val_amp)
+        push!(mb_gain,       has_components ? ep_mb_gain : NaN32)
         push!(grad_norm,     Float32(ep_grad_norm))
 
         base_vals = [
@@ -475,6 +494,7 @@ function train_model!(model,
             (:val_q_1step,   round(ep_val_q_1step,   sigdigits = 4)),
             (:train_h_1step, round(ep_train_h_1step, sigdigits = 4)),
             (:val_h_1step,   round(ep_val_h_1step,   sigdigits = 4)),
+            (:q→h_amp,       round(ep_val_amp,       sigdigits = 3)),
         ] : []
         next!(prog; showvalues = vcat(base_vals, comp_vals))
     end
@@ -487,6 +507,9 @@ function train_model!(model,
             val_q_1step   = val_q_1step,
             train_h_1step = train_h_1step,
             val_h_1step   = val_h_1step,
+            train_amp     = train_amp,
+            val_amp       = val_amp,
+            mb_gain       = mb_gain,
             grad_norm     = grad_norm)
 end
 

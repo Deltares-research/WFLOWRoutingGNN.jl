@@ -366,6 +366,13 @@ function run_wflow_gnn(ds::DataSettings, ms::ModelSettings, ts::TrainSettings)
                 val_h_1step   = losses.val_h_1step,
                 path = joinpath(run_dir, "losses.png"))
 
+    # Q→H error amplification diagnostic (mass-balance runs only)
+    if haskey(losses, :train_amp) && any(isfinite, losses.train_amp)
+        plot_amplification(losses.train_amp, losses.val_amp;
+                           mb_gain = get(losses, :mb_gain, nothing),
+                           path = joinpath(run_dir, "amplification.png"))
+    end
+
     # Grid lookup table (node index → raster position)
     JLD2.jldsave(joinpath(data_dir, "grid.jld2");
                  rows  = grid.rows,

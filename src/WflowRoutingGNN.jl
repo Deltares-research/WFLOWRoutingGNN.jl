@@ -34,7 +34,7 @@ export HParSearchSettings, save_hpar_search_settings, load_hpar_search_settings,
 
 include("plot.jl")
 export plot_losses, plot_validation_movie, plot_timeseries, plot_downstream_timeseries,
-       plot_mb_diagnostics, plot_spatial_metrics, plot_overprediction_vs_ramp
+       plot_mb_diagnostics, plot_amplification, plot_spatial_metrics, plot_overprediction_vs_ramp
 
 include("rollout.jl")
 export rollout, evaluate_trajectory, rollout_mb_diagnostics, rollout_ensemble

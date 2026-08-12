@@ -66,7 +66,8 @@ function plot_losses(train_rollout, val_rollout, train_1step, val_1step;
     ax1 = Axis(fig[1, 1];
                title  = "Training losses",
                xlabel = "Epoch",
-               ylabel = "MSE")
+               ylabel = "MSE",
+               yscale = log10)
     lines!(ax1, epochs, train_rollout; label = "train rollout", color = :steelblue)
     lines!(ax1, epochs, val_rollout;   label = "val rollout",   color = :steelblue,
            linestyle = :dash)
@@ -79,7 +80,8 @@ function plot_losses(train_rollout, val_rollout, train_1step, val_1step;
         ax2 = Axis(fig[2, 1];
                    title  = "1-step loss components (Q vs H)",
                    xlabel = "Epoch",
-                   ylabel = "MSE")
+                   ylabel = "MSE",
+                   yscale = log10)
         lines!(ax2, epochs, train_q_1step; label = "train Q", color = :steelblue)
         lines!(ax2, epochs, val_q_1step;   label = "val Q",   color = :steelblue,
                linestyle = :dash)
@@ -99,6 +101,59 @@ function plot_losses(train_rollout, val_rollout, train_1step, val_1step;
         if has_components
             append!(header, ["train_q_1step", "val_q_1step", "train_h_1step", "val_h_1step"])
             push!(columns, train_q_1step, val_q_1step, train_h_1step, val_h_1step)
+        end
+        _write_plot_csv(csv_out, header, columns)
+    end
+
+    return fig
+end
+
+"""
+    plot_amplification(train_amp, val_amp; mb_gain = nothing, path = nothing,
+                       csv = true, csv_path = nothing) -> Figure
+
+Plot the per-epoch **q→h error amplification** produced by
+[`mb_amplification`](@ref): the realised ratio `RMS(h_pred − h_ref) /
+RMS(q_pred − q_true)` in normalised units, where `h_ref = MB(q_true, …)` is the
+counterfactual depth for a perfect discharge. Values above `1` (dashed grey
+reference) mean a one-step discharge error is *magnified* into a depth error by
+the hard mass-balance decoder — the mechanism behind rollout h-overshoots.
+
+If `mb_gain` is supplied, the analytic self-gain `θ·dt·σ_q/σ_h` is drawn as a
+reference line (constant unless θ changes during training).
+
+Writes the plotted arrays to CSV alongside the figure when `csv` is `true`.
+Returns the `Figure`.
+"""
+function plot_amplification(train_amp, val_amp;
+                            mb_gain  = nothing,
+                            path     = nothing,
+                            csv      = true,
+                            csv_path = nothing)
+    epochs = 1:length(train_amp)
+    fig = Figure(size = (600, 400))
+    ax  = Axis(fig[1, 1];
+               title  = "Q→H error amplification through the mass balance",
+               xlabel = "Epoch",
+               ylabel = "RMS(Δh_norm from Q err) / RMS(Δq_norm)")
+    lines!(ax, epochs, train_amp; label = "train", color = :steelblue)
+    lines!(ax, epochs, val_amp;   label = "val",   color = :steelblue, linestyle = :dash)
+    hlines!(ax, [1f0]; color = :gray, linestyle = :dot)  # amplification threshold
+    if !isnothing(mb_gain) && !isempty(mb_gain) && any(isfinite, mb_gain)
+        lines!(ax, epochs, mb_gain; label = "analytic gain θ·dt·σq/σh",
+               color = :orangered, linestyle = :dashdot)
+    end
+    axislegend(ax; position = :rt)
+
+    isnothing(path) || save(path, fig)
+
+    csv_out = isnothing(csv_path) ? _csv_from_path(path) : csv_path
+    if csv && !isnothing(csv_out)
+        header  = ["epoch", "train_amp", "val_amp"]
+        columns = Any[collect(epochs), train_amp, val_amp]
+        if !isnothing(mb_gain) && !isempty(mb_gain)
+            push!(header, "mb_gain")
+            push!(columns, mb_gain)
         end
         _write_plot_csv(csv_out, header, columns)
     end

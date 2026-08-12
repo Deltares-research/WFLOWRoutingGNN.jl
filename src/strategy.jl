@@ -216,3 +216,51 @@ function loss_components(model::WflowGNN, batch::Vector{<:GNNGraph}, static::Abs
     end
 end
 
+"""
+    mb_amplification(model, batch, static) -> (amp, gain)
+
+Diagnostic: how strongly a one-step discharge (`q`) error is amplified into a
+water-depth (`h`) error by the hard mass-balance decoder.
+
+This is teacher-forced (input state/forcing are ground truth), so the
+counterfactual depth `h_ref = MB(q_true, …)` isolates the h error caused
+**purely by the q error** from the wflow structural mismatch of the mass-balance
+assumption. Because the model's own `h_pred = MB(q_pred, …)`, the difference
+`h_pred − h_ref` is exactly the mass balance's response to the q error, including
+upstream routing and the ≥0 floors.
+
+Returns (normalised units):
+- `amp`  : `RMS(h_pred − h_ref) / RMS(q_pred − q_true)` — the realised
+           amplification. `amp > 1` ⇒ q errors are magnified into h.
+- `gain` : the analytic per-node self-gain `|∂h_norm/∂q_norm| = θ·dt·σ_q/σ_h`,
+           a reference the realised `amp` can be compared against.
+
+Returns `(NaN32, NaN32)` when the model has no mass balance. Non-differentiable;
+for diagnostic reporting only.
+"""
+function mb_amplification(model::WflowGNN, batch::Vector{<:GNNGraph}, static::AbstractMatrix)
+    mb = model.mass_balance
+    isnothing(mb) && return (NaN32, NaN32)
+    Flux.ignore_derivatives() do
+        g            = batch[1]
+        state        = g.ndata.state
+        forcing      = g.ndata.forcing
+        forcing_next = batch[2].ndata.forcing
+        target       = batch[2].ndata.state
+
+        pred   = model(g, state, forcing, static, forcing_next)
+        q_pred = pred[1:1, :]
+        h_pred = pred[2:2, :]
+        q_true = target[1:1, :]
+        h_ref  = mb(g, state, forcing, forcing_next, q_true)  # counterfactual: perfect Q
+
+        dq    = q_pred .- q_true
+        dh    = h_pred .- h_ref
+        denom = sqrt(mean(abs2, dq))
+        amp   = denom > 0f0 ? Float32(sqrt(mean(abs2, dh)) / denom) : NaN32
+        gain  = Float32(mb.θ * mb.dt * mb.σ_q / mb.σ_h)
+        (amp, gain)
+    end
+end
+
+
