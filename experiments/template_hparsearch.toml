@@ -59,6 +59,12 @@ proc_activation = "swish"
 # (see [hparsearch.search_space] below) to compare against the hard constraint.
 enforce_mass_balance = true
 
+# Implicitness weight θ ∈ [0, 1] of the mass-balance time discretisation.
+# θ=1 fully implicit (default), θ=0.5 Crank–Nicolson, θ=0 fully explicit.
+# Lowering θ damps rollout h-overshoots (scales ∂h_norm/∂q_norm by θ).
+# Sweep it via [hparsearch.search_space] below.
+mb_theta = 1.0
+
 
 [train]
 # Base training settings — individual values may be overridden by [hparsearch]
@@ -106,6 +112,10 @@ search_type = "box"
 # Mass balance: compare the hard kinematic-wave constraint (true) against
 # independent river_q / river_h prediction (false).
 "model.enforce_mass_balance" = [true, false]
+
+# Mass-balance implicitness weight θ. Sweep to trade rollout stability
+# (lower θ, less h-overshoot) against storage-response lag.
+"model.mb_theta" = [1.0, 0.5, 0.25]
 
 # Learning rate
 "train.lr_start" = [1e-3, 5e-4]

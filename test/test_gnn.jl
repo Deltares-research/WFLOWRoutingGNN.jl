@@ -35,7 +35,8 @@ end
                       hidden_dim      = GNN_HIDDEN,
                       nlayers         = GNN_NLAYERS,
                       enc_activation  = relu,
-                      proc_activation = tanh)
+                      proc_activation = tanh,
+                      mb_theta        = 0.5f0)
 
     path = tempname() * ".toml"
     save_model_settings(path, s)
@@ -47,6 +48,7 @@ end
     @test s2.nlayers         == s.nlayers
     @test s2.enc_activation  === s.enc_activation
     @test s2.proc_activation === s.proc_activation
+    @test s2.mb_theta        == s.mb_theta
 
 end
 

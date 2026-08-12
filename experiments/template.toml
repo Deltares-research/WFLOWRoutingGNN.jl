@@ -58,6 +58,17 @@ proc_activation = "swish"
 # useful as a baseline to measure the benefit of the mass-balance constraint.
 enforce_mass_balance = true
 
+# Implicitness weight θ ∈ [0, 1] of the mass-balance time discretisation
+# (river domain, enforce_mass_balance = true only).
+#   θ = 1.0  fully implicit / backward Euler (default; historical behaviour)
+#   θ = 0.5  Crank–Nicolson
+#   θ = 0.0  fully explicit / forward Euler
+# h[t+1] uses θ·flux(t+1) + (1−θ)·flux(t). Lowering θ scales the stiff
+# q→h gradient (∂h_norm/∂q_norm = −θ·dt·σ_q/σ_h) by θ, damping the rollout
+# h-overshoots at the cost of a small temporal lag in the storage response.
+# See docs/mass_balance_stability_notes.md.
+mb_theta = 1.0
+
 
 [train]
 # Total number of training epochs

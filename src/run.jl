@@ -93,6 +93,7 @@ function parse_run_config(toml_path::String)
         enc_activation  = ACTIVATIONS[get(md, "enc_activation",  "swish")],
         proc_activation = ACTIVATIONS[get(md, "proc_activation", "swish")],
         enforce_mass_balance = get(md, "enforce_mass_balance", true),
+        mb_theta        = Float32(get(md, "mb_theta", 1.0)),
     )
 
     td = d["train"]
@@ -180,6 +181,7 @@ function build_gnn_model(ms::ModelSettings, graphs, norm_stats, postscale,
             A_routing,
             nothing,  # A_routing_batched — set via precompute_batched
             0,        # batch_size
+            ms.mb_theta,
         )
         # Base weight balances the q- and h-loss magnitudes; ∂h_norm/∂q_norm of
         # the hard mass-balance decoder equals `dt·σ_q/σ_h = 1/base`, so the
@@ -191,6 +193,11 @@ function build_gnn_model(ms::ModelSettings, graphs, norm_stats, postscale,
         @info "Mass balance h_loss_weight = $(round(h_weight; sigdigits=3)) " *
               "[scale=$(h_loss_scale)]  " *
               "(σ_h=$(round(mb.σ_h; sigdigits=3)), σ_q=$(round(mb.σ_q; sigdigits=3)), dt=$(mb.dt) s)"
+        if mb.θ != 1f0
+            @info "Mass balance θ = $(mb.θ) (mixed implicit/explicit; " *
+                  "θ=1 fully implicit, θ=0 fully explicit). Effective stiff " *
+                  "gain ∂h_norm/∂q_norm scaled by θ."
+        end
         strategy === nothing || (strategy.h_loss_weight = h_weight)
         model = WflowGNN(ms, mb, A_sparse)
     else

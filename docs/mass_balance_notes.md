@@ -206,6 +206,12 @@ loss += Flux.mse(pred[1:1,:], tgt[1:1,:]) +
   scalar-adjacency SpMM; would need per-feature matrices or a `propagate`
   fallback (noted in the message-passing doc).
 
+> **See also** [docs/mass_balance_stability_notes.md](mass_balance_stability_notes.md)
+> for the follow-up analysis: why the hard constraint stabilises the
+> autoregressive rollout (MB on/off sweep), the soft and hybrid variants, and the
+> implicit/explicit/trapezoidal (θ-method) scheme with the θ that cancels the
+> gradient stiffness ($\theta^\star = \sigma_h/(\Delta t\,\sigma_q) = \text{base}$).
+
 ---
 
 ## 6. Quick reference

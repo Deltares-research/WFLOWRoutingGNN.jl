@@ -228,6 +228,7 @@ function hpar_search(toml_path::String)
             enc_activation  = ACTIVATIONS[get(md, "enc_activation",  "swish")],
             proc_activation = ACTIVATIONS[get(md, "proc_activation", "swish")],
             enforce_mass_balance = get(md, "enforce_mass_balance", true),
+            mb_theta        = Float32(get(md, "mb_theta", 1.0)),
         )
 
         td = d["train"]

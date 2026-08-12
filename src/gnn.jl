@@ -61,6 +61,12 @@ Hyperparameters for a `WflowGNN` model.
                    `river_h` is derived analytically). When `false`, `river_q`
                    and `river_h` are predicted independently by the decoder
                    (default `true`). Ignored for non-river domains.
+- `mb_theta`        : implicitness weight `θ ∈ [0, 1]` of the mass-balance time
+                   discretisation (default `1.0` = fully implicit / backward
+                   Euler). `0.5` = Crank–Nicolson, `0.0` = fully explicit.
+                   Lowering θ damps the stiff `q→h` gradient (`∂h_norm/∂q_norm =
+                   −θ·dt·σ_q/σ_h`) that drives rollout h-overshoots. Only used
+                   when `enforce_mass_balance` is `true`.
 """
 Base.@kwdef struct ModelSettings
     domain               :: String
@@ -70,6 +76,7 @@ Base.@kwdef struct ModelSettings
     enc_activation              = swish
     proc_activation             = swish
     enforce_mass_balance :: Bool = true
+    mb_theta             :: Float32 = 1.0f0
 end
 
 function Base.show(io::IO, s::ModelSettings)
@@ -80,7 +87,8 @@ function Base.show(io::IO, s::ModelSettings)
     println(io, "  mlp_layers      : ", s.mlp_layers)
     println(io, "  enc_activation  : ", _activation_name(s.enc_activation))
     println(io, "  proc_activation : ", _activation_name(s.proc_activation))
-    print(  io, "  enforce_mass_balance : ", s.enforce_mass_balance)
+    println(io, "  enforce_mass_balance : ", s.enforce_mass_balance)
+    print(  io, "  mb_theta        : ", s.mb_theta)
 end
 
 """
@@ -98,6 +106,7 @@ function save_model_settings(path::String, s::ModelSettings)
         "enc_activation"  => _activation_name(s.enc_activation),
         "proc_activation" => _activation_name(s.proc_activation),
         "enforce_mass_balance" => s.enforce_mass_balance,
+        "mb_theta"        => s.mb_theta,
     )
     open(path, "w") do io
         TOML.print(io, dict)
@@ -123,6 +132,7 @@ function load_model_settings(path::String)
         enc_activation  = ACTIVATIONS[enc_name],
         proc_activation = ACTIVATIONS[proc_name],
         enforce_mass_balance = get(d, "enforce_mass_balance", true),
+        mb_theta        = Float32(get(d, "mb_theta", 1.0)),
     )
 end
 
@@ -133,11 +143,25 @@ A non-trainable layer that enforces the kinematic-wave mass balance as a hard
 constraint in the river routing forward pass.
 
 Given the predicted normalised discharge `q_norm_new` it computes the new
-water depth `h_norm_new` deterministically:
+water depth `h_norm_new` deterministically using a θ-weighted (mixed
+implicit/explicit) time discretisation of the kinematic-wave storage equation:
 
-    h_phys_new = h_phys_old + dt / (w·l) · (ΣQ_upstream + Q_inwater − Q_out)
+    h_phys_new = h_phys_old
+               + dt/(w·l) · [ θ·(ΣQ_up[t+1] + Q_iw[t+1] − Q_out[t+1])          # implicit
+                            + (1−θ)·(ΣQ_up[t] + Q_iw[t] − Q_out[t]) ]          # explicit
 
 where `1/(w·l) = postscale_h / postscale_q` and all Q values are in m³/s.
+
+- `θ = 1` recovers the fully-implicit (backward-Euler) scheme — the historical
+  default. `h[t+1]` then depends on the predicted `q[t+1]` with full weight, so
+  the mapping `∂h_norm/∂q_norm = −θ·dt·σ_q/σ_h` has its largest magnitude and the
+  rollout is most prone to h-overshoot amplification (see
+  `docs/mass_balance_stability_notes.md`).
+- `θ = 0` is fully-explicit (forward-Euler): `h[t+1]` uses only the known state
+  at `t`, decoupling it from the current prediction.
+- `0 < θ < 1` blends the two; `θ = 0.5` is Crank–Nicolson. Lowering θ shrinks the
+  stiff gradient gain by the factor θ, damping overshoots at the cost of a small
+  temporal lag in the storage response.
 
 Fields (all per-node constants, not optimised):
 - `postscale_q`   : upstream area per node [m²] (inverse of the river_q pre-scaling)
@@ -146,6 +170,7 @@ Fields (all per-node constants, not optimised):
 - `μ_h`, `σ_h`   : z-score statistics of (scaled) river_h
 - `μ_inwater`, `σ_inwater` : z-score statistics of river_inwater
 - `dt`            : model timestep in seconds
+- `θ`             : implicitness weight in `[0, 1]` (default `1` = fully implicit)
 """
 struct MassBalanceLayer{V <: AbstractVector{Float32}}
     postscale_q       :: V
@@ -161,6 +186,7 @@ struct MassBalanceLayer{V <: AbstractVector{Float32}}
     A_routing         :: AbstractMatrix{Float32}  # (N×N) upstream adjacency, no self-loops
     A_routing_batched :: Union{Nothing, AbstractMatrix{Float32}}  # block-diagonal (B·N×B·N)
     batch_size        :: Int                                       # B for A_routing_batched; 0 = none
+    θ                 :: Float32                                    # implicitness weight ∈ [0,1]
 end
 
 Flux.@layer MassBalanceLayer
@@ -178,6 +204,7 @@ function Flux.gpu(l::MassBalanceLayer)
         _to_cusparse(l.A_routing),
         isnothing(l.A_routing_batched) ? nothing : _to_cusparse(l.A_routing_batched),
         l.batch_size,
+        l.θ,
     )
 end
 
@@ -190,6 +217,7 @@ function Flux.cpu(l::MassBalanceLayer)
         _to_cpu_sparse(l.A_routing),
         isnothing(l.A_routing_batched) ? nothing : _to_cpu_sparse(l.A_routing_batched),
         l.batch_size,
+        l.θ,
     )
 end
 
@@ -197,12 +225,17 @@ end
     (l::MassBalanceLayer)(g, state, forcing, q_norm_new) -> h_norm_new
 
     Compute normalised water depth at the next timestep by enforcing the
-    fully-implicit kinematic-wave mass balance:
+    θ-weighted (mixed implicit/explicit) kinematic-wave mass balance:
 
-        h[t+1] = h[t] + dt/(w·l) · (Σq[t+1] + iw[t+1] − q[t+1])
+        h[t+1] = h[t] + dt/(w·l) · [ θ·(Σq[t+1] + iw[t+1] − q[t+1])
+                                   + (1−θ)·(Σq[t]   + iw[t]   − q[t]) ]
+
+    With `θ = 1` (default) this is the fully-implicit scheme and the explicit
+    branch is skipped entirely (baseline behaviour, bit-identical).
 
 - `state`         : normalised state matrix `(2, n_nodes)` — rows are river_q, river_h at t.
-- `forcing`       : normalised forcing matrix at t; unused (kept for API symmetry).
+- `forcing`       : normalised forcing matrix at t; row 1 is river_inwater[t]
+                    (used only for the explicit term when `θ < 1`).
 - `forcing_next`  : normalised forcing matrix at t+1; row 1 is river_inwater[t+1].
 - `q_norm_new`    : normalised predicted discharge `(1, n_nodes)` at t+1.
 
@@ -236,31 +269,47 @@ function (l::MassBalanceLayer)(g            ::GNNGraph,
     # q_phys_new is floored at 0 in physical space (z-scored 0 ≠ physical 0).
     q_phys_new  = max.(0f0, pq .* (q_norm_new .* l.σ_q .+ l.μ_q))
 
-    # Lateral inflow at t+1  [m³/s]  (row 1 = river_inwater)  — fully-implicit
+    # Lateral inflow at t+1  [m³/s]  (row 1 = river_inwater)  — implicit term
     inwater_phys = forcing_next[1:1, :] .* l.σ_inwater .+ l.μ_inwater
 
-    # Sum upstream Q[t+1] into each node via CuSPARSE SpMM.
+    # Sum upstream Q into each node via CuSPARSE SpMM.
     # Three dispatch paths mirror SparseConv:
     #  1. Single graph (n_rep==1): direct (N×N) SpMM.
     #  2. Batched with precomputed block-diagonal: single (B·N×B·N) SpMM.
     #  3. Batched fallback: reshape trick (no precomputation needed).
     N_per = length(l.postscale_q)
-    if n_rep == 1
-        upstream_q = (_topology_mul(l.A_routing, q_phys_new'))'
-    elseif !isnothing(l.A_routing_batched) && n == l.batch_size * N_per
-        upstream_q = (_topology_mul(l.A_routing_batched, q_phys_new'))'
-    else
-        upstream_q = reshape(_topology_mul(l.A_routing, reshape(q_phys_new, N_per, n_rep))', 1, n)
-    end
+    route(x) =
+        if n_rep == 1
+            (_topology_mul(l.A_routing, x'))'
+        elseif !isnothing(l.A_routing_batched) && n == l.batch_size * N_per
+            (_topology_mul(l.A_routing_batched, x'))'
+        else
+            reshape(_topology_mul(l.A_routing, reshape(x, N_per, n_rep))', 1, n)
+        end
+
+    upstream_q = route(q_phys_new)
 
     # Physical h at current step  [m]
     # h_phys = postscale_h · (norm_h · σ_h + μ_h)
     h_phys_curr = ph .* (state[2:2, :] .* l.σ_h .+ l.μ_h)
 
+    # θ-weighted net flux  [m³/s].  θ = 1 ⇒ pure implicit (baseline).
+    net_flux_impl = upstream_q .+ inwater_phys .- q_phys_new
+    if l.θ == 1f0
+        net_flux = net_flux_impl
+    else
+        # Explicit side: all quantities are known at t (no dependence on the
+        # current prediction), which is what damps the stiff q→h gradient.
+        q_phys_curr     = max.(0f0, pq .* (state[1:1, :] .* l.σ_q .+ l.μ_q))
+        inwater_curr    = forcing[1:1, :] .* l.σ_inwater .+ l.μ_inwater
+        upstream_q_curr = route(q_phys_curr)
+        net_flux_expl   = upstream_q_curr .+ inwater_curr .- q_phys_curr
+        net_flux        = l.θ .* net_flux_impl .+ (1f0 - l.θ) .* net_flux_expl
+    end
+
     # Mass balance  [m]:  Δh = dt · (1/(w·l)) · net_flux
     #   1/(w·l) = a/(w·l) / a = postscale_h / postscale_q  (precomputed as ph_over_pq)
-    h_phys_new = h_phys_curr .+
-                 l.dt .* phr .* (upstream_q .+ inwater_phys .- q_phys_new)
+    h_phys_new = h_phys_curr .+ l.dt .* phr .* net_flux
 
     # Water depth cannot be negative (dry-channel floor)
     h_phys_new = max.(0f0, h_phys_new)
@@ -308,7 +357,17 @@ function mb_diagnostics(l            ::MassBalanceLayer,
     A_cpu        = _to_cpu_sparse(l.A_routing)
     upstream_q   = (A_cpu * q_phys_new')'
     h_phys_curr  = ph .* (st[2:2, :] .* l.σ_h .+ l.μ_h)
-    net_flux     = upstream_q .+ inwater_phys .- q_phys_new
+    net_flux_impl = upstream_q .+ inwater_phys .- q_phys_new
+    if l.θ == 1f0
+        net_flux = net_flux_impl
+    else
+        fc              = Array(forcing)
+        q_phys_curr_f   = max.(0f0, pq .* (st[1:1, :] .* l.σ_q .+ l.μ_q))
+        inwater_curr    = fc[1:1, :] .* l.σ_inwater .+ l.μ_inwater
+        upstream_q_curr = (A_cpu * q_phys_curr_f')'
+        net_flux_expl   = upstream_q_curr .+ inwater_curr .- q_phys_curr_f
+        net_flux        = l.θ .* net_flux_impl .+ (1f0 - l.θ) .* net_flux_expl
+    end
     h_phys_raw   = h_phys_curr .+ l.dt .* (ph ./ pq) .* net_flux
     h_phys_new   = max.(0f0, h_phys_raw)
 
@@ -708,7 +767,7 @@ function precompute_batched(l::MassBalanceLayer, B::Int)
     MassBalanceLayer(
         l.postscale_q, l.postscale_h, l.ph_over_pq,
         l.μ_q, l.σ_q, l.μ_h, l.σ_h, l.μ_inwater, l.σ_inwater, l.dt,
-        A_cpu, A_blk, B,
+        A_cpu, A_blk, B, l.θ,
     )
 end
 
