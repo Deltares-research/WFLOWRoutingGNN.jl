@@ -422,6 +422,20 @@ function run_wflow_gnn(ds::DataSettings, ms::ModelSettings, ts::TrainSettings)
                                        path       = joinpath(run_dir, "downstream_timeseries.png"),
                                        timestamps = split_times)
 
+            # Spatial performance: per-cell error maps + Q overprediction vs ramp
+            sp_metrics = spatial_error_metrics(p_grids, t_grids, ms.domain)
+            write_spatial_metrics_to_netcdf(sp_metrics, staticmaps_file,
+                                            joinpath(run_dir, "spatial_metrics.nc"); schema)
+            plot_spatial_metrics(sp_metrics, ms.domain;
+                                 path = joinpath(run_dir, "spatial_metrics.png"))
+            if "river_q" in DOMAIN_VARS[ms.domain]["state"]
+                ramp = overprediction_vs_ramp(p_grids, t_grids)
+                @info "Q overprediction vs ramp: Pearson(e,g)=$(round(ramp.pearson_e_g; digits=3)) " *
+                      "Spearman=$(round(ramp.spearman_e_g; digits=3)) over $(ramp.n) (cell,step) pairs"
+                plot_overprediction_vs_ramp(ramp;
+                    path = joinpath(run_dir, "q_overprediction_vs_ramp.png"))
+            end
+
             if !isnothing(cpu_model.mass_balance)
                 @info "Computing mass balance diagnostics on validation split"
                 mb_diags = rollout_mb_diagnostics(cpu_model, split_data, static_arr)

@@ -2,6 +2,7 @@ module WflowRoutingGNN
 
 using Printf
 using Statistics
+using Random
 
 include("schema.jl")
 export VarSpec, WflowSchema, SCHEMA_V1, SCHEMAS, save_schema, load_schema,
@@ -33,12 +34,14 @@ export HParSearchSettings, save_hpar_search_settings, load_hpar_search_settings,
 
 include("plot.jl")
 export plot_losses, plot_validation_movie, plot_timeseries, plot_downstream_timeseries,
-       plot_mb_diagnostics
+       plot_mb_diagnostics, plot_spatial_metrics, plot_overprediction_vs_ramp
 
 include("rollout.jl")
 export rollout, evaluate_trajectory, rollout_mb_diagnostics, rollout_ensemble
 
 include("postprocess.jl")
-export regrid, write_regrid_to_netcdf
+export regrid, write_regrid_to_netcdf,
+       spatial_error_metrics, write_spatial_metrics_to_netcdf, overprediction_vs_ramp,
+       SPATIAL_METRIC_NAMES, RAMP_LABELS, RAMP_EDGES
 
 end # module WflowRoutingGNN

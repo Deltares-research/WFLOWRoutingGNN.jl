@@ -527,3 +527,132 @@ function plot_mb_diagnostics(diags; path=nothing, timestamps=nothing)
     isnothing(path) || save(path, fig)
     return fig
 end
+
+# Symmetric colour range about a centre from the finite values of a map.
+function _sym_range(m::AbstractMatrix, centre::Real)
+    v = filter(isfinite, vec(m))
+    isempty(v) && return (Float32(centre) - 1f0, Float32(centre) + 1f0)
+    r = maximum(abs.(v .- centre))
+    r = r == 0 ? 1f0 : Float32(r)
+    return (Float32(centre) - r, Float32(centre) + r)
+end
+
+"""
+    plot_spatial_metrics(metrics, domain; path = nothing) -> Figure
+
+Render the per-cell error maps from [`spatial_error_metrics`](@ref) as heatmaps,
+one row per state variable. Columns: RMSE, bias, overprediction frequency, peak
+error, normalised bias, NSE. Signed metrics use a diverging colormap centred on
+their neutral value (0, or 0.5 for `overpred_freq`).
+"""
+function plot_spatial_metrics(metrics ::Dict{String, Dict{String, Matrix{Float32}}},
+                              domain  ::String;
+                              path    = nothing)
+
+    state_vars = [v for v in DOMAIN_VARS[domain]["state"] if haskey(metrics, v)]
+    isempty(state_vars) && throw(ArgumentError("no state variables present in metrics"))
+
+    # (metric key, title, colormap, centre-or-nothing)
+    panels = [("rmse",          "RMSE",              :viridis, nothing),
+              ("bias",          "bias (pred−truth)", :RdBu,    0.0),
+              ("overpred_freq", "overpred. freq",    :RdBu,    0.5),
+              ("peak_err",      "peak error",        :RdBu,    0.0),
+              ("peak_lag",      "peak lag [Δt]",     :RdBu,    0.0),
+              ("nbias",         "bias / σ(truth)",   :RdBu,    0.0),
+              ("nse",           "NSE",               :viridis, nothing)]
+
+    nrows = length(state_vars)
+    ncols = length(panels)
+    fig = Figure(size = (330 * ncols, 300 * nrows + 40))
+    Label(fig[0, 1:(2*ncols)], "Spatial error metrics"; fontsize = 15, font = :bold)
+
+    for (ri, vname) in enumerate(state_vars), (ci, (key, ttl, cmap, centre)) in enumerate(panels)
+        m = get(metrics[vname], key, nothing)
+        ax = Axis(fig[ri, 2ci - 1];
+                  title  = "$vname — $ttl",
+                  aspect = DataAspect())
+        hidedecorations!(ax)
+        if isnothing(m)
+            continue
+        end
+        if key == "nse"
+            v = filter(isfinite, vec(m))
+            lo = isempty(v) ? -1f0 : max(minimum(v), -1f0)  # clamp NSE floor for contrast
+            hm = heatmap!(ax, m; colorrange = (lo, 1f0), colormap = cmap)
+        elseif isnothing(centre)
+            hm = heatmap!(ax, m; colormap = cmap)
+        else
+            hm = heatmap!(ax, m; colorrange = _sym_range(m, centre), colormap = cmap)
+        end
+        Colorbar(fig[ri, 2ci], hm)
+    end
+
+    isnothing(path) || save(path, fig)
+    return fig
+end
+
+"""
+    plot_overprediction_vs_ramp(ramp; path = nothing, csv = true, csv_path = nothing)
+        -> Figure
+
+Visualise the [`overprediction_vs_ramp`](@ref) result: whether discharge
+overprediction grows with the true Q ramp rate `g = (Qₜ−Qₜ₋₁)/Qₜ`.
+
+Panels: (1) subsampled scatter of error `e` vs `g` with zero reference lines and
+the Pearson/Spearman coefficients; (2) mean overprediction per ramp class as a
+bar chart with counts; (3) a per-cell map of the `e`–`g` correlation. The
+per-class summary is also written to CSV.
+"""
+function plot_overprediction_vs_ramp(ramp; path = nothing, csv = true, csv_path = nothing)
+    fig = Figure(size = (1500, 480))
+
+    # ── Panel 1: scatter e vs g ───────────────────────────────────────────────
+    ax1 = Axis(fig[1, 1];
+               title  = "Q error vs ramp rate  (Pearson e~g = $(round(ramp.pearson_e_g; digits=3)), " *
+                        "Spearman = $(round(ramp.spearman_e_g; digits=3)))",
+               xlabel = "true ramp g = (Qₜ−Qₜ₋₁)/Qₜ",
+               ylabel = "error e = pred − truth  [m³/s]")
+    if !isempty(ramp.scatter_g)
+        scatter!(ax1, ramp.scatter_g, ramp.scatter_e;
+                 color = (:steelblue, 0.15), markersize = 3)
+    end
+    hlines!(ax1, [0f0]; color = :black, linestyle = :dash)
+    vlines!(ax1, [0f0]; color = :gray,  linestyle = :dot)
+
+    # ── Panel 2: mean overprediction per ramp class ───────────────────────────
+    nb  = length(ramp.bin_labels)
+    xs  = 1:nb
+    ax2 = Axis(fig[1, 2];
+               title  = "mean overprediction per ramp class",
+               ylabel = "mean max(e,0)  [m³/s]",
+               xticks = (collect(xs), ramp.bin_labels),
+               xticklabelrotation = π/5)
+    vals = [isfinite(v) ? v : 0f0 for v in ramp.bin_mean_overpred]
+    barplot!(ax2, collect(xs), vals; color = :orangered)
+    for b in xs
+        n = ramp.bin_n[b]
+        text!(ax2, b, vals[b]; text = "n=$n", align = (:center, :bottom),
+              fontsize = 10, offset = (0, 2))
+    end
+
+    # ── Panel 3: per-cell e–g correlation map ─────────────────────────────────
+    ax3 = Axis(fig[1, 3]; title = "per-cell corr(e, g)", aspect = DataAspect())
+    hidedecorations!(ax3)
+    hm = heatmap!(ax3, ramp.corr_map; colorrange = (-1f0, 1f0), colormap = :RdBu)
+    Colorbar(fig[1, 4], hm; label = "corr(e, g)")
+
+    isnothing(path) || save(path, fig)
+
+    # ── CSV of per-class summary ──────────────────────────────────────────────
+    if csv
+        out_csv = isnothing(csv_path) ? _csv_from_path(path) : csv_path
+        if !isnothing(out_csv)
+            _write_plot_csv(out_csv,
+                ["ramp_class", "n", "mean_err", "mean_overpred", "frac_over"],
+                Any[ramp.bin_labels, ramp.bin_n, ramp.bin_mean_err,
+                    ramp.bin_mean_overpred, ramp.bin_frac_over])
+        end
+    end
+
+    return fig
+end
