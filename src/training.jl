@@ -326,11 +326,24 @@ function train_model!(model,
 
     strategy = ts.strategy
 
-    # Move loaders and static features to the target device.
-    # The model is already on device.
+    # Move static features to the target device up-front. Each batch is copied
+    # to the device by a `DeviceIterator` (Flux/MLDataDevices) wrapped around the
+    # CPU loaders below.
+    #
+    # We build the `DeviceIterator` MANUALLY rather than calling `Flux.gpu(loader)`.
+    # `gpu(loader)` routes through `adapt_structure`, which for a `parallel = true`
+    # loader performs the host→device copy INSIDE the worker threads
+    # (`eachobsparallel`: `put!(ch, dev(obs))`). Issuing CUDA ops off the owning
+    # thread corrupts the stream and surfaces later as a deferred
+    # CUDA_ERROR_INVALID_VALUE at the first device→host sync (e.g. the `nrm2`
+    # readback inside `ClipNorm`). Constructing `DeviceIterator(dev_fn, loader)`
+    # directly keeps the parallel CPU batch prep on worker threads while doing the
+    # transfer AND the eager `unsafe_free!` of the previous batch on the main
+    # thread — stream-safe and memory-efficient (CuIterator semantics).
     dev_fn         = ts.device == :gpu ? Flux.gpu : identity
-    train_loader_d = dev_fn(train_loader)
-    val_loader_d   = dev_fn(val_loader)
+    wrap_loader    = ts.device == :gpu ? (ld -> Flux.DeviceIterator(dev_fn, ld)) : identity
+    train_loader_d = wrap_loader(train_loader)
+    val_loader_d   = wrap_loader(val_loader)
     static_d       = dev_fn(static_cpu)
 
     # Optimiser: optionally clip the global gradient L2 norm before each Adam
@@ -452,14 +465,32 @@ function train_model!(model,
         end
         isfinite(ep_grad_norm) && push!(phase_gnorms, ep_grad_norm)
 
-        # Validation pass
-        ep_val_rollout = mean(loss_function(model, b, strategy, static_d) for b in val_loader_d)
-        ep_val_1step   = mean(one_step_loss(model, b, static_d, strategy.h_loss_weight) for b in val_loader_d)
+        # Validation pass. The `DeviceIterator` copies each batch to the device
+        # (and frees the previous one) on the main thread, single pass.
+        ep_val_rollout = 0f0
+        ep_val_1step   = 0f0
+        val_q_sum      = 0f0
+        val_h_sum      = 0f0
+        val_amp_sum    = 0f0
+        n_val          = 0
+        for b in val_loader_d
+            ep_val_rollout += loss_function(model, b, strategy, static_d)
+            ep_val_1step   += one_step_loss(model, b, static_d, strategy.h_loss_weight)
+            if has_components
+                qc, hc      = loss_components(model, b, static_d)
+                val_q_sum  += qc
+                val_h_sum  += hc
+                val_amp_sum += mb_amplification(model, b, static_d)[1]
+            end
+            n_val += 1
+        end
+        val_denom      = max(n_val, 1)
+        ep_val_rollout /= val_denom
+        ep_val_1step   /= val_denom
         if has_components
-            val_comps      = [loss_components(model, b, static_d) for b in val_loader_d]
-            ep_val_q_1step = mean(c[1] for c in val_comps)
-            ep_val_h_1step = mean(c[2] for c in val_comps)
-            ep_val_amp     = mean(mb_amplification(model, b, static_d)[1] for b in val_loader_d)
+            ep_val_q_1step = val_q_sum   / val_denom
+            ep_val_h_1step = val_h_sum   / val_denom
+            ep_val_amp     = val_amp_sum / val_denom
         else
             ep_val_q_1step = NaN32
             ep_val_h_1step = NaN32
