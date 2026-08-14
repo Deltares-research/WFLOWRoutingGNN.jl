@@ -635,13 +635,44 @@ function plot_mb_diagnostics(diags; path=nothing, timestamps=nothing)
     return fig
 end
 
+# Largest colour-range width that stays representable in Float32. CairoMakie
+# scales each pixel as (x - lo)/(hi - lo) in Float32; if (hi - lo) overflows to
+# Inf the scaling yields NaN and the colormap lookup errors. Keeping the width
+# to floatmax/4 leaves ample headroom.
+const _PLOT_MAX_WIDTH = floatmax(Float32) / 4
+
+# Coerce a (lo, hi) colour range to a finite, non-degenerate Float32 pair whose
+# width cannot overflow Float32.
+function _bound_range(lo::Real, hi::Real)
+    lo32, hi32 = Float32(lo), Float32(hi)
+    (isfinite(lo32) && isfinite(hi32)) || return (-1f0, 1f0)
+    lo32 == hi32 && return (lo32 - 1f0, hi32 + 1f0)
+    if !isfinite(hi32 - lo32) || (hi32 - lo32) > _PLOT_MAX_WIDTH
+        mid  = clamp((lo32 + hi32) / 2, -_PLOT_MAX_WIDTH, _PLOT_MAX_WIDTH)
+        half = _PLOT_MAX_WIDTH / 2
+        return (mid - half, mid + half)
+    end
+    return (lo32, hi32)
+end
+
+# Prepare a metric map for heatmapping: non-finite entries become NaN (drawn with
+# nan_color) and finite entries are clamped into [lo, hi] so the Float32 colour
+# scaling in CairoMakie can never overflow to NaN/Inf.
+function _clamp_for_plot(m::AbstractMatrix, lo::Real, hi::Real)
+    lo32, hi32 = Float32(lo), Float32(hi)
+    return map(m) do x
+        xf = Float32(x)
+        isfinite(xf) ? clamp(xf, lo32, hi32) : NaN32
+    end
+end
+
 # Symmetric colour range about a centre from the finite values of a map.
 function _sym_range(m::AbstractMatrix, centre::Real)
     v = filter(isfinite, vec(m))
     isempty(v) && return (Float32(centre) - 1f0, Float32(centre) + 1f0)
     r = maximum(abs.(v .- centre))
     r = r == 0 ? 1f0 : Float32(r)
-    return (Float32(centre) - r, Float32(centre) + r)
+    return _bound_range(Float32(centre) - r, Float32(centre) + r)
 end
 
 # Colour range spanning the finite values of a map. Guards against empty /
@@ -651,9 +682,7 @@ end
 function _finite_range(m::AbstractMatrix)
     v = filter(isfinite, vec(m))
     isempty(v) && return (0f0, 1f0)
-    lo, hi = Float32(minimum(v)), Float32(maximum(v))
-    lo == hi && return (lo - 1f0, hi + 1f0)
-    return (lo, hi)
+    return _bound_range(minimum(v), maximum(v))
 end
 
 """
@@ -698,12 +727,14 @@ function plot_spatial_metrics(metrics ::Dict{String, Dict{String, Matrix{Float32
             v = filter(isfinite, vec(m))
             lo = isempty(v) ? -1f0 : max(minimum(v), -1f0)  # clamp NSE floor for contrast
             lo = min(lo, 1f0 - eps(Float32))                # keep the range non-degenerate
-            hm = heatmap!(ax, m; colorrange = (lo, 1f0), colormap = cmap)
+            crange = _bound_range(lo, 1f0)
         elseif isnothing(centre)
-            hm = heatmap!(ax, m; colorrange = _finite_range(m), colormap = cmap)
+            crange = _finite_range(m)
         else
-            hm = heatmap!(ax, m; colorrange = _sym_range(m, centre), colormap = cmap)
+            crange = _sym_range(m, centre)
         end
+        hm = heatmap!(ax, _clamp_for_plot(m, crange[1], crange[2]);
+                      colorrange = crange, colormap = cmap)
         Colorbar(fig[ri, 2ci], hm)
     end
 
