@@ -644,6 +644,18 @@ function _sym_range(m::AbstractMatrix, centre::Real)
     return (Float32(centre) - r, Float32(centre) + r)
 end
 
+# Colour range spanning the finite values of a map. Guards against empty /
+# all-non-finite maps and degenerate (constant) maps, either of which would make
+# Makie's automatic colorrange include Inf/NaN and crash the colorbar tick
+# formatter.
+function _finite_range(m::AbstractMatrix)
+    v = filter(isfinite, vec(m))
+    isempty(v) && return (0f0, 1f0)
+    lo, hi = Float32(minimum(v)), Float32(maximum(v))
+    lo == hi && return (lo - 1f0, hi + 1f0)
+    return (lo, hi)
+end
+
 """
     plot_spatial_metrics(metrics, domain; path = nothing) -> Figure
 
@@ -685,9 +697,10 @@ function plot_spatial_metrics(metrics ::Dict{String, Dict{String, Matrix{Float32
         if key == "nse"
             v = filter(isfinite, vec(m))
             lo = isempty(v) ? -1f0 : max(minimum(v), -1f0)  # clamp NSE floor for contrast
+            lo = min(lo, 1f0 - eps(Float32))                # keep the range non-degenerate
             hm = heatmap!(ax, m; colorrange = (lo, 1f0), colormap = cmap)
         elseif isnothing(centre)
-            hm = heatmap!(ax, m; colormap = cmap)
+            hm = heatmap!(ax, m; colorrange = _finite_range(m), colormap = cmap)
         else
             hm = heatmap!(ax, m; colorrange = _sym_range(m, centre), colormap = cmap)
         end
