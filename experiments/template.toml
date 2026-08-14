@@ -134,6 +134,36 @@ phase_backoff_factor = 0.5
 # Compute device: "cpu" or "gpu"
 device = "cpu"
 
+# --- Fixed-horizon validation metric, early stopping & checkpointing ----------
+# Each epoch, a constant-length autoregressive rollout is run from many anchor
+# start points in the validation split. Unlike the curriculum `val_rollout`
+# (whose horizon grows across phases and is therefore not comparable), this
+# fixed-horizon metric is directly comparable epoch-to-epoch and is what early
+# stopping uses. Two numbers are logged: the discharge RMSE (physical units) and
+# the peak ratio max|q_pred|/max|q_truth|.
+#
+# eval_horizon : rollout length in steps for the fixed-horizon metric.
+#                0 disables the metric (and therefore early stopping). If the
+#                validation split is shorter than eval_horizon+1 it is clamped.
+eval_horizon = 30
+# eval_anchors : number of evenly-spaced start points batched into the metric.
+eval_anchors = 32
+
+# early_stopping : stop once the fixed-horizon discharge RMSE has not improved
+#                  for `early_stopping_patience` epochs; the best-metric weights
+#                  are restored so the saved model is the best epoch. Requires
+#                  eval_horizon > 0.
+early_stopping = false
+early_stopping_patience = 20
+
+# checkpoint_every : save a model checkpoint every N epochs into
+#                    <run_dir>/checkpoints/epoch_NNNN/. 0 disables.
+checkpoint_every = 0
+# checkpoint_full_eval : when true, run the same full end-of-training evaluation
+#                        (trajectory rollout, plots, NetCDF, movie) for each
+#                        checkpoint, written alongside its weights.
+checkpoint_full_eval = false
+
 # Training curriculum: rollout length is increased from steps[1] to steps[end]
 # over successive phases.  Each phase lasts durations[i] epochs.
 # lengths of steps and durations must match.

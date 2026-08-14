@@ -53,6 +53,28 @@ Fields:
                      an additional autoregressive rollout is run over the validation
                      data for the timesteps that fall within this date range and a
                      movie is saved as `validation_daterange.mp4`.
+- `eval_horizon`   : number of steps for the **fixed-horizon** validation metric
+                     evaluated each epoch (see [`build_fixed_horizon_eval`](@ref)).
+                     Unlike `val_rollout` (measured at the growing curriculum
+                     horizon, hence not comparable across phases), this is a
+                     constant-length autoregressive rollout, so it is directly
+                     comparable epoch-to-epoch and drives early stopping. `0`
+                     disables the fixed-horizon eval entirely.
+- `eval_anchors`   : number of evenly-spaced start points in the validation split
+                     used as anchors for the fixed-horizon rollout (batched into a
+                     single ensemble forward pass per step).
+- `early_stopping` : when `true`, stop training once the fixed-horizon validation
+                     discharge RMSE has not improved for `early_stopping_patience`
+                     epochs, and restore the best-metric weights. Requires
+                     `eval_horizon > 0`.
+- `early_stopping_patience` : number of epochs without fixed-horizon RMSE
+                     improvement tolerated before early stopping triggers.
+- `checkpoint_every` : save a model checkpoint every this many epochs (into
+                     `<run_dir>/checkpoints/epoch_NNNN/`). `0` disables periodic
+                     checkpointing.
+- `checkpoint_full_eval` : when `true`, run the same full end-of-training
+                     evaluation (trajectory rollout, plots, NetCDF, movie) for
+                     each periodic checkpoint, written alongside its weights.
 """
 struct TrainSettings
     epochs           :: Int
@@ -68,6 +90,12 @@ struct TrainSettings
     strategy         :: TrainingStrategy
     device           :: Symbol
     val_daterange    :: Union{Nothing, Tuple{Dates.DateTime, Dates.DateTime}}
+    eval_horizon     :: Int
+    eval_anchors     :: Int
+    early_stopping   :: Bool
+    early_stopping_patience :: Int
+    checkpoint_every :: Int
+    checkpoint_full_eval :: Bool
 end
 
 """
@@ -89,7 +117,13 @@ function TrainSettings(;
         h_loss_scale     :: Symbol = :absolute,
         phase_backoff_factor :: Real = 0.5,
         device           :: Symbol = :cpu,
-        val_daterange    :: Union{Nothing, Tuple{Dates.DateTime, Dates.DateTime}} = nothing)
+        val_daterange    :: Union{Nothing, Tuple{Dates.DateTime, Dates.DateTime}} = nothing,
+        eval_horizon     :: Int = 30,
+        eval_anchors     :: Int = 32,
+        early_stopping   :: Bool = false,
+        early_stopping_patience :: Int = 20,
+        checkpoint_every :: Int = 0,
+        checkpoint_full_eval :: Bool = false)
 
     epochs     > 0 || throw(ArgumentError("epochs must be positive"))
     batch_size > 0 || throw(ArgumentError("batch_size must be positive"))
@@ -105,6 +139,14 @@ function TrainSettings(;
     0 < phase_backoff_factor <= 1 ||
         throw(ArgumentError("phase_backoff_factor must be in (0, 1] (1 disables backoff)"))
     device in (:cpu, :gpu) || throw(ArgumentError("device must be :cpu or :gpu"))
+    eval_horizon >= 0 || throw(ArgumentError("eval_horizon must be non-negative (0 disables the fixed-horizon eval)"))
+    eval_horizon == 0 || eval_anchors > 0 ||
+        throw(ArgumentError("eval_anchors must be positive when eval_horizon > 0"))
+    early_stopping_patience > 0 ||
+        throw(ArgumentError("early_stopping_patience must be positive"))
+    checkpoint_every >= 0 || throw(ArgumentError("checkpoint_every must be non-negative (0 disables checkpointing)"))
+    (!early_stopping || eval_horizon > 0) ||
+        throw(ArgumentError("early_stopping requires eval_horizon > 0"))
 
     if device == :gpu
         try
@@ -122,7 +164,9 @@ function TrainSettings(;
     TrainSettings(epochs, batch_size,
                   Float32(lr_start), Float32(lr_final),
                   lr_steps, lr_warmup_epochs, Float32(lr_peak_decay), Float32(grad_clip),
-                  h_loss_scale, Float32(phase_backoff_factor), strategy, device, val_daterange)
+                  h_loss_scale, Float32(phase_backoff_factor), strategy, device, val_daterange,
+                  eval_horizon, eval_anchors, early_stopping, early_stopping_patience,
+                  checkpoint_every, checkpoint_full_eval)
 end
 
 function Base.show(io::IO, s::TrainSettings)
@@ -140,6 +184,12 @@ function Base.show(io::IO, s::TrainSettings)
     println(io, "  device           : ", s.device)
     println(io, "  val_daterange : ", isnothing(s.val_daterange) ? "nothing" :
                                      string(s.val_daterange[1], " – ", s.val_daterange[2]))
+    println(io, "  eval_horizon     : ", s.eval_horizon)
+    println(io, "  eval_anchors     : ", s.eval_anchors)
+    println(io, "  early_stopping   : ", s.early_stopping)
+    println(io, "  early_stopping_patience : ", s.early_stopping_patience)
+    println(io, "  checkpoint_every : ", s.checkpoint_every)
+    println(io, "  checkpoint_full_eval : ", s.checkpoint_full_eval)
     println(io, "  strategy      :")
     print(  io, "    ", s.strategy)
 end
@@ -162,6 +212,12 @@ function save_train_settings(path::String, s::TrainSettings)
         "h_loss_scale"     => String(s.h_loss_scale),
         "phase_backoff_factor" => Float64(s.phase_backoff_factor),
         "device"     => String(s.device),
+        "eval_horizon"     => s.eval_horizon,
+        "eval_anchors"     => s.eval_anchors,
+        "early_stopping"   => s.early_stopping,
+        "early_stopping_patience" => s.early_stopping_patience,
+        "checkpoint_every" => s.checkpoint_every,
+        "checkpoint_full_eval" => s.checkpoint_full_eval,
         "strategy"   => Dict(
             "steps"       => s.strategy.steps,
             "durations"   => s.strategy.durations,
@@ -200,6 +256,12 @@ function load_train_settings(path::String)
         grad_clip        = Float32(get(d, "grad_clip", 1.0)),
         h_loss_scale     = Symbol(get(d, "h_loss_scale", "absolute")),
         phase_backoff_factor = Float32(get(d, "phase_backoff_factor", 0.5)),
+        eval_horizon     = get(d, "eval_horizon", 30),
+        eval_anchors     = get(d, "eval_anchors", 32),
+        early_stopping   = get(d, "early_stopping", false),
+        early_stopping_patience = get(d, "early_stopping_patience", 20),
+        checkpoint_every = get(d, "checkpoint_every", 0),
+        checkpoint_full_eval = get(d, "checkpoint_full_eval", false),
         strategy      = strategy,
         device        = Symbol(get(d, "device", "cpu")),
         val_daterange = if haskey(d, "val_daterange")
@@ -295,7 +357,8 @@ _grad_l2norm(grads) = sqrt(_gn_sq(grads))
 # ---------------------------------------------------------------------------
 
 """
-    train_model!(model, train_loader, val_loader, ts)
+    train_model!(model, train_loader, val_loader, ts, static;
+                 fixed_eval = nothing, checkpoint_callback = nothing)
         -> NamedTuple of per-epoch Vector{Float32}
 
 Train `model` in-place and return a `NamedTuple` of per-epoch history arrays:
@@ -310,6 +373,20 @@ amplification diagnostic (`train_amp`, `val_amp`; see [`mb_amplification`](@ref)
 and its analytic reference gain (`mb_gain`), plus `grad_norm`. Non-mass-balance
 models fill those with `NaN32`.
 
+When a `fixed_eval::FixedHorizonEval` is supplied (see
+[`build_fixed_horizon_eval`](@ref)) the returned NamedTuple additionally holds
+`val_fixed_rmse` and `val_peak_ratio` — the constant-length rollout discharge
+RMSE and peak-amplification ratio, computed each epoch (filled with `NaN32` when
+no `fixed_eval` is given). It also reports `stopped_epoch` (the last completed
+epoch, `< ts.epochs` when early stopping triggered) and `best_epoch` (the
+fixed-horizon RMSE minimiser). When `ts.early_stopping` is set, training halts
+once the fixed-horizon RMSE has not improved for `ts.early_stopping_patience`
+epochs and the best-metric weights are restored into `model`.
+
+`checkpoint_callback`, when supplied, is invoked as `checkpoint_callback(model,
+epoch)` every `ts.checkpoint_every` epochs (the caller handles the I/O and any
+per-checkpoint evaluation).
+
 `model` must already reside on the target compute device before this call
 (move it with `Flux.gpu` / `Flux.cpu` at the call site). The data loaders are
 moved to the same device internally based on `ts.device`.
@@ -322,7 +399,9 @@ function train_model!(model,
                       train_loader,
                       val_loader,
                       ts::TrainSettings,
-                      static_cpu::AbstractMatrix{Float32})
+                      static_cpu::AbstractMatrix{Float32};
+                      fixed_eval = nothing,
+                      checkpoint_callback = nothing)
 
     strategy = ts.strategy
 
@@ -368,8 +447,22 @@ function train_model!(model,
     val_amp       = Float32[]
     mb_gain       = Float32[]   # analytic self-gain θ·dt·σ_q/σ_h (reference)
     grad_norm     = Float32[]
+    val_fixed_rmse  = Float32[] # fixed-horizon discharge RMSE (physical units)
+    val_peak_ratio  = Float32[] # fixed-horizon max|q_pred|/max|q_truth|
 
     has_components = !isnothing(model.mass_balance)
+
+    # Fixed-horizon validation metric + early stopping / best-weight tracking.
+    do_fixed_eval = !isnothing(fixed_eval)
+    if ts.early_stopping && !do_fixed_eval
+        @warn "early_stopping requested but no fixed-horizon eval set was supplied; early stopping disabled."
+    end
+    early_stop_on = ts.early_stopping && do_fixed_eval
+    best_metric   = Inf32
+    best_epoch    = 0
+    best_state    = nothing
+    since_improve = 0
+    stopped_epoch = ts.epochs
 
     # Adaptive per-phase LR backoff state. `lr_scale` multiplies the scheduled
     # curriculum LR; it resets to 1 at each curriculum-phase boundary (fresh warm
@@ -510,6 +603,27 @@ function train_model!(model,
         push!(mb_gain,       has_components ? ep_mb_gain : NaN32)
         push!(grad_norm,     Float32(ep_grad_norm))
 
+        # Fixed-horizon validation metric (constant-length rollout from anchors),
+        # comparable epoch-to-epoch and used for early stopping / best selection.
+        if do_fixed_eval
+            ep_fixed_rmse, ep_peak_ratio = fixed_horizon_metrics(model, fixed_eval; device = ts.device)
+        else
+            ep_fixed_rmse, ep_peak_ratio = NaN32, NaN32
+        end
+        push!(val_fixed_rmse, ep_fixed_rmse)
+        push!(val_peak_ratio, ep_peak_ratio)
+
+        # Track the best fixed-horizon RMSE and (when early stopping) keep a copy
+        # of the best weights so the final model is the best epoch, not the last.
+        if do_fixed_eval && isfinite(ep_fixed_rmse) && ep_fixed_rmse < best_metric
+            best_metric   = ep_fixed_rmse
+            best_epoch    = epoch
+            since_improve = 0
+            early_stop_on && (best_state = deepcopy(Flux.state(model)))
+        elseif do_fixed_eval
+            since_improve += 1
+        end
+
         base_vals = [
             (:epoch,         "$epoch / $(ts.epochs)"),
             (:steps,         strategy.current_steps),
@@ -527,7 +641,32 @@ function train_model!(model,
             (:val_h_1step,   round(ep_val_h_1step,   sigdigits = 4)),
             (Symbol("q→h_amp"), round(ep_val_amp,    sigdigits = 3)),
         ] : []
-        next!(prog; showvalues = vcat(base_vals, comp_vals))
+        fixed_vals = do_fixed_eval ? [
+            (:val_fixed_rmse, round(ep_fixed_rmse, sigdigits = 4)),
+            (:val_peak_ratio, round(ep_peak_ratio, sigdigits = 3)),
+        ] : []
+        next!(prog; showvalues = vcat(base_vals, comp_vals, fixed_vals))
+
+        # Periodic checkpoint hook (I/O + optional full eval handled by caller).
+        if !isnothing(checkpoint_callback) && ts.checkpoint_every > 0 &&
+                epoch % ts.checkpoint_every == 0
+            checkpoint_callback(model, epoch)
+        end
+
+        # Early stopping on the fixed-horizon RMSE.
+        if early_stop_on && since_improve >= ts.early_stopping_patience
+            stopped_epoch = epoch
+            @info @sprintf("Early stopping at epoch %d: no fixed-horizon RMSE improvement for %d epochs (best %.5g at epoch %d).",
+                           epoch, ts.early_stopping_patience, best_metric, best_epoch)
+            break
+        end
+    end
+
+    # Restore the best-metric weights so the returned/saved model is the best epoch.
+    if early_stop_on && !isnothing(best_state)
+        @info @sprintf("Restoring best fixed-horizon weights from epoch %d (RMSE %.5g).",
+                       best_epoch, best_metric)
+        Flux.loadmodel!(model, best_state)
     end
 
     return (train_rollout = train_rollout,
@@ -541,6 +680,10 @@ function train_model!(model,
             train_amp     = train_amp,
             val_amp       = val_amp,
             mb_gain       = mb_gain,
-            grad_norm     = grad_norm)
+            grad_norm     = grad_norm,
+            val_fixed_rmse = val_fixed_rmse,
+            val_peak_ratio = val_peak_ratio,
+            stopped_epoch  = stopped_epoch,
+            best_epoch     = best_epoch)
 end
 

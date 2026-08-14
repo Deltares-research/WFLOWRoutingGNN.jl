@@ -162,6 +162,58 @@ function plot_amplification(train_amp, val_amp;
 end
 
 """
+    plot_fixed_horizon(val_fixed_rmse, val_peak_ratio; horizon = nothing,
+                       path = nothing, csv = true, csv_path = nothing) -> Figure
+
+Plot the per-epoch **fixed-horizon** validation metrics from `train_model!`: the
+constant-length autoregressive discharge RMSE (physical units) and the peak
+amplification ratio `max|q_pred| / max|q_truth|`. Unlike `val_rollout`, whose
+horizon grows with the curriculum, these are directly comparable epoch-to-epoch
+and drive early stopping.
+
+Two stacked panels are drawn:
+- Top    : fixed-horizon discharge RMSE (lower is better).
+- Bottom : peak ratio, with a dashed reference line at `1` (values above `1`
+           indicate the rollout over-amplifies the hydrograph peak).
+
+Writes the plotted arrays to CSV alongside the figure when `csv` is `true`.
+Returns the `Figure`.
+"""
+function plot_fixed_horizon(val_fixed_rmse, val_peak_ratio;
+                            horizon  = nothing,
+                            path     = nothing,
+                            csv      = true,
+                            csv_path = nothing)
+    epochs = 1:length(val_fixed_rmse)
+    htxt   = isnothing(horizon) ? "" : " (H=$(horizon))"
+    fig = Figure(size = (600, 600))
+
+    ax1 = Axis(fig[1, 1];
+               title  = "Fixed-horizon validation discharge RMSE$(htxt)",
+               xlabel = "Epoch",
+               ylabel = "RMSE(q) [m³/s]")
+    lines!(ax1, epochs, val_fixed_rmse; color = :steelblue)
+
+    ax2 = Axis(fig[2, 1];
+               title  = "Fixed-horizon peak ratio$(htxt)",
+               xlabel = "Epoch",
+               ylabel = "max|q_pred| / max|q_truth|")
+    lines!(ax2, epochs, val_peak_ratio; color = :orangered)
+    hlines!(ax2, [1f0]; color = :gray, linestyle = :dash)
+
+    isnothing(path) || save(path, fig)
+
+    csv_out = isnothing(csv_path) ? _csv_from_path(path) : csv_path
+    if csv && !isnothing(csv_out)
+        header  = ["epoch", "val_fixed_rmse", "val_peak_ratio"]
+        columns = Any[collect(epochs), val_fixed_rmse, val_peak_ratio]
+        _write_plot_csv(csv_out, header, columns)
+    end
+
+    return fig
+end
+
+"""
     plot_validation_movie(pred_grids, true_grids, domain; path, framerate, timestamps) -> Figure
 
 Record an animated movie comparing ground-truth and predicted states on the

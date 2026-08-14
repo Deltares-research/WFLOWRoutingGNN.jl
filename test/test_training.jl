@@ -129,6 +129,72 @@ end
 end
 
 # ---------------------------------------------------------------------------
+# TrainSettings: fixed-horizon eval / early stopping / checkpoint fields
+# ---------------------------------------------------------------------------
+
+@testset "TrainSettings fixed-horizon/early-stop/checkpoint fields" begin
+
+    s = TrainSettings(; VALID_TS_KWARGS...)
+    @test s.eval_horizon            == 30
+    @test s.eval_anchors            == 32
+    @test s.early_stopping          == false
+    @test s.early_stopping_patience == 20
+    @test s.checkpoint_every        == 0
+    @test s.checkpoint_full_eval    == false
+
+    @testset "validation" begin
+        @test_throws ArgumentError TrainSettings(; VALID_TS_KWARGS..., eval_horizon = -1)
+        @test_throws ArgumentError TrainSettings(; VALID_TS_KWARGS..., early_stopping_patience = 0)
+        @test_throws ArgumentError TrainSettings(; VALID_TS_KWARGS..., checkpoint_every = -1)
+        @test_throws ArgumentError TrainSettings(; VALID_TS_KWARGS..., early_stopping = true, eval_horizon = 0)
+        @test TrainSettings(; VALID_TS_KWARGS..., eval_horizon = 0) isa TrainSettings
+    end
+
+    @testset "TOML round-trip" begin
+        sc = TrainSettings(; VALID_TS_KWARGS..., eval_horizon = 12, eval_anchors = 5,
+                             early_stopping = true, early_stopping_patience = 7,
+                             checkpoint_every = 3, checkpoint_full_eval = true)
+        path = tempname() * ".toml"
+        save_train_settings(path, sc)
+        sc2 = load_train_settings(path)
+        rm(path)
+        @test sc2.eval_horizon            == 12
+        @test sc2.eval_anchors            == 5
+        @test sc2.early_stopping          == true
+        @test sc2.early_stopping_patience == 7
+        @test sc2.checkpoint_every        == 3
+        @test sc2.checkpoint_full_eval    == true
+    end
+
+end
+
+# ---------------------------------------------------------------------------
+# Fixed-horizon validation eval
+# ---------------------------------------------------------------------------
+
+@testset "fixed-horizon validation eval" begin
+
+    fh = build_fixed_horizon_eval(TR_DATASET.val, TR_STATIC, TR_STATS, "river",
+                                  TR_POSTSCALE; horizon = 2, n_anchors = 3)
+    @test fh isa FixedHorizonEval
+    @test fh.horizon == 2
+    @test fh.B >= 1
+    @test fh.N == TR_N_NODES
+    @test size(fh.forcing)     == (TR_N_FORCING, fh.N * fh.B, fh.horizon)
+    @test size(fh.states0)     == (TR_N_STATE,   fh.N * fh.B)
+    @test size(fh.true_q_phys) == (fh.N, fh.horizon, fh.B)
+
+    rmse, peak = fixed_horizon_metrics(deepcopy(TR_MODEL), fh; device = :cpu)
+    @test isfinite(rmse) && rmse >= 0
+    @test isfinite(peak) && peak >= 0
+
+    # Non-positive horizon / anchors → no metric.
+    @test isnothing(build_fixed_horizon_eval(TR_DATASET.val, TR_STATIC, TR_STATS,
+                                             "river", TR_POSTSCALE; horizon = 0))
+
+end
+
+# ---------------------------------------------------------------------------
 # Integration: small training run
 # ---------------------------------------------------------------------------
 
@@ -167,5 +233,55 @@ end
         @test all(>(0), train_1step)
         @test all(>(0), val_1step)
     end
+
+end
+
+# ---------------------------------------------------------------------------
+# Integration: fixed-horizon eval, early stopping & checkpoint callback
+# ---------------------------------------------------------------------------
+
+@testset "train_model! fixed-horizon eval + checkpoints" begin
+
+    fh    = build_fixed_horizon_eval(TR_DATASET.val, TR_STATIC, TR_STATS, "river",
+                                     TR_POSTSCALE; horizon = 2, n_anchors = 3)
+    ts    = TrainSettings(; VALID_TS_KWARGS..., epochs = TR_EPOCHS, lr_steps = 2,
+                          eval_horizon = 2, eval_anchors = 3, checkpoint_every = 2)
+    model = deepcopy(TR_MODEL)
+
+    ckpt_epochs = Int[]
+    cb = (m, epoch) -> push!(ckpt_epochs, epoch)
+
+    losses = train_model!(model, TR_TRAIN_LOADER, TR_VAL_LOADER, ts, TR_STATIC;
+                          fixed_eval = fh, checkpoint_callback = cb)
+
+    @test length(losses.val_fixed_rmse) == TR_EPOCHS
+    @test length(losses.val_peak_ratio) == TR_EPOCHS
+    @test all(isfinite, losses.val_fixed_rmse)
+    @test all(>=(0),    losses.val_fixed_rmse)
+    @test all(isfinite, losses.val_peak_ratio)
+    @test ckpt_epochs == [2, 4]          # checkpoint_every = 2, epochs = 4
+    @test losses.stopped_epoch == TR_EPOCHS
+
+end
+
+@testset "train_model! early stopping" begin
+
+    fh    = build_fixed_horizon_eval(TR_DATASET.val, TR_STATIC, TR_STATS, "river",
+                                     TR_POSTSCALE; horizon = 2, n_anchors = 3)
+    ts    = TrainSettings(; VALID_TS_KWARGS..., epochs = 12, lr_steps = 2,
+                          strategy = TrainingStrategy([1, 2], [6, 6]),
+                          eval_horizon = 2, eval_anchors = 3,
+                          early_stopping = true, early_stopping_patience = 1)
+    model = deepcopy(TR_MODEL)
+
+    losses = train_model!(model, TR_TRAIN_LOADER, TR_VAL_LOADER, ts, TR_STATIC;
+                          fixed_eval = fh)
+
+    # With patience 1, training stops (and restores best weights) as soon as the
+    # fixed-horizon RMSE fails to improve; history is truncated to the stop epoch.
+    @test losses.stopped_epoch <= 12
+    @test length(losses.val_fixed_rmse) == losses.stopped_epoch
+    @test length(losses.train_rollout)  == losses.stopped_epoch
+    @test losses.best_epoch >= 1
 
 end

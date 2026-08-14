@@ -302,6 +302,157 @@ function evaluate_trajectory(model, split, norm_stats, domain::String,
     return pred_states, true_states
 end
 
+# ---------------------------------------------------------------------------
+# Fixed-horizon validation metric (constant-length rollout from many anchors)
+# ---------------------------------------------------------------------------
+
+"""
+    FixedHorizonEval
+
+Precomputed, batched inputs for a **constant-length** autoregressive validation
+rollout used as an epoch-to-epoch comparable metric (unlike the curriculum
+`val_rollout`, whose horizon grows across phases and so is not comparable). Built
+once by [`build_fixed_horizon_eval`](@ref) and consumed each epoch by
+[`fixed_horizon_metrics`](@ref).
+
+`B` evenly-spaced anchor start points in the validation timeseries are each
+rolled out `horizon` steps. The anchors are stacked as `B` disjoint copies of the
+graph topology (a block-diagonal batch) so every rollout step is a single batched
+forward pass (the model's reshape-fallback routing keeps the anchors independent).
+
+Fields:
+- `gB`          : batched `GNNGraph` (`B` disjoint copies of the topology).
+- `static`      : `(n_static, N)` per-node constants for a single graph (the
+                  forward pass tiles them across the batch).
+- `forcing`     : `(n_forcing, N·B, horizon)` per-step forcing in block order.
+- `states0`     : `(n_state, N·B)` initial state in block order.
+- `true_q_phys` : `(N, horizon, B)` ground-truth discharge in physical units.
+- `true_peak`   : global `max|true_q_phys|` (reference for the peak ratio).
+- `qi`          : row index of discharge in the state.
+- `q_mu`, `q_sigma`, `q_postscale` : denormalisation constants for discharge.
+- `horizon`, `N`, `B`.
+"""
+struct FixedHorizonEval
+    gB          :: GNNGraph
+    static      :: Matrix{Float32}
+    forcing     :: Array{Float32, 3}
+    states0     :: Matrix{Float32}
+    true_q_phys :: Array{Float32, 3}
+    true_peak   :: Float32
+    qi          :: Int
+    q_mu        :: Float32
+    q_sigma     :: Float32
+    q_postscale :: Vector{Float32}
+    horizon     :: Int
+    N           :: Int
+    B           :: Int
+end
+
+"""
+    build_fixed_horizon_eval(split, static, norm_stats, domain, postscale;
+                             horizon = 30, n_anchors = 32)
+        -> FixedHorizonEval | nothing
+
+Assemble a [`FixedHorizonEval`](@ref) from a validation `split` of
+`make_horizon_dataset`. The overlapping windows are flattened to a consecutive
+timeseries, then up to `n_anchors` evenly-spaced start points that each admit a
+full `horizon`-step rollout are selected and batched.
+
+Returns `nothing` (with a warning) when `horizon`/`n_anchors` are non-positive or
+the split is too short to host a single anchor. If the split is shorter than
+`horizon + 1` graphs the horizon is clamped down (with a warning).
+"""
+function build_fixed_horizon_eval(split, static::AbstractMatrix{Float32},
+                                  norm_stats, domain::String,
+                                  postscale::Dict{String,Vector{Float32}};
+                                  horizon::Int = 30, n_anchors::Int = 32)
+    (horizon > 0 && n_anchors > 0) || return nothing
+    isempty(split) && return nothing
+
+    # Flatten overlapping windows to a consecutive timeseries (as evaluate_trajectory).
+    graphs = vcat(split[1], [w[end] for w in split[2:end]])
+    T      = length(graphs)
+
+    H = min(horizon, T - 1)
+    if H < 1
+        @warn "build_fixed_horizon_eval: validation split too short ($T graphs) for a fixed-horizon metric; disabling."
+        return nothing
+    end
+    H < horizon &&
+        @warn "build_fixed_horizon_eval: validation split holds only $T graphs; clamping fixed horizon $horizon → $H."
+
+    # Anchor start s (1-based) needs graphs[s … s+H] available, so s ∈ 1:(T-H).
+    n_avail = T - H
+    B       = min(n_anchors, n_avail)
+    starts  = unique(round.(Int, range(1, n_avail; length = B)))
+    B       = length(starts)
+
+    g0        = graphs[1]
+    N         = g0.num_nodes
+    n_state   = size(g0.ndata.state,   1)
+    n_forcing = size(g0.ndata.forcing, 1)
+
+    forcing     = Array{Float32}(undef, n_forcing, N * B, H)
+    states0     = Array{Float32}(undef, n_state,   N * B)
+    true_q_norm = Array{Float32}(undef, N, H, B)
+
+    qi    = 1                                   # discharge is state row 1 (mass-balance convention)
+    qname = DOMAIN_VARS[domain]["state"][qi]
+    μq    = Float32(norm_stats[qname].mean)
+    σq    = Float32(norm_stats[qname].std)
+    qpost = get(postscale, qname, ones(Float32, N))
+
+    for (a, s) in enumerate(starts)
+        cols = ((a - 1) * N + 1):(a * N)
+        states0[:, cols] = graphs[s].ndata.state
+        for k in 1:H
+            forcing[:, cols, k]  = graphs[s + k - 1].ndata.forcing
+            true_q_norm[:, k, a] = graphs[s + k].ndata.state[qi, :]
+        end
+    end
+
+    true_q_phys = (true_q_norm .* σq .+ μq) .* reshape(qpost, N, 1, 1)
+    true_peak   = Float32(maximum(abs, true_q_phys))
+    gB          = GNNGraphs.batch([g0 for _ in 1:B])
+
+    return FixedHorizonEval(gB, Matrix{Float32}(static), forcing, states0,
+                            true_q_phys, true_peak, qi, μq, σq, qpost, H, N, B)
+end
+
+"""
+    fixed_horizon_metrics(model, fh; device = :cpu) -> (rmse_q, peak_ratio)
+
+Run the constant-length autoregressive rollout for all anchors of `fh` (batched
+into one forward pass per step) and return the discharge RMSE in physical units
+and the global peak-amplification ratio `max|q_pred| / max|q_truth|`. No
+gradients are taken; `model` may live on either device.
+"""
+function fixed_horizon_metrics(model::WflowGNN, fh::FixedHorizonEval; device::Symbol = :cpu)
+    dev     = device == :gpu ? Flux.gpu : identity
+    gB      = dev(fh.gB)
+    static  = dev(fh.static)
+    forcing = dev(fh.forcing)
+    state   = dev(fh.states0)
+    H       = fh.horizon
+    qi      = fh.qi
+
+    q_norm = Array{Float32}(undef, fh.N * fh.B, H)   # CPU accumulator of the q row
+    for k in 1:H
+        f_t    = forcing[:, :, k]
+        f_next = forcing[:, :, min(k + 1, H)]
+        state  = model(gB, state, f_t, static, f_next)
+        q_norm[:, k] = Array(Flux.cpu(state[qi:qi, :]))[1, :]
+    end
+
+    # (N·B, H) block order → (N, B, H) → (N, H, B)
+    pred_q_norm = permutedims(reshape(q_norm, fh.N, fh.B, H), (1, 3, 2))
+    pred_q_phys = (pred_q_norm .* fh.q_sigma .+ fh.q_mu) .* reshape(fh.q_postscale, fh.N, 1, 1)
+
+    rmse_q     = sqrt(mean(abs2, pred_q_phys .- fh.true_q_phys))
+    peak_ratio = maximum(abs, pred_q_phys) / max(fh.true_peak, eps(Float32))
+    return Float32(rmse_q), Float32(peak_ratio)
+end
+
 """
     rollout_mb_diagnostics(model, split) -> NamedTuple
 

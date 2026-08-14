@@ -248,6 +248,12 @@ function hpar_search(toml_path::String)
             strategy      = strategy,
             h_loss_scale  = Symbol(get(td, "h_loss_scale", "absolute")),
             phase_backoff_factor = get(td, "phase_backoff_factor", 0.5),
+            eval_horizon     = get(td, "eval_horizon", 30),
+            eval_anchors     = get(td, "eval_anchors", 32),
+            early_stopping   = get(td, "early_stopping", false),
+            early_stopping_patience = get(td, "early_stopping_patience", 20),
+            checkpoint_every = get(td, "checkpoint_every", 0),
+            checkpoint_full_eval = get(td, "checkpoint_full_eval", false),
             device        = Symbol(get(td, "device", "cpu")),
             val_daterange = if haskey(td, "val_daterange")
                 r = td["val_daterange"]

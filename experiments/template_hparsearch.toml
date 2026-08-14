@@ -90,6 +90,15 @@ lr_steps = 10
 
 device = "cpu"
 
+# Fixed-horizon validation metric / early stopping / checkpointing.
+# See experiments/template.toml for full documentation of these keys.
+eval_horizon = 30
+eval_anchors = 32
+early_stopping = false
+early_stopping_patience = 20
+checkpoint_every = 0
+checkpoint_full_eval = false
+
 [train.strategy]
 steps       = [1, 2, 4]
 durations   = [15, 15, 20]
