@@ -67,6 +67,14 @@ Hyperparameters for a `WflowGNN` model.
                    Lowering θ damps the stiff `q→h` gradient (`∂h_norm/∂q_norm =
                    −θ·dt·σ_q/σ_h`) that drives rollout h-overshoots. Only used
                    when `enforce_mass_balance` is `true`.
+- `mb_augment_decoder` : feed two physics-derived features (the summed upstream
+                   discharge at `t` and a fully-explicit forward-Euler estimate
+                   of the next-step depth) as extra decoder inputs. Both are
+                   known at `t` (non-circular) and derived from the mass-balance
+                   layer's routing/constants; the hard mass-balance output is
+                   unchanged (exact). Only used when the mass balance is active
+                   (`river` domain with `enforce_mass_balance = true`); ignored
+                   otherwise (default `false`).
 """
 Base.@kwdef struct ModelSettings
     domain               :: String
@@ -77,6 +85,7 @@ Base.@kwdef struct ModelSettings
     proc_activation             = swish
     enforce_mass_balance :: Bool = true
     mb_theta             :: Float32 = 1.0f0
+    mb_augment_decoder   :: Bool = false
 end
 
 function Base.show(io::IO, s::ModelSettings)
@@ -88,7 +97,8 @@ function Base.show(io::IO, s::ModelSettings)
     println(io, "  enc_activation  : ", _activation_name(s.enc_activation))
     println(io, "  proc_activation : ", _activation_name(s.proc_activation))
     println(io, "  enforce_mass_balance : ", s.enforce_mass_balance)
-    print(  io, "  mb_theta        : ", s.mb_theta)
+    println(io, "  mb_theta        : ", s.mb_theta)
+    print(  io, "  mb_augment_decoder : ", s.mb_augment_decoder)
 end
 
 """
@@ -107,6 +117,7 @@ function save_model_settings(path::String, s::ModelSettings)
         "proc_activation" => _activation_name(s.proc_activation),
         "enforce_mass_balance" => s.enforce_mass_balance,
         "mb_theta"        => s.mb_theta,
+        "mb_augment_decoder" => s.mb_augment_decoder,
     )
     open(path, "w") do io
         TOML.print(io, dict)
@@ -133,6 +144,7 @@ function load_model_settings(path::String)
         proc_activation = ACTIVATIONS[proc_name],
         enforce_mass_balance = get(d, "enforce_mass_balance", true),
         mb_theta        = Float32(get(d, "mb_theta", 1.0)),
+        mb_augment_decoder = get(d, "mb_augment_decoder", false),
     )
 end
 
@@ -316,6 +328,73 @@ function (l::MassBalanceLayer)(g            ::GNNGraph,
 
     # Re-normalise:  scaled_h = h_phys / postscale_h  →  norm_h = (scaled_h - μ_h) / σ_h
     return (h_phys_new ./ ph .- l.μ_h) ./ l.σ_h
+end
+
+# Number of physics-derived features appended to the decoder input when
+# `mb_augment_decoder` is enabled (see `mb_decoder_features`).
+const MB_DECODER_FEATURES = 2
+
+"""
+    mb_decoder_features(l, g, state, forcing) -> (upstream_q_norm, h_expl_norm)
+
+Compute two physics-derived node features from quantities known at the current
+timestep `t`, for use as **additional decoder inputs** when `mb_augment_decoder`
+is enabled. Both are non-circular (they do not depend on the discharge the model
+is about to predict) and differentiable w.r.t. `state`/`forcing`, so gradients
+flow through them during BPTT rollout. The hard mass-balance output is unchanged.
+
+- `upstream_q_norm` : sum of upstream discharge routed into each node at `t`,
+                      re-expressed in the model's normalised discharge space.
+- `h_expl_norm`     : the fully-explicit (forward-Euler, θ=0) estimate of the
+                      next-step water depth, in normalised depth space — a cheap
+                      physics warm-start the decoder can correct.
+
+Both are `(1, n_nodes)`. Batched `GNNGraph`s are handled like the layer's
+forward pass (per-node constants tiled, routing dispatched three ways).
+"""
+function mb_decoder_features(l           ::MassBalanceLayer,
+                             g           ::GNNGraph,
+                             state       ::AbstractMatrix,
+                             forcing     ::AbstractMatrix)
+    n     = g.num_nodes
+    n_per = length(l.postscale_q)
+    n_rep = n ÷ n_per
+
+    if n_rep == 1
+        pq  = reshape(l.postscale_q,  1, n)
+        ph  = reshape(l.postscale_h,  1, n)
+        phr = reshape(l.ph_over_pq,   1, n)
+    else
+        pq  = reshape(repeat(l.postscale_q,  n_rep), 1, n)
+        ph  = reshape(repeat(l.postscale_h,  n_rep), 1, n)
+        phr = reshape(repeat(l.ph_over_pq,   n_rep), 1, n)
+    end
+
+    N_per = length(l.postscale_q)
+    route(x) =
+        if n_rep == 1
+            (_topology_mul(l.A_routing, x'))'
+        elseif !isnothing(l.A_routing_batched) && n == l.batch_size * N_per
+            (_topology_mul(l.A_routing_batched, x'))'
+        else
+            reshape(_topology_mul(l.A_routing, reshape(x, N_per, n_rep))', 1, n)
+        end
+
+    # All quantities are known at t (explicit / forward-Euler) — no dependence
+    # on the discharge about to be predicted, so they are safe to feed as inputs.
+    q_phys_curr     = max.(0f0, pq .* (state[1:1, :] .* l.σ_q .+ l.μ_q))
+    inwater_curr    = forcing[1:1, :] .* l.σ_inwater .+ l.μ_inwater
+    upstream_q_curr = route(q_phys_curr)
+    net_flux_expl   = upstream_q_curr .+ inwater_curr .- q_phys_curr
+
+    h_phys_curr = ph .* (state[2:2, :] .* l.σ_h .+ l.μ_h)
+    h_phys_expl = max.(0f0, h_phys_curr .+ l.dt .* phr .* net_flux_expl)
+
+    # Re-express both features in the model's normalised (z-scored) spaces so
+    # they share the scale of the other inputs.
+    upstream_q_norm = (upstream_q_curr ./ pq .- l.μ_q) ./ l.σ_q
+    h_expl_norm     = (h_phys_expl ./ ph .- l.μ_h) ./ l.σ_h
+    return upstream_q_norm, h_expl_norm
 end
 
 """
@@ -563,15 +642,19 @@ Encode-process-decode GNN for wflow routing emulation.
 - `mass_balance` : optional `MassBalanceLayer` that hard-constrains `river_h` via the
                    kinematic-wave mass balance. When present the decoder outputs only
                    `Δq` (`out_dim = 1`) and `river_h` is computed analytically.
+- `augment_mb`   : when `true` (and `mass_balance` is present), two physics-derived
+                   features (`mb_decoder_features`) are appended to the decoder
+                   input, widening its first layer by `MB_DECODER_FEATURES`.
 """
 struct WflowGNN
     encoder      :: Union{Dense, Chain}
     processor    :: GNNChain
     decoder      :: Union{Dense, Chain}
     mass_balance :: Union{Nothing, MassBalanceLayer}
+    augment_mb   :: Bool
 end
 
-Flux.@layer WflowGNN
+Flux.@layer WflowGNN trainable=(encoder, processor, decoder, mass_balance)
 
 # Explicit device overloads for WflowGNN so that SparseConv.A and
 # SparseConv.A_batched are converted correctly (Functors traversal only
@@ -582,6 +665,7 @@ function Flux.gpu(m::WflowGNN)
         GNNChain(map(Flux.gpu, m.processor.layers)...),
         Flux.gpu(m.decoder),
         isnothing(m.mass_balance) ? nothing : Flux.gpu(m.mass_balance),
+        m.augment_mb,
     )
 end
 
@@ -591,6 +675,7 @@ function Flux.cpu(m::WflowGNN)
         GNNChain(map(Flux.cpu, m.processor.layers)...),
         Flux.cpu(m.decoder),
         isnothing(m.mass_balance) ? nothing : Flux.cpu(m.mass_balance),
+        m.augment_mb,
     )
 end
 
@@ -661,7 +746,8 @@ function WflowGNN(s::ModelSettings, mb::MassBalanceLayer)
                     mlp_layers      = s.mlp_layers,
                     enc_activation  = s.enc_activation,
                     proc_activation = s.proc_activation,
-                    mass_balance    = mb)
+                    mass_balance    = mb,
+                    augment_mb      = s.mb_augment_decoder)
 end
 
 """
@@ -681,6 +767,7 @@ function WflowGNN(s::ModelSettings, mb::MassBalanceLayer, A::AbstractMatrix{Floa
                     enc_activation  = s.enc_activation,
                     proc_activation = s.proc_activation,
                     mass_balance    = mb,
+                    augment_mb      = s.mb_augment_decoder,
                     adj_matrix      = A)
 end
 
@@ -696,9 +783,15 @@ function WflowGNN(
         enc_activation        = swish,
         proc_activation       = swish,
         mass_balance          = nothing,
+        augment_mb      :: Bool = false,
         adj_matrix            = nothing)
 
     mlp_layers >= 1 || throw(ArgumentError("mlp_layers must be >= 1, got $mlp_layers"))
+
+    # Augmentation only applies when a mass-balance layer is present (the extra
+    # features are derived from it). The resolved flag is stored on the struct.
+    augment = augment_mb && !isnothing(mass_balance)
+    dec_in  = hidden_dim + (augment ? MB_DECODER_FEATURES : 0)
 
     # Encoder: in_dim → hidden_dim → ... → hidden_dim  (mlp_layers Dense layers)
     if mlp_layers == 1
@@ -719,15 +812,20 @@ function WflowGNN(
     end
 
     # Decoder: hidden_dim → ... → hidden_dim → out_dim  (mlp_layers Dense layers)
+    # When augmenting, the first decoder layer widens to accept the extra
+    # physics-derived features (dec_in = hidden_dim + MB_DECODER_FEATURES).
     if mlp_layers == 1
-        decoder = Dense(hidden_dim => out_dim)
+        decoder = Dense(dec_in => out_dim)
     else
-        dec_ls = Any[Dense(hidden_dim => hidden_dim, enc_activation) for _ in 1:(mlp_layers - 1)]
+        dec_ls = Any[Dense(dec_in => hidden_dim, enc_activation)]
+        for _ in 2:(mlp_layers - 1)
+            push!(dec_ls, Dense(hidden_dim => hidden_dim, enc_activation))
+        end
         push!(dec_ls, Dense(hidden_dim => out_dim))
         decoder = Chain(dec_ls...)
     end
 
-    return WflowGNN(encoder, processor, decoder, mass_balance)
+    return WflowGNN(encoder, processor, decoder, mass_balance, augment)
 end
 
 """
@@ -751,7 +849,7 @@ function precompute_batched(model::WflowGNN, B::Int)
     else
         nothing
     end
-    WflowGNN(model.encoder, GNNChain(new_layers...), model.decoder, new_mb)
+    WflowGNN(model.encoder, GNNChain(new_layers...), model.decoder, new_mb, model.augment_mb)
 end
 
 """
@@ -795,12 +893,20 @@ function (m::WflowGNN)(g::GNNGraph,
     x = vcat(state, forcing, static)
     h = m.encoder(x)
     h = m.processor(g, h)
-    Δ = m.decoder(h)
     if isnothing(m.mass_balance)
+        Δ = m.decoder(h)
         return state .+ Δ
     else
+        if m.augment_mb
+            # Append physics-derived, known-at-t features to the decoder input.
+            uq_norm, h_expl_norm = mb_decoder_features(m.mass_balance, g, state, forcing)
+            Δ = m.decoder(vcat(h, uq_norm, h_expl_norm))
+        else
+            Δ = m.decoder(h)
+        end
         q_new = state[1:1, :] .+ Δ
         h_new = m.mass_balance(g, state, forcing, forcing_next, q_new)
         return vcat(q_new, h_new)
     end
 end
+

@@ -94,6 +94,7 @@ function parse_run_config(toml_path::String)
         proc_activation = ACTIVATIONS[get(md, "proc_activation", "swish")],
         enforce_mass_balance = get(md, "enforce_mass_balance", true),
         mb_theta        = Float32(get(md, "mb_theta", 1.0)),
+        mb_augment_decoder = get(md, "mb_augment_decoder", false),
     )
 
     td = d["train"]

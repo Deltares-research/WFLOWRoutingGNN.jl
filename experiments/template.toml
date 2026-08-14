@@ -69,6 +69,13 @@ enforce_mass_balance = true
 # See docs/mass_balance_stability_notes.md.
 mb_theta = 1.0
 
+# Feed two physics-derived features to the decoder (river domain,
+# enforce_mass_balance = true only): the summed upstream discharge at t and a
+# fully-explicit (forward-Euler) estimate of the next-step depth. Both are known
+# at t (non-circular) and give the decoder a physics warm-start; the hard
+# mass-balance output stays exact. Widens the decoder's first layer by 2 inputs.
+mb_augment_decoder = false
+
 
 [train]
 # Total number of training epochs
