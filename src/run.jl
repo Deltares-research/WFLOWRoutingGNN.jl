@@ -235,10 +235,12 @@ the optional `val_daterange` rollout. `cpu_model` must already be on the CPU.
 Shared by [`run_wflow_gnn`](@ref) for the final model and, when
 `ts.checkpoint_full_eval` is set, for each periodic checkpoint.
 """
-function evaluate_and_write(cpu_model, dataset, norm_stats, grid, postscale,
+function evaluate_and_write(model, dataset, norm_stats, grid, postscale,
                             static_arr, ms::ModelSettings, ts::TrainSettings,
                             output_file, staticmaps_file, all_times, schema,
                             run_dir)
+
+    eval_device = ts.device
 
     val_rollout_duration = 0.0
     val_n_timesteps      = 0
@@ -249,8 +251,8 @@ function evaluate_and_write(cpu_model, dataset, norm_stats, grid, postscale,
 
         t0 = time_ns()
         p_states, t_states = evaluate_trajectory(
-            cpu_model, split_data, norm_stats, ms.domain, static_arr;
-            device = :cpu, postscale)
+            model, split_data, norm_stats, ms.domain, static_arr;
+            device = eval_device, postscale)
         if split_name == "val"
             val_rollout_duration = (time_ns() - t0) / 1e9
             val_n_timesteps      = size(p_states, 3)
@@ -292,8 +294,9 @@ function evaluate_and_write(cpu_model, dataset, norm_stats, grid, postscale,
                     path = joinpath(run_dir, "q_overprediction_vs_ramp.png"))
             end
 
-            if !isnothing(cpu_model.mass_balance)
+            if !isnothing(model.mass_balance)
                 @info "Computing mass balance diagnostics on validation split"
+                cpu_model = Flux.cpu(model)
                 mb_diags = rollout_mb_diagnostics(cpu_model, split_data, static_arr)
                 plot_mb_diagnostics(mb_diags;
                                     path       = joinpath(run_dir, "mb_diagnostics.png"),
@@ -325,8 +328,8 @@ function evaluate_and_write(cpu_model, dataset, norm_stats, grid, postscale,
                     dr_split = split_data[w_start:w_stop]
 
                     dr_p_states, dr_t_states = evaluate_trajectory(
-                        cpu_model, dr_split, norm_stats, ms.domain, static_arr;
-                        device = :cpu, postscale)
+                        model, dr_split, norm_stats, ms.domain, static_arr;
+                        device = eval_device, postscale)
                     dr_p_grids = regrid(dr_p_states, grid, ms.domain)
                     dr_t_grids = regrid(dr_t_states, grid, ms.domain)
 
@@ -482,7 +485,7 @@ function run_wflow_gnn(ds::DataSettings, ms::ModelSettings, ts::TrainSettings)
             @info "Saved checkpoint (epoch $epoch) → $ckpt_dir"
             if ts.checkpoint_full_eval
                 @info "Running full evaluation for checkpoint epoch $epoch"
-                evaluate_and_write(cpu_ckpt, dataset, norm_stats, grid, postscale,
+                evaluate_and_write(m, dataset, norm_stats, grid, postscale,
                                    static_arr, ms, ts, output_file, staticmaps_file,
                                    all_times, schema, ckpt_dir)
             end
@@ -571,7 +574,7 @@ function run_wflow_gnn(ds::DataSettings, ms::ModelSettings, ts::TrainSettings)
     n_params  = sum(length, Flux.trainables(cpu_model))
 
     val_rollout_duration, val_n_timesteps = evaluate_and_write(
-        cpu_model, dataset, norm_stats, grid, postscale, static_arr, ms, ts,
+        model, dataset, norm_stats, grid, postscale, static_arr, ms, ts,
         output_file, staticmaps_file, all_times, schema, run_dir)
 
     metrics = (
