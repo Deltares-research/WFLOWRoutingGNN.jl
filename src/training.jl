@@ -370,8 +370,9 @@ Train `model` in-place and return a `NamedTuple` of per-epoch history arrays:
 For mass-balance models it also returns the per-component 1-step MSE
 (`train_q_1step`, `val_q_1step`, `train_h_1step`, `val_h_1step`), the q→h error
 amplification diagnostic (`train_amp`, `val_amp`; see [`mb_amplification`](@ref))
-and its analytic reference gain (`mb_gain`), plus `grad_norm`. Non-mass-balance
-models fill those with `NaN32`.
+and its analytic reference gain (`mb_gain`), plus `grad_norm`, the per-epoch
+applied learning rate (`lr`) and curriculum rollout length (`steps`).
+Non-mass-balance models fill the mass-balance columns with `NaN32`.
 
 When a `fixed_eval::FixedHorizonEval` is supplied (see
 [`build_fixed_horizon_eval`](@ref)) the returned NamedTuple additionally holds
@@ -379,7 +380,10 @@ When a `fixed_eval::FixedHorizonEval` is supplied (see
 RMSE and peak-amplification ratio, computed each epoch (filled with `NaN32` when
 no `fixed_eval` is given). It also reports `stopped_epoch` (the last completed
 epoch, `< ts.epochs` when early stopping triggered) and `best_epoch` (the
-fixed-horizon RMSE minimiser). When `ts.early_stopping` is set, training halts
+fixed-horizon RMSE minimiser), plus the training-stability counters
+`n_nonfinite_skips` (total non-finite update skips), `n_backoffs` (adaptive LR
+backoff events) and `stopped_early` (whether early stopping fired). When
+`ts.early_stopping` is set, training halts
 once the fixed-horizon RMSE has not improved for `ts.early_stopping_patience`
 epochs and the best-metric weights are restored into `model`.
 
@@ -447,6 +451,10 @@ function train_model!(model,
     val_amp       = Float32[]
     mb_gain       = Float32[]   # analytic self-gain θ·dt·σ_q/σ_h (reference)
     grad_norm     = Float32[]
+    lr_hist       = Float32[]   # scheduled LR actually applied each epoch
+    steps_hist    = Int[]       # curriculum rollout length (current_steps) each epoch
+    n_skip_total  = 0           # cumulative non-finite update skips across all epochs
+    n_backoffs    = 0           # cumulative adaptive LR backoff events
     val_fixed_rmse  = Float32[] # fixed-horizon discharge RMSE (physical units)
     val_peak_ratio  = Float32[] # fixed-horizon max|q_pred|/max|q_truth|
 
@@ -531,6 +539,7 @@ function train_model!(model,
         if n_skipped > 0
             @warn "Epoch $epoch: skipped $n_skipped non-finite update(s) (loss/grad)."
         end
+        n_skip_total += n_skipped
         denom = max(n_batches, 1)
         ep_train_rollout /= denom
         ep_train_1step   /= denom
@@ -553,6 +562,7 @@ function train_model!(model,
                     @warn @sprintf("Epoch %d (steps=%d): unstable epoch; backing off phase LR ×%.3g (scale → %.3g).",
                                    epoch, strategy.current_steps, ts.phase_backoff_factor, new_scale)
                     lr_scale = new_scale
+                    n_backoffs += 1
                 end
             end
         end
@@ -602,6 +612,8 @@ function train_model!(model,
         push!(val_amp,       ep_val_amp)
         push!(mb_gain,       has_components ? ep_mb_gain : NaN32)
         push!(grad_norm,     Float32(ep_grad_norm))
+        push!(lr_hist,       Float32(lr))
+        push!(steps_hist,    strategy.current_steps)
 
         # Fixed-horizon validation metric (constant-length rollout from anchors),
         # comparable epoch-to-epoch and used for early stopping / best selection.
@@ -681,8 +693,13 @@ function train_model!(model,
             val_amp       = val_amp,
             mb_gain       = mb_gain,
             grad_norm     = grad_norm,
+            lr            = lr_hist,
+            steps         = steps_hist,
             val_fixed_rmse = val_fixed_rmse,
             val_peak_ratio = val_peak_ratio,
+            n_nonfinite_skips = n_skip_total,
+            n_backoffs     = n_backoffs,
+            stopped_early  = stopped_epoch < ts.epochs,
             stopped_epoch  = stopped_epoch,
             best_epoch     = best_epoch)
 end

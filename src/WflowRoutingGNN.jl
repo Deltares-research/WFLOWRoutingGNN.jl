@@ -44,6 +44,7 @@ export rollout, evaluate_trajectory, rollout_mb_diagnostics, rollout_ensemble,
 include("postprocess.jl")
 export regrid, write_regrid_to_netcdf,
        spatial_error_metrics, write_spatial_metrics_to_netcdf, overprediction_vs_ramp,
+       spatial_metric_summary, write_spatial_metrics_to_csv,
        SPATIAL_METRIC_NAMES, RAMP_LABELS, RAMP_EDGES
 
 end # module WflowRoutingGNN

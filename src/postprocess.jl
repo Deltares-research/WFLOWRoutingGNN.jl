@@ -292,6 +292,64 @@ function write_spatial_metrics_to_netcdf(
     return path
 end
 
+"""
+    spatial_metric_summary(metrics) -> Dict{String, Dict{String, NamedTuple}}
+
+Aggregate the per-cell maps from [`spatial_error_metrics`](@ref) over all active
+(finite) cells into compact summary statistics per `(variable, metric)`:
+`(; n, mean, median, p10, p90, std)`. `NaN`/inactive cells are excluded. This is
+the shared reduction backing both [`write_spatial_metrics_to_csv`](@ref) and the
+per-run `metrics.toml` summary, so a text-only agent never needs to open the
+`spatial_metrics.nc` grid.
+"""
+function spatial_metric_summary(metrics::Dict{String, Dict{String, Matrix{Float32}}})
+    out = Dict{String, Dict{String, NamedTuple}}()
+    for (vname, maps) in metrics
+        mdict = Dict{String, NamedTuple}()
+        for m in SPATIAL_METRIC_NAMES
+            haskey(maps, m) || continue
+            vals = filter(isfinite, vec(maps[m]))
+            mdict[m] = isempty(vals) ?
+                (; n = 0, mean = NaN, median = NaN, p10 = NaN, p90 = NaN, std = NaN) :
+                (; n      = length(vals),
+                   mean   = Float64(mean(vals)),
+                   median = Float64(median(vals)),
+                   p10    = Float64(quantile(vals, 0.10)),
+                   p90    = Float64(quantile(vals, 0.90)),
+                   std    = length(vals) > 1 ? Float64(std(vals)) : 0.0)
+        end
+        out[vname] = mdict
+    end
+    return out
+end
+
+"""
+    write_spatial_metrics_to_csv(metrics, path) -> path
+
+Write the aggregated [`spatial_metric_summary`](@ref) of the per-cell error maps
+to a CSV with one row per `(variable, metric)` and columns
+`variable,metric,n,mean,median,p10,p90,std`. A token-cheap, text-readable
+companion to the full `spatial_metrics.nc` grid.
+"""
+function write_spatial_metrics_to_csv(metrics::Dict{String, Dict{String, Matrix{Float32}}},
+                                      path::AbstractString)
+    isempty(metrics) && throw(ArgumentError("metrics must not be empty"))
+    summary = spatial_metric_summary(metrics)
+    mkpath(dirname(abspath(path)))
+    open(path, "w") do io
+        println(io, "variable,metric,n,mean,median,p10,p90,std")
+        for vname in sort(collect(keys(summary)))
+            mdict = summary[vname]
+            for m in SPATIAL_METRIC_NAMES
+                haskey(mdict, m) || continue
+                s = mdict[m]
+                println(io, join((vname, m, s.n, s.mean, s.median, s.p10, s.p90, s.std), ","))
+            end
+        end
+    end
+    return path
+end
+
 # Ramp-rate class edges on g = (Qt − Qt-1)/max(Qt, eps): falling → sharp rise.
 const RAMP_EDGES  = Float32[-Inf, -0.05, 0.05, 0.2, 0.4, 0.8, Inf]
 const RAMP_LABELS = ["falling", "steady", "mild rise", "moderate rise",

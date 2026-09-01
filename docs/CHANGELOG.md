@@ -1,0 +1,1 @@
+This document serves as a concrete changelog of the code, summarizing briefly the changes of each commit.

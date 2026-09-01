@@ -234,16 +234,23 @@ the optional `val_daterange` rollout. `cpu_model` must already be on the CPU.
 
 Shared by [`run_wflow_gnn`](@ref) for the final model and, when
 `ts.checkpoint_full_eval` is set, for each periodic checkpoint.
+
+Returns a `NamedTuple` `(; val_rollout_duration, val_n_timesteps,
+spatial_summary, ramp)`; the last two feed the per-run `metrics.toml` summary
+(`spatial_summary` from [`spatial_metric_summary`](@ref), `ramp` from
+[`overprediction_vs_ramp`](@ref)) and are `nothing` when not applicable.
 """
 function evaluate_and_write(model, dataset, norm_stats, grid, postscale,
                             static_arr, ms::ModelSettings, ts::TrainSettings,
                             output_file, staticmaps_file, all_times, schema,
-                            run_dir)
+                            output_dir, plots_dir, metrics_dir)
 
     eval_device = ts.device
 
     val_rollout_duration = 0.0
     val_n_timesteps      = 0
+    spatial_summary      = nothing
+    ramp_summary         = nothing
 
     for (split_name, split_data, t_offset) in (
             ("train", dataset.train, 0),
@@ -265,33 +272,39 @@ function evaluate_and_write(model, dataset, norm_stats, grid, postscale,
                        for i in 1:n_frames]
 
         write_regrid_to_netcdf(p_grids, staticmaps_file, split_times,
-                               joinpath(run_dir, "$(split_name)_pred.nc"); schema)
+                       joinpath(output_dir, "$(split_name)_pred.nc"); schema)
         write_regrid_to_netcdf(t_grids, staticmaps_file, split_times,
-                               joinpath(run_dir, "$(split_name)_true.nc"); schema)
+                       joinpath(output_dir, "$(split_name)_true.nc"); schema)
 
         if split_name == "val"
             plot_validation_movie(p_grids, t_grids, ms.domain;
-                                  path       = joinpath(run_dir, "validation.mp4"),
+                                  path       = joinpath(plots_dir, "validation.mp4"),
                                   framerate  = 10,
                                   timestamps = split_times)
 
             plot_downstream_timeseries(p_grids, t_grids, ms.domain, grid,
                                        postscale["river_q"];  # upstream area per node
-                                       path       = joinpath(run_dir, "downstream_timeseries.png"),
-                                       timestamps = split_times)
+                                       path       = joinpath(plots_dir, "downstream_timeseries.png"),
+                                       timestamps = split_times,
+                                       csv_path   = joinpath(metrics_dir, "downstream_timeseries.csv"))
 
             # Spatial performance: per-cell error maps + Q overprediction vs ramp
             sp_metrics = spatial_error_metrics(p_grids, t_grids, ms.domain)
             write_spatial_metrics_to_netcdf(sp_metrics, staticmaps_file,
-                                            joinpath(run_dir, "spatial_metrics.nc"); schema)
+                                joinpath(output_dir, "spatial_metrics.nc"); schema)
+            write_spatial_metrics_to_csv(sp_metrics,
+                             joinpath(metrics_dir, "spatial_metrics.csv"))
             plot_spatial_metrics(sp_metrics, ms.domain;
-                                 path = joinpath(run_dir, "spatial_metrics.png"))
+                         path = joinpath(plots_dir, "spatial_metrics.png"))
+            spatial_summary = spatial_metric_summary(sp_metrics)
             if "river_q" in DOMAIN_VARS[ms.domain]["state"]
                 ramp = overprediction_vs_ramp(p_grids, t_grids)
                 @info "Q overprediction vs ramp: Pearson(e,g)=$(round(ramp.pearson_e_g; digits=3)) " *
                       "Spearman=$(round(ramp.spearman_e_g; digits=3)) over $(ramp.n) (cell,step) pairs"
                 plot_overprediction_vs_ramp(ramp;
-                    path = joinpath(run_dir, "q_overprediction_vs_ramp.png"))
+                    path     = joinpath(plots_dir, "q_overprediction_vs_ramp.png"),
+                    csv_path = joinpath(metrics_dir, "q_overprediction_vs_ramp.csv"))
+                ramp_summary = ramp
             end
 
             if !isnothing(model.mass_balance)
@@ -299,8 +312,9 @@ function evaluate_and_write(model, dataset, norm_stats, grid, postscale,
                 cpu_model = Flux.cpu(model)
                 mb_diags = rollout_mb_diagnostics(cpu_model, split_data, static_arr)
                 plot_mb_diagnostics(mb_diags;
-                                    path       = joinpath(run_dir, "mb_diagnostics.png"),
-                                    timestamps = split_times)
+                                    path       = joinpath(plots_dir, "mb_diagnostics.png"),
+                                    timestamps = split_times,
+                                    csv_path   = joinpath(metrics_dir, "mb_diagnostics.csv"))
             end
 
             # Optional date-range rollout on the validation split
@@ -341,20 +355,118 @@ function evaluate_and_write(model, dataset, norm_stats, grid, postscale,
                                      for i in 1:n_dr_frames]
 
                     plot_validation_movie(dr_p_grids, dr_t_grids, ms.domain;
-                                          path       = joinpath(run_dir, "validation_daterange.mp4"),
+                                          path       = joinpath(plots_dir, "validation_daterange.mp4"),
                                           framerate  = 10,
                                           timestamps = dr_pred_times)
 
                     plot_downstream_timeseries(dr_p_grids, dr_t_grids, ms.domain, grid,
                                                postscale["river_q"];
-                                               path       = joinpath(run_dir, "downstream_timeseries_daterange.png"),
-                                               timestamps = dr_pred_times)
+                                               path       = joinpath(plots_dir, "downstream_timeseries_daterange.png"),
+                                               timestamps = dr_pred_times,
+                                               csv_path   = joinpath(metrics_dir, "downstream_timeseries_daterange.csv"))
                 end
             end
         end
     end
 
-    return (val_rollout_duration, val_n_timesteps)
+    return (; val_rollout_duration, val_n_timesteps, spatial_summary, ramp = ramp_summary)
+end
+
+"""
+    write_run_metrics_toml(path, losses, ts, run_meta, spatial_summary, ramp) -> path
+
+Write a compact scalar summary of a completed run to `path` as TOML: the final
+(and best) values of the per-epoch training history, run metadata (`run_meta`),
+the median of each aggregated spatial-error metric per state variable, and the
+overprediction-vs-ramp correlations. Non-finite values are omitted so the file
+stays a valid, parser-friendly TOML of plain numbers — a token-cheap single-file
+entry point for downstream evaluation agents.
+"""
+function write_run_metrics_toml(path::AbstractString, losses, ts::TrainSettings,
+                                run_meta, spatial_summary, ramp)
+    function putf!(d, k, v)
+        v === nothing && return
+        if v isa Integer
+            d[k] = v
+        elseif v isa Real && isfinite(v)
+            d[k] = round(Float64(v); sigdigits = 6)
+        end
+    end
+    lastf(v) = (v === nothing || isempty(v)) ? nothing : last(v)
+    function bestf(v, red)
+        (v === nothing || isempty(v)) && return nothing
+        fv = filter(isfinite, v)
+        isempty(fv) ? nothing : red(fv)
+    end
+
+    root = Dict{String, Any}()
+
+    run_t = Dict{String, Any}()
+    putf!(run_t, "n_params",               run_meta.n_params)
+    putf!(run_t, "train_duration_s",       run_meta.train_duration_s)
+    putf!(run_t, "val_rollout_duration_s", run_meta.val_rollout_duration_s)
+    putf!(run_t, "val_n_timesteps",        run_meta.val_n_timesteps)
+    putf!(run_t, "epochs_run",             losses.stopped_epoch)
+    putf!(run_t, "best_epoch",             losses.best_epoch)
+    root["run"] = run_t
+
+    loss_t = Dict{String, Any}()
+    putf!(loss_t, "final_train_rollout", lastf(losses.train_rollout))
+    putf!(loss_t, "final_val_rollout",   lastf(losses.val_rollout))
+    putf!(loss_t, "best_val_rollout",    bestf(losses.val_rollout, minimum))
+    putf!(loss_t, "final_train_1step",   lastf(losses.train_1step))
+    putf!(loss_t, "final_val_1step",     lastf(losses.val_1step))
+    putf!(loss_t, "final_train_q_1step", lastf(losses.train_q_1step))
+    putf!(loss_t, "final_val_q_1step",   lastf(losses.val_q_1step))
+    putf!(loss_t, "final_train_h_1step", lastf(losses.train_h_1step))
+    putf!(loss_t, "final_val_h_1step",   lastf(losses.val_h_1step))
+    root["loss"] = loss_t
+
+    stab_t = Dict{String, Any}()
+    putf!(stab_t, "final_grad_norm", lastf(losses.grad_norm))
+    putf!(stab_t, "max_grad_norm",   bestf(losses.grad_norm, maximum))
+    putf!(stab_t, "final_lr",        lastf(losses.lr))
+    putf!(stab_t, "final_amp",       lastf(losses.val_amp))
+    putf!(stab_t, "final_mb_gain",   lastf(losses.mb_gain))
+    putf!(stab_t, "n_nonfinite_skips", get(losses, :n_nonfinite_skips, nothing))
+    putf!(stab_t, "n_backoffs",        get(losses, :n_backoffs, nothing))
+    stopped_early = get(losses, :stopped_early, nothing)
+    stopped_early === nothing || (stab_t["stopped_early"] = stopped_early)
+    root["training_stability"] = stab_t
+
+    fh_t = Dict{String, Any}()
+    putf!(fh_t, "horizon",          ts.eval_horizon)
+    putf!(fh_t, "final_val_rmse",   lastf(losses.val_fixed_rmse))
+    putf!(fh_t, "best_val_rmse",    bestf(losses.val_fixed_rmse, minimum))
+    putf!(fh_t, "final_peak_ratio", lastf(losses.val_peak_ratio))
+    root["fixed_horizon"] = fh_t
+
+    if spatial_summary !== nothing
+        sp_t = Dict{String, Any}()
+        for (vname, mdict) in spatial_summary
+            var_t = Dict{String, Any}()
+            for (m, s) in mdict
+                putf!(var_t, m, s.median)
+            end
+            sp_t[vname] = var_t
+        end
+        root["spatial_median"] = sp_t
+    end
+
+    if ramp !== nothing
+        ramp_t = Dict{String, Any}()
+        putf!(ramp_t, "n",            ramp.n)
+        putf!(ramp_t, "pearson_e_g",  ramp.pearson_e_g)
+        putf!(ramp_t, "pearson_op_g", ramp.pearson_op_g)
+        putf!(ramp_t, "spearman_e_g", ramp.spearman_e_g)
+        root["ramp"] = ramp_t
+    end
+
+    mkpath(dirname(abspath(path)))
+    open(path, "w") do io
+        TOML.print(io, root)
+    end
+    return path
 end
 
 """
@@ -369,15 +481,26 @@ Steps:
    and split into train / val / test using `ds.train_frac` / `ds.val_frac`.
 3. Build a `WflowGNN` from `ms` and train it with `train_model!`.
 4. Save all artefacts under `<ds.runs_dir>/<ds.run_name>/`:
-       data_settings.toml
-       model_settings.toml
-       train_settings.toml
-       norm_stats.toml
-       model.jld2
-       data/
-           train.jld2
-           val.jld2
-           test.jld2
+       model/
+           data_settings.toml
+           model_settings.toml
+           train_settings.toml
+           norm_stats.toml
+           model.jld2
+       metrics/
+           metrics.toml
+           *.csv
+       plots/
+           *.png
+           *.mp4
+       output/
+           train_pred.nc, train_true.nc, val_pred.nc, val_true.nc
+           spatial_metrics.nc
+           data/
+               grid.jld2
+               train.jld2
+               val.jld2
+               test.jld2
 
 Returns `(model, metrics)` where `metrics` is a `NamedTuple` with fields:
 - `final_train_loss`            : rollout train loss at the last epoch
@@ -465,6 +588,14 @@ function run_wflow_gnn(ds::DataSettings, ms::ModelSettings, ts::TrainSettings)
 
     run_dir = joinpath(ds.runs_dir, ds.run_name)
     mkpath(run_dir)
+    model_dir   = joinpath(run_dir, "model")
+    metrics_dir = joinpath(run_dir, "metrics")
+    plots_dir   = joinpath(run_dir, "plots")
+    output_dir  = joinpath(run_dir, "output")
+    mkpath(model_dir)
+    mkpath(metrics_dir)
+    mkpath(plots_dir)
+    mkpath(output_dir)
 
     # Fixed-horizon validation metric (constant-length rollout from anchors),
     # comparable epoch-to-epoch and used for early stopping when enabled.
@@ -477,17 +608,24 @@ function run_wflow_gnn(ds::DataSettings, ms::ModelSettings, ts::TrainSettings)
     # when requested, run the same full evaluation used at the end of training.
     checkpoint_callback = ts.checkpoint_every > 0 ?
         function (m, epoch)
-            ckpt_dir = joinpath(run_dir, "checkpoints", @sprintf("epoch_%04d", epoch))
-            mkpath(ckpt_dir)
+            ckpt_dir     = joinpath(model_dir, "checkpoints", @sprintf("epoch_%04d", epoch))
+            ckpt_model   = joinpath(ckpt_dir, "model")
+            ckpt_metrics = joinpath(ckpt_dir, "metrics")
+            ckpt_plots   = joinpath(ckpt_dir, "plots")
+            ckpt_output  = joinpath(ckpt_dir, "output")
+            mkpath(ckpt_model)
+            mkpath(ckpt_metrics)
+            mkpath(ckpt_plots)
+            mkpath(ckpt_output)
             cpu_ckpt = Flux.cpu(m)
-            JLD2.jldsave(joinpath(ckpt_dir, "model.jld2");
+            JLD2.jldsave(joinpath(ckpt_model, "model.jld2");
                          model_state = Flux.state(cpu_ckpt))
             @info "Saved checkpoint (epoch $epoch) → $ckpt_dir"
             if ts.checkpoint_full_eval
                 @info "Running full evaluation for checkpoint epoch $epoch"
                 evaluate_and_write(m, dataset, norm_stats, grid, postscale,
                                    static_arr, ms, ts, output_file, staticmaps_file,
-                                   all_times, schema, ckpt_dir)
+                                   all_times, schema, ckpt_output, ckpt_plots, ckpt_metrics)
             end
         end : nothing
 
@@ -514,24 +652,24 @@ function run_wflow_gnn(ds::DataSettings, ms::ModelSettings, ts::TrainSettings)
 
     # --- 5. Persist artefacts ---
     @info "Saving artefacts to $(run_dir)"
-    data_dir = joinpath(run_dir, "data")
+    data_dir = joinpath(output_dir, "data")
     mkpath(data_dir)
 
-    save_data_settings( joinpath(run_dir, "data_settings.toml"),  ds)
-    save_model_settings(joinpath(run_dir, "model_settings.toml"), ms)
-    save_train_settings(joinpath(run_dir, "train_settings.toml"), ts)
+    save_data_settings( joinpath(model_dir, "data_settings.toml"),  ds)
+    save_model_settings(joinpath(model_dir, "model_settings.toml"), ms)
+    save_train_settings(joinpath(model_dir, "train_settings.toml"), ts)
 
     # Normalisation statistics
     stats_dict = Dict(
         var => Dict("mean" => Float64(s.mean), "std" => Float64(s.std))
         for (var, s) in norm_stats
     )
-    open(joinpath(run_dir, "norm_stats.toml"), "w") do io
+    open(joinpath(model_dir, "norm_stats.toml"), "w") do io
         TOML.print(io, stats_dict)
     end
 
     # Model weights (always saved on CPU)
-    JLD2.jldsave(joinpath(run_dir, "model.jld2");
+    JLD2.jldsave(joinpath(model_dir, "model.jld2");
                  model_state = Flux.state(Flux.cpu(model)))
 
     # Training loss curves
@@ -540,20 +678,26 @@ function run_wflow_gnn(ds::DataSettings, ms::ModelSettings, ts::TrainSettings)
                 val_q_1step   = losses.val_q_1step,
                 train_h_1step = losses.train_h_1step,
                 val_h_1step   = losses.val_h_1step,
-                path = joinpath(run_dir, "losses.png"))
+                grad_norm = get(losses, :grad_norm, nothing),
+                lr        = get(losses, :lr, nothing),
+                steps     = get(losses, :steps, nothing),
+                path     = joinpath(plots_dir, "losses.png"),
+                csv_path = joinpath(metrics_dir, "losses.csv"))
 
     # Q→H error amplification diagnostic (mass-balance runs only)
     if haskey(losses, :train_amp) && any(isfinite, losses.train_amp)
         plot_amplification(losses.train_amp, losses.val_amp;
                            mb_gain = get(losses, :mb_gain, nothing),
-                           path = joinpath(run_dir, "amplification.png"))
+                           path     = joinpath(plots_dir, "amplification.png"),
+                           csv_path = joinpath(metrics_dir, "amplification.csv"))
     end
 
     # Fixed-horizon validation metric (discharge RMSE + peak ratio per epoch)
     if haskey(losses, :val_fixed_rmse) && any(isfinite, losses.val_fixed_rmse)
         plot_fixed_horizon(losses.val_fixed_rmse, losses.val_peak_ratio;
                            horizon = ts.eval_horizon,
-                           path    = joinpath(run_dir, "fixed_horizon.png"))
+                           path    = joinpath(plots_dir, "fixed_horizon.png"),
+                           csv_path = joinpath(metrics_dir, "fixed_horizon.csv"))
     end
 
     # Grid lookup table (node index → raster position)
@@ -573,9 +717,21 @@ function run_wflow_gnn(ds::DataSettings, ms::ModelSettings, ts::TrainSettings)
     cpu_model = Flux.cpu(model)
     n_params  = sum(length, Flux.trainables(cpu_model))
 
-    val_rollout_duration, val_n_timesteps = evaluate_and_write(
+    eval_out = evaluate_and_write(
         model, dataset, norm_stats, grid, postscale, static_arr, ms, ts,
-        output_file, staticmaps_file, all_times, schema, run_dir)
+        output_file, staticmaps_file, all_times, schema, output_dir, plots_dir, metrics_dir)
+    val_rollout_duration = eval_out.val_rollout_duration
+    val_n_timesteps      = eval_out.val_n_timesteps
+
+    # Scalar per-run summary (token-cheap single file for evaluation agents):
+    # final/best training-history metrics + aggregated spatial-error and
+    # overprediction-vs-ramp diagnostics, so no CSV/NetCDF parsing is needed.
+    write_run_metrics_toml(joinpath(metrics_dir, "metrics.toml"), losses, ts,
+                           (; n_params,
+                              train_duration_s       = train_duration,
+                              val_rollout_duration_s = val_rollout_duration,
+                              val_n_timesteps        = val_n_timesteps),
+                           eval_out.spatial_summary, eval_out.ramp)
 
     metrics = (
         final_train_loss           = last(train_rollout),

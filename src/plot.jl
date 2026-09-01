@@ -42,9 +42,13 @@ Arguments:
                     (format inferred from the extension, e.g. `.png`, `.pdf`).
 - `csv`           : when `true` (default) and a `path` (or `csv_path`) is
                     available, the plotted per-epoch loss arrays are written to
-                    a CSV file alongside the figure.
+                    a CSV file alongside the figure, together with any supplied
+                    `grad_norm`, `lr` and `steps` diagnostic columns.
 - `csv_path`      : optional explicit CSV output path; defaults to `path` with
                     its extension swapped for `.csv`.
+- `grad_norm`,
+  `lr`, `steps`   : optional per-epoch training-log diagnostics; when supplied
+                    they are appended as extra columns to the CSV (not plotted).
 
 Returns the `Figure` object.
 """
@@ -53,6 +57,9 @@ function plot_losses(train_rollout, val_rollout, train_1step, val_1step;
                      val_q_1step   = nothing,
                      train_h_1step = nothing,
                      val_h_1step   = nothing,
+                     grad_norm = nothing,
+                     lr        = nothing,
+                     steps     = nothing,
                      path = nothing,
                      csv  = true,
                      csv_path = nothing)
@@ -101,6 +108,16 @@ function plot_losses(train_rollout, val_rollout, train_1step, val_1step;
         if has_components
             append!(header, ["train_q_1step", "val_q_1step", "train_h_1step", "val_h_1step"])
             push!(columns, train_q_1step, val_q_1step, train_h_1step, val_h_1step)
+        end
+        # Extra per-epoch training-log diagnostics (CSV-only, not plotted here).
+        if !isnothing(grad_norm) && !isempty(grad_norm)
+            push!(header, "grad_norm"); push!(columns, grad_norm)
+        end
+        if !isnothing(lr) && !isempty(lr)
+            push!(header, "lr"); push!(columns, lr)
+        end
+        if !isnothing(steps) && !isempty(steps)
+            push!(header, "steps"); push!(columns, steps)
         end
         _write_plot_csv(csv_out, header, columns)
     end
@@ -546,8 +563,13 @@ Four rows:
 
 The verification line in row 2 answers whether the equation itself is correct:
 if `MB(true Q)` ≈ `true H`, the formulation is sound.
+
+When `csv` is `true` (default) and a `path` (or `csv_path`) is available, the
+plotted per-timestep reductions — the median (and p10/p90 for the Q/H series) of
+every diagnostic term — are written to a companion CSV alongside the figure.
 """
-function plot_mb_diagnostics(diags; path=nothing, timestamps=nothing)
+function plot_mb_diagnostics(diags; path=nothing, timestamps=nothing,
+                             csv=true, csv_path=nothing)
     T  = size(diags.pred_q, 2)
     xs = 1:T
 
@@ -632,6 +654,32 @@ function plot_mb_diagnostics(diags; path=nothing, timestamps=nothing)
     # Fix legend column width so all panels share the same plot area
     colsize!(fig.layout, 2, Fixed(160))
     isnothing(path) || save(path, fig)
+
+    # Companion CSV: per-timestep median (and p10/p90 for the Q/H series)
+    # reductions of every plotted diagnostic term.
+    csv_out = isnothing(csv_path) ? _csv_from_path(path) : csv_path
+    if csv && !isnothing(csv_out)
+        header  = String["timestep"]
+        columns = Any[collect(xs)]
+        if !isnothing(timestamps) && length(timestamps) >= T
+            push!(header, "timestamp"); push!(columns, string.(timestamps[1:T]))
+        end
+        for (name, series) in (("pred_q", diags.pred_q),
+                               ("true_q", diags.true_q),
+                               ("pred_h", diags.pred_h),
+                               ("true_h", diags.true_h),
+                               ("mb_verify_h", diags.mb_verify_h))
+            med, lo_, hi_ = pct(series)
+            append!(header, ["$(name)_med", "$(name)_p10", "$(name)_p90"])
+            push!(columns, med, lo_, hi_)
+        end
+        append!(header, ["upstream_q_med", "inwater_med", "net_flux_med",
+                         "h_raw_med", "frac_h_raw_neg"])
+        push!(columns, nanmedian(diags.upstream_q), nanmedian(diags.inwater),
+                       nanmedian(diags.net_flux), nanmedian(diags.h_raw), frac_neg)
+        _write_plot_csv(csv_out, header, columns)
+    end
+
     return fig
 end
 
