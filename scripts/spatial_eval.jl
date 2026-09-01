@@ -1,21 +1,22 @@
 # Spatial performance evaluation for a trained WflowRoutingGNN experiment.
 #
 # Operates on the gridded prediction/truth NetCDFs that `run_wflow_gnn` already
-# writes (`<split>_pred.nc` / `<split>_true.nc`), so it can be run post-hoc on
-# any existing experiment without retraining.
+# writes (`output/<split>_pred.nc` / `output/<split>_true.nc`), so it can be run
+# post-hoc on any existing experiment without retraining.
 #
 # It produces, in the experiment directory:
-#   <split>_spatial_metrics.nc   — per-cell RMSE, bias, overpred. freq, peak
+#   output/<split>_spatial_metrics.nc   — per-cell RMSE, bias, overpred. freq, peak
 #                                  error, normalised bias, NSE (lon×lat maps)
-#   <split>_spatial_metrics.png  — those maps rendered as heatmaps
-#   <split>_q_overpred_vs_ramp.png / .csv — Q overprediction vs the true ramp
+#   plots/<split>_spatial_metrics.png   — those maps rendered as heatmaps
+#   plots/<split>_q_overpred_vs_ramp.png + metrics/<split>_q_overpred_vs_ramp.csv
+#                                  Q overprediction vs the true ramp
 #                                  rate g = (Qt−Qt-1)/Qt (scatter, per-class
 #                                  bars, per-cell corr map, Pearson/Spearman)
 #
 # Usage:
 #   julia --project=. scripts/spatial_eval.jl <experiment_dir> [split]
-#     <experiment_dir> : folder containing <split>_pred.nc / <split>_true.nc and
-#                        model_settings.toml / data_settings.toml
+#     <experiment_dir> : folder containing output/<split>_pred.nc /
+#                        output/<split>_true.nc and model/*.toml
 #     [split]          : "val" (default) or "train"
 
 using WflowRoutingGNN
@@ -53,14 +54,21 @@ function main()
     split   = length(ARGS) >= 2 ? ARGS[2] : "val"
     isdir(exp_dir) || error("not a directory: $exp_dir")
 
-    ms = load_model_settings(joinpath(exp_dir, "model_settings.toml"))
-    ds = load_data_settings(joinpath(exp_dir, "data_settings.toml"))
+    ms = load_model_settings(joinpath(exp_dir, "model", "model_settings.toml"))
+    ds = load_data_settings(joinpath(exp_dir, "model", "data_settings.toml"))
     schema = load_schema(ds.wflow_schema)
     staticmaps_file = resolve_staticmaps(ds.wflow_model_path, exp_dir)
 
+    plots_dir   = joinpath(exp_dir, "plots")
+    metrics_dir = joinpath(exp_dir, "metrics")
+    output_dir  = joinpath(exp_dir, "output")
+    mkpath(plots_dir)
+    mkpath(metrics_dir)
+    mkpath(output_dir)
+
     state_vars = DOMAIN_VARS[ms.domain]["state"]
-    pred_path  = joinpath(exp_dir, "$(split)_pred.nc")
-    true_path  = joinpath(exp_dir, "$(split)_true.nc")
+    pred_path  = joinpath(output_dir, "$(split)_pred.nc")
+    true_path  = joinpath(output_dir, "$(split)_true.nc")
     isfile(pred_path) || error("missing $pred_path")
     isfile(true_path) || error("missing $true_path")
 
@@ -72,11 +80,15 @@ function main()
     @info "Computing per-cell spatial error metrics"
     metrics = spatial_error_metrics(p_grids, t_grids, ms.domain)
 
-    nc_out = joinpath(exp_dir, "$(split)_spatial_metrics.nc")
+    nc_out = joinpath(output_dir, "$(split)_spatial_metrics.nc")
     write_spatial_metrics_to_netcdf(metrics, staticmaps_file, nc_out; schema)
     @info "Wrote $nc_out"
 
-    png_out = joinpath(exp_dir, "$(split)_spatial_metrics.png")
+    csv_out = joinpath(metrics_dir, "$(split)_spatial_metrics.csv")
+    write_spatial_metrics_to_csv(metrics, csv_out)
+    @info "Wrote $csv_out"
+
+    png_out = joinpath(plots_dir, "$(split)_spatial_metrics.png")
     plot_spatial_metrics(metrics, ms.domain; path = png_out)
     @info "Wrote $png_out"
 
@@ -97,9 +109,10 @@ function main()
     if "river_q" in state_vars
         @info "Analysing Q overprediction vs ramp rate"
         ramp = overprediction_vs_ramp(p_grids, t_grids)
-        rc_png = joinpath(exp_dir, "$(split)_q_overpred_vs_ramp.png")
-        plot_overprediction_vs_ramp(ramp; path = rc_png)
-        @info "Wrote $rc_png (+ .csv)"
+        rc_png = joinpath(plots_dir, "$(split)_q_overpred_vs_ramp.png")
+        rc_csv = joinpath(metrics_dir, "$(split)_q_overpred_vs_ramp.csv")
+        plot_overprediction_vs_ramp(ramp; path = rc_png, csv_path = rc_csv)
+        @info "Wrote $rc_png and $rc_csv"
 
         println("\n=== Q overprediction vs ramp g=(Qt-Qt-1)/Qt ($(split)) ===")
         @printf("pairs=%d  Pearson(e,g)=%.3f  Pearson(max(e,0),g)=%.3f  Spearman(e,g)=%.3f\n",

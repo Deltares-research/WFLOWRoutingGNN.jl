@@ -25,14 +25,15 @@ using Dates
 
 length(ARGS) >= 1 || error("usage: regen_mb_diagnostics.jl <experiment_dir> [out.png]")
 const EXP_DIR = ARGS[1]
-const OUT_PNG = length(ARGS) >= 2 ? ARGS[2] : joinpath(EXP_DIR, "mb_diagnostics.png")
+const OUT_PNG = length(ARGS) >= 2 ? ARGS[2] : joinpath(EXP_DIR, "plots", "mb_diagnostics.png")
+const OUT_CSV = joinpath(EXP_DIR, "metrics", "mb_diagnostics.csv")
 
 config_path = joinpath(EXP_DIR, "config.toml")
-model_path  = joinpath(EXP_DIR, "model.jld2")
-val_path    = joinpath(EXP_DIR, "data", "val.jld2")
+model_path  = joinpath(EXP_DIR, "model", "model.jld2")
+val_path    = joinpath(EXP_DIR, "output", "data", "val.jld2")
 isfile(config_path) || error("config.toml not found in $EXP_DIR")
 isfile(model_path)  || error("model.jld2 not found in $EXP_DIR")
-isfile(val_path)    || error("data/val.jld2 not found in $EXP_DIR")
+isfile(val_path)    || error("output/data/val.jld2 not found in $EXP_DIR")
 
 @info "Loading config from $config_path"
 ds, ms, ts = parse_run_config(config_path)
@@ -59,5 +60,5 @@ split_data = JLD2.load(val_path, "data")
 @info "Computing mass balance diagnostics …"
 mb_diags = rollout_mb_diagnostics(model, split_data, static_arr)
 
-plot_mb_diagnostics(mb_diags; path = OUT_PNG)
-@info "Wrote $OUT_PNG"
+plot_mb_diagnostics(mb_diags; path = OUT_PNG, csv_path = OUT_CSV)
+@info "Wrote $OUT_PNG and $OUT_CSV"

@@ -17,7 +17,13 @@ Read:
 - docs/PERFORMANCE.md
 - docs/DECISIONS.md
 - docs/CHANGELOG.md
+- experiments
+- scripts
 - src
+
+Write:
+
+- docs/PERFORMANCE.md
 
 ## Responsibilities
 
@@ -26,6 +32,29 @@ Read:
 - Detect (in)efficient usage of dynamic dispatch
 - Assess memory footprint
 - Assess scalability
+
+Primary performance artefacts to read first (metrics-first workflow):
+
+- experiments/<run>/metrics/performance.toml: persisted benchmark summaries from scripts/benchmark_rollout.jl and scripts/benchmark_inference_vs_train.jl.
+- experiments/<run>/metrics/metrics.toml: coarse end-to-end training and validation rollout durations.
+
+When more detail is needed, consult:
+
+- scripts/benchmark_rollout.jl: rollout-speed benchmark methodology and options.
+- scripts/benchmark_inference_vs_train.jl: forward vs backward vs full-train-step decomposition.
+
+If no performance.toml exists for a run, state that runtime evidence is missing and avoid claiming measured speed/allocations from source inspection alone.
+
+Tooling requirement:
+
+- Performance claims about allocations, type stability, dynamic dispatch, memory footprint, and scalability require runtime evidence (benchmark/profiling outputs and/or terminal execution), not source inspection alone.
+
+Execution permissions:
+
+- You may run performance benchmark scripts and profiling commands when needed to collect runtime evidence.
+- Prefer these scripts first: scripts/benchmark_rollout.jl and scripts/benchmark_inference_vs_train.jl.
+- Persist benchmark outputs to experiments/<run>/metrics/performance.toml (default script behavior) and base conclusions on those artefacts.
+- If execution is unavailable, state that explicitly and report only evidence already present in performance.toml / metrics.toml.
 
 ## Required Response Structure
 

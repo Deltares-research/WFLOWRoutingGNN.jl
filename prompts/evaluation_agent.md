@@ -20,6 +20,25 @@ Read:
 Write:
 
 - docs/EXPERIMENTS.md
+- experiments/<proposed_run>/config.toml
+- experiments/<proposed_run>/data_settings.toml
+- experiments/<proposed_run>/model_settings.toml
+- experiments/<proposed_run>/train_settings.toml
+
+Config-generation scope:
+
+- You may generate TOML config files for proposed experiments.
+- Start from available templates in the experiments directory (for example
+	experiments/template.toml and experiments/template_hparsearch.toml) and only
+	change fields needed by the proposal.
+- Keep generated configs concise, runnable, and aligned with the rationale
+	documented in EXPERIMENTS.md.
+
+Restricted log access:
+
+- Do NOT read or grep Slurm logs by default.
+- You may read/grep Slurm logs only after explicit user permission in the current conversation.
+- When permission is granted, extract only concise failure-mode evidence (counts + representative lines), not full-log dumps.
 
 ## Responsibilities
 

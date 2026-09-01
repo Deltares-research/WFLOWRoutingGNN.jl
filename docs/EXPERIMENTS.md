@@ -4,6 +4,47 @@ Experiment configs live under `experiments/`. Newest at the top.
 
 ---
 
+## Small-basin stability-lever sensitivity — `sava_small_v081_s2_stability` (PROPOSED — no results yet)
+
+**Status:** config staged at
+[experiments/sava_small_v081_s2_stability/config.toml](../experiments/sava_small_v081_s2_stability/config.toml);
+not yet run.
+
+**Purpose.** The small Sava basin already trains stably and converges (see
+`sava_small_v081_mb_sweep` below). This search measures whether the stability
+levers queued as full-basin divergence remedies ([TODO.md](TODO.md),
+[notes/peak_accuracy_todo.md](notes/peak_accuracy_todo.md)) *regress* that
+already-good baseline when they are not strictly needed — a cheap, config-only
+de-risk before those levers are trusted on the full basin. It does **not**
+attempt to reproduce the full-basin divergence (that is basin-scale /
+heavy-tail dependent and out of reach on the small basin).
+
+**Design.** `box` hparsearch, 2×2×2 factorial (8 runs), all else fixed at the
+`sava_small_v081_mb_sweep` MB-on baseline (8 layers, hidden 64, mlp 2, batch 8,
+MB on, `mb_theta = 1.0`):
+
+| Axis | Values | Question |
+|---|---|---|
+| `train.grad_clip` | `1.0` vs `0.1` | Does the aggressive tail-gradient clip regress small-basin peaks? |
+| `train.h_loss_scale` | `absolute` vs `increment` | Reconfirm the shipped q/h balance on a clean run |
+| `train.strategy` | full `[1,2,5,8,10]` vs short `[1,2,4]` | Isolate the rollout-depth contribution to stability |
+
+The baseline cell (`grad_clip = 1.0`, `absolute`, full curriculum) reproduces
+the archived `mb_sweep` MB-on run as a continuity anchor.
+
+**Selection signals.** `fixed_horizon.final_val_rmse`,
+`fixed_horizon.final_peak_ratio`, `training_stability.{n_backoffs,
+n_nonfinite_skips, max_grad_norm}`, `loss.final_val_1step`.
+
+**Caveat.** Short-curriculum cells run far fewer epochs (50 vs 250), so their
+absolute losses / wall-clock are not directly comparable to the full-curriculum
+cells — that axis is a deliberate stability probe, not a like-for-like accuracy
+comparison.
+
+**Results:** _pending._
+
+---
+
 # OLD STATUS AS OF 27-08-2026
 
 *Everything below this header predates the introduction of these structured

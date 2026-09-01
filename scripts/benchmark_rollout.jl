@@ -31,6 +31,8 @@ Options (all optional):
     --timesteps  N      Cap the number of rollout steps (default: whole window).
     --devices  LIST     Comma-separated devices to test: cpu,gpu
                         (default: cpu plus gpu when CUDA is functional).
+    --perf_out PATH     Optional performance TOML output path
+                        (default: <experiment_dir>/metrics/performance.toml).
 
 Example:
     julia --project=. scripts/benchmark_rollout.jl experiments/test_sava_v081 \
@@ -50,6 +52,7 @@ using NCDatasets
 using Statistics
 using Printf
 using Dates
+import TOML
 
 # ── CLI parsing ───────────────────────────────────────────────────────────────
 function parse_args(args)
@@ -74,8 +77,11 @@ const EXP_DIR, OPTS = parse_args(ARGS)
 # ── Load config + trained model ───────────────────────────────────────────────
 config_path = joinpath(EXP_DIR, "config.toml")
 isfile(config_path) || error("config.toml not found in $EXP_DIR")
-model_path  = joinpath(EXP_DIR, "model.jld2")
-isfile(model_path)  || error("model.jld2 not found in $EXP_DIR (is this a trained run?)")
+# Weights live in `<run>/model/model.jld2` (current layout); fall back to the
+# legacy flat `<run>/model.jld2` for older runs.
+model_path = joinpath(EXP_DIR, "model", "model.jld2")
+isfile(model_path) || (model_path = joinpath(EXP_DIR, "model.jld2"))
+isfile(model_path)  || error("model.jld2 not found in $EXP_DIR (looked in model/ and root; is this a trained run?)")
 
 @info "Loading experiment config from $config_path"
 ds, ms, ts = parse_run_config(config_path)
@@ -192,6 +198,67 @@ for dev in devices
     push!(results, (device = dev, mode = :ensemble, members = B,
                     total = r2.total_time, nsteps = r2.n_steps, stats = s2))
 end
+
+# ── Persist summary for downstream agents ────────────────────────────────────
+perf_out = get(OPTS, "perf_out", joinpath(EXP_DIR, "metrics", "performance.toml"))
+
+_round6(x) = (x isa Real && isfinite(x)) ? round(Float64(x); sigdigits = 6) : x
+
+function _load_toml_or_empty(path)
+    if isfile(path)
+        try
+            return TOML.parsefile(path)
+        catch err
+            @warn "Could not parse existing performance TOML at $path; overwriting with fresh content." exception=(err, catch_backtrace())
+        end
+    end
+    return Dict{String,Any}()
+end
+
+function _dump_stats(st)
+    Dict("n" => st.n,
+         "min_ms" => _round6(st.min),
+         "median_ms" => _round6(st.median),
+         "mean_ms" => _round6(st.mean),
+         "std_ms" => _round6(st.std),
+         "max_ms" => _round6(st.max))
+end
+
+rollout_tbl = Dict{String,Any}(
+    "timestamp" => string(now()),
+    "experiment_dir" => EXP_DIR,
+    "window_steps" => T,
+    "n_nodes" => N,
+    "ensemble_members" => B,
+    "cuda_functional" => CUDA.functional(),
+)
+
+for r in results
+    key = "$(r.device)_$(r.mode)"
+    rollout_tbl[key] = Dict(
+        "members" => r.members,
+        "total_s" => _round6(r.total),
+        "nsteps" => r.nsteps,
+        "per_step_per_member_ms" => _dump_stats(r.stats),
+    )
+end
+
+for dev in devices
+    single = findfirst(r -> r.device == dev && r.mode == :single,   results)
+    ens    = findfirst(r -> r.device == dev && r.mode == :ensemble, results)
+    if !isnothing(single) && !isnothing(ens)
+        sp = results[single].stats.median / results[ens].stats.median
+        rollout_tbl["$(dev)_ensemble_speedup_vs_single"] = _round6(sp)
+    end
+end
+
+root = _load_toml_or_empty(perf_out)
+root["rollout_benchmark"] = rollout_tbl
+mkpath(dirname(abspath(perf_out)))
+open(perf_out, "w") do io
+    TOML.print(io, root)
+end
+@info "Wrote rollout benchmark summary to $perf_out"
 
 # ── Report ────────────────────────────────────────────────────────────────────
 println()

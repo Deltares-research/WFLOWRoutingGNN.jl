@@ -30,6 +30,8 @@ Options (all optional):
     --index      K      Which timestep (graph index) to benchmark  (default: 1).
     --devices  LIST     Comma-separated devices: cpu,gpu
                         (default: cpu plus gpu when CUDA is functional).
+    --perf_out PATH     Optional performance TOML output path
+                        (default: <experiment_dir>/metrics/performance.toml).
 
 Example:
     julia --project=. scripts/benchmark_inference_vs_train.jl experiments/test_sava_v081 \
@@ -47,12 +49,14 @@ using CUDA
 using JLD2
 using Statistics
 using Printf
+using Dates
+import TOML
 
 # ── CLI parsing ───────────────────────────────────────────────────────────────
 function parse_args(args)
     isempty(args) && error("usage: benchmark_inference_vs_train.jl <experiment_dir> " *
                            "[--staticmaps ..] [--output ..] [--reps N] [--warmup N] " *
-                           "[--index K] [--devices cpu,gpu]")
+                           "[--index K] [--devices cpu,gpu] [--perf_out PATH]")
     exp_dir = args[1]
     opts = Dict{String,String}()
     i = 2
@@ -72,8 +76,11 @@ const EXP_DIR, OPTS = parse_args(ARGS)
 # ── Load config + trained model ───────────────────────────────────────────────
 config_path = joinpath(EXP_DIR, "config.toml")
 isfile(config_path) || error("config.toml not found in $EXP_DIR")
-model_path  = joinpath(EXP_DIR, "model.jld2")
-isfile(model_path)  || error("model.jld2 not found in $EXP_DIR (is this a trained run?)")
+# Weights live in `<run>/model/model.jld2` (current layout); fall back to the
+# legacy flat `<run>/model.jld2` for older runs.
+model_path = joinpath(EXP_DIR, "model", "model.jld2")
+isfile(model_path) || (model_path = joinpath(EXP_DIR, "model.jld2"))
+isfile(model_path)  || error("model.jld2 not found in $EXP_DIR (looked in model/ and root; is this a trained run?)")
 
 @info "Loading experiment config from $config_path"
 ds, ms, ts = parse_run_config(config_path)
@@ -216,6 +223,69 @@ for dev in devices
     push!(results, (device = dev, kind = "fwd+bwd (gradient)",    t = t_grad))
     push!(results, (device = dev, kind = "full train step",       t = t_step))
 end
+
+# ── Persist summary for downstream agents ────────────────────────────────────
+perf_out = get(OPTS, "perf_out", joinpath(EXP_DIR, "metrics", "performance.toml"))
+
+_round6(x) = (x isa Real && isfinite(x)) ? round(Float64(x); sigdigits = 6) : x
+
+function _load_toml_or_empty(path)
+    if isfile(path)
+        try
+            return TOML.parsefile(path)
+        catch err
+            @warn "Could not parse existing performance TOML at $path; overwriting with fresh content." exception=(err, catch_backtrace())
+        end
+    end
+    return Dict{String,Any}()
+end
+
+ivt_tbl = Dict{String,Any}(
+    "timestamp" => string(now()),
+    "experiment_dir" => EXP_DIR,
+    "graph_index" => idx,
+    "n_nodes" => graphs[idx].num_nodes,
+    "horizon_steps" => nsteps,
+    "reps" => reps,
+    "warmup" => warmup,
+    "cuda_functional" => CUDA.functional(),
+)
+
+for r in results
+    s = statline(r.t)
+    key = replace(lowercase(r.kind), r"[^a-z0-9]+" => "_")
+    ivt_tbl["$(r.device)_$(key)"] = Dict(
+        "min_ms" => _round6(s.min),
+        "median_ms" => _round6(s.median),
+        "mean_ms" => _round6(s.mean),
+        "std_ms" => _round6(s.std),
+        "max_ms" => _round6(s.max),
+    )
+end
+
+for dev in devices
+    fi = findfirst(r -> r.device == dev && r.kind == "forward (pure model)", results)
+    ri = findfirst(r -> r.device == dev && r.kind == "rollout step",         results)
+    gi = findfirst(r -> r.device == dev && r.kind == "fwd+bwd (gradient)",   results)
+    si = findfirst(r -> r.device == dev && r.kind == "full train step",      results)
+    if !isnothing(fi) && !isnothing(ri) && !isnothing(gi) && !isnothing(si)
+        f = median(results[fi].t); r = median(results[ri].t)
+        g = median(results[gi].t); s = median(results[si].t)
+        ivt_tbl["$(dev)_ratios"] = Dict(
+            "rollout_over_forward" => _round6(r / f),
+            "gradient_over_forward" => _round6(g / f),
+            "train_step_over_forward" => _round6(s / f),
+        )
+    end
+end
+
+root = _load_toml_or_empty(perf_out)
+root["inference_vs_train_benchmark"] = ivt_tbl
+mkpath(dirname(abspath(perf_out)))
+open(perf_out, "w") do io
+    TOML.print(io, root)
+end
+@info "Wrote inference-vs-train benchmark summary to $perf_out"
 
 # ── Report ────────────────────────────────────────────────────────────────────
 println()
