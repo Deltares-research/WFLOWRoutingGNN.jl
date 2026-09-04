@@ -102,7 +102,12 @@ function parse_run_config(toml_path::String)
     strategy = TrainingStrategy(
         get(sd, "steps",       [1]),
         get(sd, "durations",   [td["epochs"]]),
-        get(sd, "noise_scale", 0.0),
+        get(sd, "noise_scale", 0.0);
+        loss_type = Symbol(get(sd, "loss_type", "mse")),
+        peak_delta = get(sd, "peak_delta", 1.0),
+        peak_lambda = get(sd, "peak_lambda", 0.0),
+        peak_gamma = get(sd, "peak_gamma", 1.0),
+        peak_w_max = get(sd, "peak_w_max", 4.0),
     )
     ts = TrainSettings(
         epochs           = td["epochs"],
@@ -236,9 +241,10 @@ Shared by [`run_wflow_gnn`](@ref) for the final model and, when
 `ts.checkpoint_full_eval` is set, for each periodic checkpoint.
 
 Returns a `NamedTuple` `(; val_rollout_duration, val_n_timesteps,
-spatial_summary, ramp)`; the last two feed the per-run `metrics.toml` summary
-(`spatial_summary` from [`spatial_metric_summary`](@ref), `ramp` from
-[`overprediction_vs_ramp`](@ref)) and are `nothing` when not applicable.
+spatial_summary, ramp, river_q_perf)`; the last three feed the per-run
+`metrics.toml` summary (`spatial_summary` from [`spatial_metric_summary`](@ref),
+`ramp` from [`overprediction_vs_ramp`](@ref), `river_q_perf` from
+[`river_q_performance_metrics`](@ref)) and are `nothing` when not applicable.
 """
 function evaluate_and_write(model, dataset, norm_stats, grid, postscale,
                             static_arr, ms::ModelSettings, ts::TrainSettings,
@@ -251,6 +257,7 @@ function evaluate_and_write(model, dataset, norm_stats, grid, postscale,
     val_n_timesteps      = 0
     spatial_summary      = nothing
     ramp_summary         = nothing
+    river_q_perf         = nothing
 
     for (split_name, split_data, t_offset) in (
             ("train", dataset.train, 0),
@@ -305,6 +312,14 @@ function evaluate_and_write(model, dataset, norm_stats, grid, postscale,
                     path     = joinpath(plots_dir, "q_overprediction_vs_ramp.png"),
                     csv_path = joinpath(metrics_dir, "q_overprediction_vs_ramp.csv"))
                 ramp_summary = ramp
+
+                qi = findfirst(==("river_q"), DOMAIN_VARS[ms.domain]["state"])
+                river_q_perf = river_q_performance_metrics(
+                    p_states[qi, :, :], t_states[qi, :, :], postscale["river_q"])
+                @info "River q performance — pooled: KGE=$(round(river_q_perf.pooled.kge; digits=3)) " *
+                      "MAE=$(round(river_q_perf.pooled.mae; digits=3))  |  " *
+                      "outlet gauge (node $(river_q_perf.gauge.outlet_idx)): " *
+                      "KGE=$(round(river_q_perf.gauge.kge; digits=3)) MAE=$(round(river_q_perf.gauge.mae; digits=3))"
             end
 
             if !isnothing(model.mass_balance)
@@ -369,21 +384,26 @@ function evaluate_and_write(model, dataset, norm_stats, grid, postscale,
         end
     end
 
-    return (; val_rollout_duration, val_n_timesteps, spatial_summary, ramp = ramp_summary)
+    return (; val_rollout_duration, val_n_timesteps, spatial_summary, ramp = ramp_summary,
+            river_q_perf)
 end
 
 """
-    write_run_metrics_toml(path, losses, ts, run_meta, spatial_summary, ramp) -> path
+    write_run_metrics_toml(path, losses, ts, run_meta, spatial_summary, ramp,
+                           river_q_perf) -> path
 
 Write a compact scalar summary of a completed run to `path` as TOML: the final
 (and best) values of the per-epoch training history, run metadata (`run_meta`),
-the median of each aggregated spatial-error metric per state variable, and the
-overprediction-vs-ramp correlations. Non-finite values are omitted so the file
+the median of each aggregated spatial-error metric per state variable, the
+overprediction-vs-ramp correlations, the Tier-2 river-discharge performance
+metrics (`river_q_perf` from [`river_q_performance_metrics`](@ref)) and, when
+`losses.loss_type == :huber`, the Tier-1 peak-loss diagnostics from
+[`peak_epoch_diagnostics`](@ref). Non-finite values are omitted so the file
 stays a valid, parser-friendly TOML of plain numbers — a token-cheap single-file
 entry point for downstream evaluation agents.
 """
 function write_run_metrics_toml(path::AbstractString, losses, ts::TrainSettings,
-                                run_meta, spatial_summary, ramp)
+                                run_meta, spatial_summary, ramp, river_q_perf = nothing)
     function putf!(d, k, v)
         v === nothing && return
         if v isa Integer
@@ -460,6 +480,43 @@ function write_run_metrics_toml(path::AbstractString, losses, ts::TrainSettings,
         putf!(ramp_t, "pearson_op_g", ramp.pearson_op_g)
         putf!(ramp_t, "spearman_e_g", ramp.spearman_e_g)
         root["ramp"] = ramp_t
+    end
+
+    if river_q_perf !== nothing
+        function _gauge_metrics!(d, m)
+            putf!(d, "kge",        m.kge)
+            putf!(d, "r",          m.r)
+            putf!(d, "alpha",      m.alpha)
+            putf!(d, "beta",       m.beta)
+            putf!(d, "mae",        m.mae)
+            putf!(d, "pbias",      m.pbias)
+            putf!(d, "peak_error", m.peak_error)
+            putf!(d, "peak_ratio", m.peak_ratio)
+            putf!(d, "fhv",        m.fhv)
+        end
+        rq_t     = Dict{String, Any}()
+        pooled_t = Dict{String, Any}()
+        _gauge_metrics!(pooled_t, river_q_perf.pooled)
+        rq_t["pooled"] = pooled_t
+        gauge_t = Dict{String, Any}()
+        putf!(gauge_t, "outlet_idx", river_q_perf.gauge.outlet_idx)
+        _gauge_metrics!(gauge_t, river_q_perf.gauge)
+        rq_t["gauge"] = gauge_t
+        root["river_q_performance"] = rq_t
+    end
+
+    if any(isfinite, get(losses, :peak_c_peak, Float32[]))
+        peak_t = Dict{String, Any}()
+        putf!(peak_t, "final_c_peak",        lastf(losses.peak_c_peak))
+        putf!(peak_t, "final_rmse_high",     lastf(losses.peak_rmse_high))
+        putf!(peak_t, "final_mae_high",      lastf(losses.peak_mae_high))
+        putf!(peak_t, "final_w_mean",        lastf(losses.peak_w_mean))
+        putf!(peak_t, "final_w_max",         lastf(losses.peak_w_max))
+        putf!(peak_t, "final_w_min",         lastf(losses.peak_w_min))
+        putf!(peak_t, "final_q_grad_norm",   lastf(losses.peak_q_grad_norm))
+        putf!(peak_t, "final_h_grad_norm",   lastf(losses.peak_h_grad_norm))
+        putf!(peak_t, "final_peak_grad_frac", lastf(losses.peak_grad_frac))
+        root["peak_loss"] = peak_t
     end
 
     mkpath(dirname(abspath(path)))
@@ -542,6 +599,19 @@ function run_wflow_gnn(ds::DataSettings, ms::ModelSettings, ts::TrainSettings)
                    n_train_windows, n_val_windows, n_test_windows, nhorizon)
     @info @sprintf("Window size: %d steps × %d nodes × (%d state + %d forcing) = %.1f KB  [%d static features shared]",
                    nhorizon, n_nodes, n_state, n_forcing, bytes_per_window / 1024, n_static)
+
+    # --- 2b. Per-node peak-loss stats (Huber loss only) ---
+    # Precomputed once from the training-period slice of `graphs` only (never
+    # val/test) — the `u_i`/`s_i` design notes call for. `loss_function`
+    # hardcodes state row 1 = q, row 2 = h (same convention already used by the
+    # mass-balance decoder), so only domains with >= 2 state variables are
+    # supported; other domains keep the coarse per-batch fallback threshold.
+    peak_stats = nothing
+    state_vars = DOMAIN_VARS[ms.domain]["state"]
+    if ts.strategy.loss_type == :huber && length(state_vars) >= 2
+        node_stats = peak_node_stats(graphs, ms.domain; frac_train = ds.train_frac)
+        peak_stats = (q = node_stats[state_vars[1]], h = node_stats[state_vars[2]])
+    end
 
     # --- 3. DataLoaders ---
     train_loader = DataLoader(dataset.train;
@@ -632,7 +702,8 @@ function run_wflow_gnn(ds::DataSettings, ms::ModelSettings, ts::TrainSettings)
     train_duration = @elapsed begin
         losses = train_model!(model, train_loader, val_loader, ts, static_arr;
                               fixed_eval          = fixed_eval,
-                              checkpoint_callback = checkpoint_callback)
+                              checkpoint_callback = checkpoint_callback,
+                              peak_stats          = peak_stats)
     end
 
     if CUDA.functional()
@@ -731,7 +802,7 @@ function run_wflow_gnn(ds::DataSettings, ms::ModelSettings, ts::TrainSettings)
                               train_duration_s       = train_duration,
                               val_rollout_duration_s = val_rollout_duration,
                               val_n_timesteps        = val_n_timesteps),
-                           eval_out.spatial_summary, eval_out.ramp)
+                           eval_out.spatial_summary, eval_out.ramp, eval_out.river_q_perf)
 
     metrics = (
         final_train_loss           = last(train_rollout),

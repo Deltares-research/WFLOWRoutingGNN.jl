@@ -222,6 +222,11 @@ function save_train_settings(path::String, s::TrainSettings)
             "steps"       => s.strategy.steps,
             "durations"   => s.strategy.durations,
             "noise_scale" => Float64(s.strategy.noise_scale),
+            "loss_type"   => String(s.strategy.loss_type),
+            "peak_delta"  => Float64(s.strategy.peak_delta),
+            "peak_lambda" => Float64(s.strategy.peak_lambda),
+            "peak_gamma"  => Float64(s.strategy.peak_gamma),
+            "peak_w_max"  => Float64(s.strategy.peak_w_max),
         ),
     )
     if !isnothing(s.val_daterange)
@@ -243,7 +248,12 @@ function load_train_settings(path::String)
     strategy = TrainingStrategy(
         convert(Vector{Int}, sd["steps"]),
         convert(Vector{Int}, sd["durations"]),
-        Float32(get(sd, "noise_scale", 0.0)),
+        Float32(get(sd, "noise_scale", 0.0));
+        loss_type = Symbol(get(sd, "loss_type", "mse")),
+        peak_delta = Float32(get(sd, "peak_delta", 1.0)),
+        peak_lambda = Float32(get(sd, "peak_lambda", 0.0)),
+        peak_gamma = Float32(get(sd, "peak_gamma", 1.0)),
+        peak_w_max = Float32(get(sd, "peak_w_max", 4.0)),
     )
     return TrainSettings(
         epochs        = d["epochs"],
@@ -353,6 +363,139 @@ _gn_sq(::Any)                      = 0.0
 _grad_l2norm(grads) = sqrt(_gn_sq(grads))
 
 # ---------------------------------------------------------------------------
+# Tier-1 peak-loss diagnostics (docs/notes/peak_accuracy_todo.md §2b Tier 1)
+# ---------------------------------------------------------------------------
+
+"""
+    peak_epoch_diagnostics(model, batch, strategy, static; peak_stats = nothing)
+        -> NamedTuple
+
+Tier-1 loss-tuning diagnostics for the `:huber` peak-weighted loss, computed
+on a single teacher-forced one-step prediction (`batch[1] → batch[2]`, as in
+[`loss_components`](@ref)):
+
+- `c_peak`               : fraction of the total (q + `h_loss_weight`·h)
+                           weighted Huber loss mass coming from cells above
+                           the peak threshold `u_i`.
+- `rmse_high`/`mae_high` : RMSE/MAE restricted to cells above `u_i` (pooled
+                           over q and h).
+- `w_mean`/`w_max`/`w_min` : peak-weight (`w_i,t`) summary stats, pooled over
+                           q and h (see [`peak_loss_summary`](@ref)).
+- `q_grad_norm`/`h_grad_norm` : parameter-gradient L2 norms of the q-only and
+                           h-only loss terms — for `h_loss_weight`
+                           gradient-norm balancing (notes §7).
+- `peak_grad_frac`       : fraction of the total parameter-gradient L2 norm
+                           attributable to the peak-masked subset of the loss
+                           (notes §4.9), `NaN32` when no peak cell exists.
+
+Runs 3 extra forward/backward passes (total, q-only, h-only), plus a 4th when
+any peak cell exists — intended to be called **once per epoch** on a single
+fixed batch, not every training step. Returns all-`NaN32` fields when
+`strategy.loss_type != :huber`.
+"""
+function peak_epoch_diagnostics(model::WflowGNN, batch::Vector{<:GNNGraph},
+                                strategy::TrainingStrategy, static::AbstractMatrix;
+                                peak_stats = nothing)
+    nan_result = (; c_peak = NaN32, rmse_high = NaN32, mae_high = NaN32,
+                    w_mean = NaN32, w_max = NaN32, w_min = NaN32,
+                    q_grad_norm = NaN32, h_grad_norm = NaN32, peak_grad_frac = NaN32)
+    (strategy.loss_type == :huber && length(batch) >= 2) || return nan_result
+
+    g, state, forcing, forcing_next, target = Flux.ignore_derivatives() do
+        gg = batch[1]
+        gg, gg.ndata.state, gg.ndata.forcing, batch[2].ndata.forcing, batch[2].ndata.state
+    end
+    q_target = target[1:1, :]
+    h_target = target[2:2, :]
+
+    q_u, q_s, h_u, h_s = Flux.ignore_derivatives() do
+        _resolve_peak_thresholds(peak_stats, q_target, h_target)
+    end
+
+    delta  = strategy.peak_delta
+    lambda = strategy.peak_lambda
+    gamma  = strategy.peak_gamma
+    wmax   = strategy.peak_w_max
+
+    # --- Forward-only: weights/mask, C_peak, RMSE_high/MAE_high, weight stats.
+    c_peak, rmse_high, mae_high, w_mean, w_max_v, w_min_v, q_mask, h_mask, q_w, h_w =
+        Flux.ignore_derivatives() do
+            pred0   = model(g, state, forcing, static, forcing_next)
+            q_pred0 = pred0[1:1, :]
+            h_pred0 = pred0[2:2, :]
+
+            qw, qmask = peak_weight_matrix(q_target, q_u, q_s; lambda, gamma, w_max = wmax)
+            hw, hmask = peak_weight_matrix(h_target, h_u, h_s; lambda, gamma, w_max = wmax)
+
+            q_elem = _huber_element.(q_pred0 .- q_target, delta) .* qw
+            h_elem = _huber_element.(h_pred0 .- h_target, delta) .* hw
+
+            total_mass = sum(q_elem) + strategy.h_loss_weight * sum(h_elem)
+            peak_mass  = sum(q_elem[qmask]) + strategy.h_loss_weight * sum(h_elem[hmask])
+            cpk        = total_mass > 0f0 ? Float32(peak_mass / total_mass) : NaN32
+
+            sq_err = Float32[]
+            ab_err = Float32[]
+            if any(qmask)
+                sq_err = vcat(sq_err, abs2.(q_pred0[qmask] .- q_target[qmask]))
+                ab_err = vcat(ab_err, abs.(q_pred0[qmask] .- q_target[qmask]))
+            end
+            if any(hmask)
+                sq_err = vcat(sq_err, abs2.(h_pred0[hmask] .- h_target[hmask]))
+                ab_err = vcat(ab_err, abs.(h_pred0[hmask] .- h_target[hmask]))
+            end
+            rmse_h = isempty(sq_err) ? NaN32 : Float32(sqrt(mean(sq_err)))
+            mae_h  = isempty(ab_err) ? NaN32 : Float32(mean(ab_err))
+
+            wm  = Float32((mean(qw) + mean(hw)) / 2)
+            wmx = Float32(max(maximum(qw), maximum(hw)))
+            wmn = Float32(min(minimum(qw), minimum(hw)))
+
+            (cpk, rmse_h, mae_h, wm, wmx, wmn, qmask, hmask, qw, hw)
+        end
+
+    # --- Backward passes: total, q-only, h-only, peak-masked gradient norms.
+    _, total_grads = Flux.withgradient(model) do m
+        pred   = m(g, state, forcing, static, forcing_next)
+        q_loss = peak_weighted_huber_loss(pred[1:1, :], q_target, q_u, q_s; delta, lambda, gamma, w_max = wmax)
+        h_loss = peak_weighted_huber_loss(pred[2:2, :], h_target, h_u, h_s; delta, lambda, gamma, w_max = wmax)
+        q_loss + strategy.h_loss_weight * h_loss
+    end
+    total_norm = _grad_l2norm(total_grads[1])
+
+    _, q_grads = Flux.withgradient(model) do m
+        pred = m(g, state, forcing, static, forcing_next)
+        peak_weighted_huber_loss(pred[1:1, :], q_target, q_u, q_s; delta, lambda, gamma, w_max = wmax)
+    end
+    q_grad_norm = Float32(_grad_l2norm(q_grads[1]))
+
+    _, h_grads = Flux.withgradient(model) do m
+        pred = m(g, state, forcing, static, forcing_next)
+        peak_weighted_huber_loss(pred[2:2, :], h_target, h_u, h_s; delta, lambda, gamma, w_max = wmax)
+    end
+    h_grad_norm = Float32(_grad_l2norm(h_grads[1]))
+
+    peak_grad_frac = NaN32
+    if any(q_mask) || any(h_mask)
+        _, peak_grads = Flux.withgradient(model) do m
+            pred   = m(g, state, forcing, static, forcing_next)
+            q_pred = pred[1:1, :]
+            h_pred = pred[2:2, :]
+            q_res  = _huber_element.(q_pred .- q_target, delta) .* q_w
+            h_res  = _huber_element.(h_pred .- h_target, delta) .* h_w
+            qm = any(q_mask) ? sum(q_res[q_mask]) : 0f0
+            hm = any(h_mask) ? sum(h_res[h_mask]) : 0f0
+            qm + strategy.h_loss_weight * hm
+        end
+        peak_norm = Float32(_grad_l2norm(peak_grads[1]))
+        peak_grad_frac = total_norm > 0f0 ? Float32(peak_norm / total_norm) : NaN32
+    end
+
+    return (; c_peak, rmse_high, mae_high, w_mean, w_max = w_max_v, w_min = w_min_v,
+            q_grad_norm, h_grad_norm, peak_grad_frac)
+end
+
+# ---------------------------------------------------------------------------
 # Training loop
 # ---------------------------------------------------------------------------
 
@@ -387,9 +530,22 @@ backoff events) and `stopped_early` (whether early stopping fired). When
 once the fixed-horizon RMSE has not improved for `ts.early_stopping_patience`
 epochs and the best-metric weights are restored into `model`.
 
+When `strategy.loss_type == :huber`, the returned NamedTuple also holds the
+Tier-1 loss-tuning diagnostics from [`peak_epoch_diagnostics`](@ref), computed
+once per epoch on the last training batch: `peak_c_peak`, `peak_rmse_high`,
+`peak_mae_high`, `peak_w_mean`, `peak_w_max`, `peak_w_min`, `peak_q_grad_norm`,
+`peak_h_grad_norm`, `peak_grad_frac` (all `NaN32` otherwise).
+
 `checkpoint_callback`, when supplied, is invoked as `checkpoint_callback(model,
 epoch)` every `ts.checkpoint_every` epochs (the caller handles the I/O and any
 per-checkpoint evaluation).
+
+`peak_stats`, used only when `ts.strategy.loss_type == :huber`, is the
+per-node peak threshold/scale `NamedTuple` returned by
+[`peak_node_stats`](@ref) (computed on the training split); it is forwarded to
+[`loss_function`](@ref) for both the train and validation loss, and moved to
+the training device once up-front. When `nothing` (the default),
+`loss_function`'s coarse per-batch fallback threshold is used instead.
 
 `model` must already reside on the target compute device before this call
 (move it with `Flux.gpu` / `Flux.cpu` at the call site). The data loaders are
@@ -405,7 +561,8 @@ function train_model!(model,
                       ts::TrainSettings,
                       static_cpu::AbstractMatrix{Float32};
                       fixed_eval = nothing,
-                      checkpoint_callback = nothing)
+                      checkpoint_callback = nothing,
+                      peak_stats = nothing)
 
     strategy = ts.strategy
 
@@ -428,6 +585,9 @@ function train_model!(model,
     train_loader_d = wrap_loader(train_loader)
     val_loader_d   = wrap_loader(val_loader)
     static_d       = dev_fn(static_cpu)
+    peak_stats_d   = peak_stats === nothing ? nothing :
+        (q = (u = dev_fn(peak_stats.q.u), s = dev_fn(peak_stats.q.s)),
+         h = (u = dev_fn(peak_stats.h.u), s = dev_fn(peak_stats.h.s)))
 
     # Optimiser: optionally clip the global gradient L2 norm before each Adam
     # step. `grad_clip <= 0` disables clipping. `throw = false` leaves a
@@ -457,6 +617,19 @@ function train_model!(model,
     n_backoffs    = 0           # cumulative adaptive LR backoff events
     val_fixed_rmse  = Float32[] # fixed-horizon discharge RMSE (physical units)
     val_peak_ratio  = Float32[] # fixed-horizon max|q_pred|/max|q_truth|
+
+    # Tier-1 peak-loss diagnostics (huber loss_type only; NaN32 otherwise) —
+    # see peak_epoch_diagnostics.
+    peak_c_peak        = Float32[]
+    peak_rmse_high      = Float32[]
+    peak_mae_high       = Float32[]
+    peak_w_mean         = Float32[]
+    peak_w_max          = Float32[]
+    peak_w_min          = Float32[]
+    peak_q_grad_norm    = Float32[]
+    peak_h_grad_norm    = Float32[]
+    peak_grad_frac      = Float32[]
+    do_peak_diagnostics = strategy.loss_type == :huber
 
     has_components = !isnothing(model.mass_balance)
 
@@ -511,9 +684,10 @@ function train_model!(model,
         ep_grad_norm     = 0.0
         n_batches        = 0
         n_skipped        = 0
+        last_train_batch = nothing
 
         for batch in train_loader_d
-            train_loss, grads = Flux.withgradient(m -> loss_function(m, batch, strategy, static_d), model)
+            train_loss, grads = Flux.withgradient(m -> loss_function(m, batch, strategy, static_d; peak_stats = peak_stats_d), model)
             gn = _grad_l2norm(grads[1])
             # Skip updates from a non-finite loss/gradient (e.g. a curriculum-phase
             # restart spike) so a single bad step cannot poison the weights.
@@ -534,6 +708,7 @@ function train_model!(model,
                 ep_train_amp += amp
                 ep_mb_gain    = gain
             end
+            last_train_batch  = batch
             n_batches        += 1
         end
         if n_skipped > 0
@@ -577,7 +752,7 @@ function train_model!(model,
         val_amp_sum    = 0f0
         n_val          = 0
         for b in val_loader_d
-            ep_val_rollout += loss_function(model, b, strategy, static_d)
+            ep_val_rollout += loss_function(model, b, strategy, static_d; peak_stats = peak_stats_d)
             ep_val_1step   += one_step_loss(model, b, static_d, strategy.h_loss_weight)
             if has_components
                 qc, hc      = loss_components(model, b, static_d)
@@ -625,6 +800,27 @@ function train_model!(model,
         push!(val_fixed_rmse, ep_fixed_rmse)
         push!(val_peak_ratio, ep_peak_ratio)
 
+        # Tier-1 peak-loss diagnostics (huber loss_type only), computed once per
+        # epoch on the last training batch (a fresh forward/backward, not part of
+        # the optimisation step above).
+        if do_peak_diagnostics && !isnothing(last_train_batch)
+            pdiag = peak_epoch_diagnostics(model, last_train_batch, strategy, static_d;
+                                           peak_stats = peak_stats_d)
+        else
+            pdiag = (c_peak = NaN32, rmse_high = NaN32, mae_high = NaN32,
+                     w_mean = NaN32, w_max = NaN32, w_min = NaN32,
+                     q_grad_norm = NaN32, h_grad_norm = NaN32, peak_grad_frac = NaN32)
+        end
+        push!(peak_c_peak,     pdiag.c_peak)
+        push!(peak_rmse_high,  pdiag.rmse_high)
+        push!(peak_mae_high,   pdiag.mae_high)
+        push!(peak_w_mean,     pdiag.w_mean)
+        push!(peak_w_max,      pdiag.w_max)
+        push!(peak_w_min,      pdiag.w_min)
+        push!(peak_q_grad_norm, pdiag.q_grad_norm)
+        push!(peak_h_grad_norm, pdiag.h_grad_norm)
+        push!(peak_grad_frac,   pdiag.peak_grad_frac)
+
         # Track the best fixed-horizon RMSE and (when early stopping) keep a copy
         # of the best weights so the final model is the best epoch, not the last.
         if do_fixed_eval && isfinite(ep_fixed_rmse) && ep_fixed_rmse < best_metric
@@ -657,7 +853,12 @@ function train_model!(model,
             (:val_fixed_rmse, round(ep_fixed_rmse, sigdigits = 4)),
             (:val_peak_ratio, round(ep_peak_ratio, sigdigits = 3)),
         ] : []
-        next!(prog; showvalues = vcat(base_vals, comp_vals, fixed_vals))
+        peak_vals = do_peak_diagnostics ? [
+            (:C_peak,     round(pdiag.c_peak, sigdigits = 3)),
+            (:RMSE_high,  round(pdiag.rmse_high, sigdigits = 4)),
+            (:peak_grad_frac, round(pdiag.peak_grad_frac, sigdigits = 3)),
+        ] : []
+        next!(prog; showvalues = vcat(base_vals, comp_vals, fixed_vals, peak_vals))
 
         # Periodic checkpoint hook (I/O + optional full eval handled by caller).
         if !isnothing(checkpoint_callback) && ts.checkpoint_every > 0 &&
@@ -697,6 +898,15 @@ function train_model!(model,
             steps         = steps_hist,
             val_fixed_rmse = val_fixed_rmse,
             val_peak_ratio = val_peak_ratio,
+            peak_c_peak       = peak_c_peak,
+            peak_rmse_high    = peak_rmse_high,
+            peak_mae_high     = peak_mae_high,
+            peak_w_mean       = peak_w_mean,
+            peak_w_max        = peak_w_max,
+            peak_w_min        = peak_w_min,
+            peak_q_grad_norm  = peak_q_grad_norm,
+            peak_h_grad_norm  = peak_h_grad_norm,
+            peak_grad_frac    = peak_grad_frac,
             n_nonfinite_skips = n_skip_total,
             n_backoffs     = n_backoffs,
             stopped_early  = stopped_epoch < ts.epochs,

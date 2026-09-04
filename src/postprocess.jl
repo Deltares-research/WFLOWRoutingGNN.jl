@@ -350,6 +350,183 @@ function write_spatial_metrics_to_csv(metrics::Dict{String, Dict{String, Matrix{
     return path
 end
 
+"""
+    kge_metrics(pred, truth) -> NamedTuple
+
+Compute the Kling–Gupta efficiency decomposition and combined score for a
+vectorised prediction/truth pair.
+"""
+function kge_metrics(pred::AbstractVector, truth::AbstractVector)
+    length(pred) == length(truth) || throw(ArgumentError("pred and truth must have equal length"))
+    p = Float32.(filter(isfinite, pred))
+    t = Float32.(filter(isfinite, truth))
+    isempty(p) && isempty(t) && return (; kge = NaN32, r = NaN32, alpha = NaN32, beta = NaN32)
+    length(p) == length(t) || throw(ArgumentError("pred and truth must have matching finite values"))
+    isempty(p) && return (; kge = NaN32, r = NaN32, alpha = NaN32, beta = NaN32)
+
+    μp = mean(p)
+    μt = mean(t)
+    σp = std(p)
+    σt = std(t)
+    if σt <= eps(Float32)
+        α = NaN32
+    else
+        α = σp / σt
+    end
+    if abs(μt) <= eps(Float32)
+        β = abs(μp) <= eps(Float32) ? 1.0f0 : NaN32
+    else
+        β = μp / μt
+    end
+    r = length(p) > 1 ? Float32(cor(p, t)) : 1.0f0
+    if !isfinite(r)
+        r = 0.0f0
+    end
+    if !isfinite(α)
+        α = 1.0f0
+    end
+    if !isfinite(β)
+        β = 1.0f0
+    end
+    kge = 1.0f0 - sqrt((r - 1.0f0)^2 + (α - 1.0f0)^2 + (β - 1.0f0)^2)
+    return (; kge = Float32(kge), r = Float32(r), alpha = Float32(α), beta = Float32(β))
+end
+
+"""
+    mae_metric(pred, truth) -> Float32
+
+Mean absolute error over finite matched observation pairs.
+"""
+function mae_metric(pred::AbstractVector, truth::AbstractVector)
+    length(pred) == length(truth) || throw(ArgumentError("pred and truth must have equal length"))
+    p = Float32.(pred)
+    t = Float32.(truth)
+    mask = isfinite.(p) .& isfinite.(t)
+    isempty(mask[mask]) && return NaN32
+    return Float32(mean(abs, p[mask] .- t[mask]))
+end
+
+"""
+    pbias(pred, truth) -> Float32
+
+Percent bias, defined as 100 × (Σ(pred − truth)) / Σ(truth).
+"""
+function pbias(pred::AbstractVector, truth::AbstractVector)
+    length(pred) == length(truth) || throw(ArgumentError("pred and truth must have equal length"))
+    p = Float32.(pred)
+    t = Float32.(truth)
+    mask = isfinite.(p) .& isfinite.(t)
+    isempty(mask[mask]) && return NaN32
+    s_pred = sum(p[mask])
+    s_true = sum(t[mask])
+    abs(s_true) <= eps(Float32) && return NaN32
+    return Float32(100f0 * (s_pred - s_true) / s_true)
+end
+
+"""
+    event_peak_metrics(pred, truth; threshold = nothing) -> NamedTuple
+
+Peak error and high-flow volume bias for event-based model selection.
+"""
+function event_peak_metrics(pred::AbstractVector, truth::AbstractVector;
+                           threshold = nothing)
+    length(pred) == length(truth) || throw(ArgumentError("pred and truth must have equal length"))
+    p = Float32.(pred)
+    t = Float32.(truth)
+    mask = isfinite.(p) .& isfinite.(t)
+    isempty(mask[mask]) && return (; peak_error = NaN32, peak_ratio = NaN32, fhv = NaN32)
+    p = p[mask]
+    t = t[mask]
+    peak_pred = maximum(p)
+    peak_true = maximum(t)
+    peak_error = peak_pred - peak_true
+    peak_ratio = peak_true > eps(Float32) ? peak_pred / peak_true : 1.0f0
+    if isnothing(threshold)
+        threshold = quantile(t, 0.9)
+    end
+    high_mask = t .>= threshold
+    if any(high_mask)
+        high_pred = sum(p[high_mask])
+        high_true = sum(t[high_mask])
+        fhv = abs(high_true) > eps(Float32) ? (high_pred - high_true) / high_true : 0.0f0
+    else
+        fhv = 0.0f0
+    end
+    return (; peak_error = Float32(peak_error), peak_ratio = Float32(peak_ratio), fhv = Float32(fhv))
+end
+
+"""
+    event_detection_metrics(pred, truth; threshold = nothing) -> NamedTuple
+
+Binary exceedance metrics for detection-style peak evaluation:
+`pod`, `false_alarm_ratio`, and `csi`.
+"""
+function event_detection_metrics(pred::AbstractVector, truth::AbstractVector;
+                                threshold = nothing)
+    length(pred) == length(truth) || throw(ArgumentError("pred and truth must have equal length"))
+    p = Float32.(pred)
+    t = Float32.(truth)
+    mask = isfinite.(p) .& isfinite.(t)
+    isempty(mask[mask]) && return (; pod = NaN32, false_alarm_ratio = NaN32, csi = NaN32)
+    p = p[mask]
+    t = t[mask]
+    if isnothing(threshold)
+        threshold = quantile(t, 0.9)
+    end
+    pred_bin = p .>= threshold
+    truth_bin = t .>= threshold
+    tp = Int(sum(pred_bin .& truth_bin))
+    fp = Int(sum(pred_bin .& .!truth_bin))
+    fn = Int(sum(.!pred_bin .& truth_bin))
+    pod = (tp + fn) > 0 ? tp / (tp + fn) : 0.0f0
+    far = (tp + fp) > 0 ? fp / (tp + fp) : 0.0f0
+    csi = (tp + fp + fn) > 0 ? tp / (tp + fp + fn) : 0.0f0
+    return (; pod = Float32(pod), false_alarm_ratio = Float32(far), csi = Float32(csi))
+end
+
+"""
+    river_q_performance_metrics(pred_q, true_q, upstream_area) -> NamedTuple
+
+Tier-2 model-selection metrics (KGE + r/α/β, MAE, PBIAS, event peak error +
+FHV) for a discharge (`river_q`) channel, computed both **pooled** (all nodes ×
+timesteps together) and at the **outlet gauge** alone — the node with the
+largest `upstream_area` (the same "most downstream active node" convention
+used by [`plot_downstream_timeseries`](@ref)) — so a few large reaches don't
+dominate the pooled numbers.
+
+`pred_q`/`true_q` are `(n_nodes, T)` matrices (e.g. physical-unit discharge, as
+returned by `evaluate_trajectory` for the q channel). `upstream_area` is the
+same per-node value used to locate the outlet elsewhere (e.g.
+`postscale["river_q"]`); `NaN` entries are ignored when finding the outlet.
+
+Returns `(; pooled, gauge)`, where `pooled` is a `NamedTuple`
+`(; kge, r, alpha, beta, mae, pbias, peak_error, peak_ratio, fhv)` over all
+nodes/times, and `gauge` is the same plus `outlet_idx` (the node index used).
+"""
+function river_q_performance_metrics(pred_q::AbstractMatrix, true_q::AbstractMatrix,
+                                    upstream_area::AbstractVector)
+    size(pred_q) == size(true_q) || throw(ArgumentError("pred_q and true_q must have the same shape"))
+    size(pred_q, 1) == length(upstream_area) ||
+        throw(ArgumentError("upstream_area must have one entry per node (row) of pred_q/true_q"))
+
+    function _one_gauge(p::AbstractVector, t::AbstractVector)
+        k    = kge_metrics(p, t)
+        peak = event_peak_metrics(p, t)
+        (; kge = k.kge, r = k.r, alpha = k.alpha, beta = k.beta,
+           mae = mae_metric(p, t), pbias = pbias(p, t),
+           peak_error = peak.peak_error, peak_ratio = peak.peak_ratio, fhv = peak.fhv)
+    end
+
+    pooled = _one_gauge(vec(pred_q), vec(true_q))
+
+    outlet_idx = argmax(i -> isnan(upstream_area[i]) ? -Inf : upstream_area[i],
+                        1:length(upstream_area))
+    gauge = merge((; outlet_idx),
+                  _one_gauge(vec(pred_q[outlet_idx, :]), vec(true_q[outlet_idx, :])))
+
+    return (; pooled, gauge)
+end
+
 # Ramp-rate class edges on g = (Qt − Qt-1)/max(Qt, eps): falling → sharp rise.
 const RAMP_EDGES  = Float32[-Inf, -0.05, 0.05, 0.2, 0.4, 0.8, Inf]
 const RAMP_LABELS = ["falling", "steady", "mild rise", "moderate rise",

@@ -195,6 +195,62 @@ end
 end
 
 # ---------------------------------------------------------------------------
+# Tier-1 peak-loss diagnostics
+# ---------------------------------------------------------------------------
+
+@testset "peak_epoch_diagnostics" begin
+
+    diag_batch = first(TR_TRAIN_LOADER)
+
+    @testset "non-huber strategy returns all-NaN32" begin
+        strat = TrainingStrategy([1, 2], [2, 2])  # default loss_type = :mse
+        model = deepcopy(TR_MODEL)
+        d = peak_epoch_diagnostics(model, diag_batch, strat, TR_STATIC)
+        @test isnan(d.c_peak)
+        @test isnan(d.rmse_high)
+        @test isnan(d.mae_high)
+        @test isnan(d.w_mean)
+        @test isnan(d.w_max)
+        @test isnan(d.w_min)
+        @test isnan(d.q_grad_norm)
+        @test isnan(d.h_grad_norm)
+        @test isnan(d.peak_grad_frac)
+    end
+
+    @testset "huber strategy without peak_stats fallback" begin
+        strat = TrainingStrategy([1, 2], [2, 2]; loss_type = :huber, peak_lambda = 2.0f0)
+        model = deepcopy(TR_MODEL)
+        d = peak_epoch_diagnostics(model, diag_batch, strat, TR_STATIC)
+        @test isfinite(d.c_peak)
+        @test 0f0 <= d.c_peak <= 1f0
+        @test isfinite(d.w_mean) && d.w_mean >= 1f0
+        @test isfinite(d.w_max)  && d.w_max  >= 1f0
+        @test isfinite(d.w_min)  && d.w_min  >= 1f0
+        @test isfinite(d.q_grad_norm) && d.q_grad_norm >= 0f0
+        @test isfinite(d.h_grad_norm) && d.h_grad_norm >= 0f0
+    end
+
+    @testset "huber strategy with peak_stats" begin
+        strat = TrainingStrategy([1, 2], [2, 2]; loss_type = :huber, peak_lambda = 2.0f0)
+        model = deepcopy(TR_MODEL)
+        node_stats = peak_node_stats(TR_GRAPHS, "river"; frac_train = 0.7)
+        state_vars = DOMAIN_VARS["river"]["state"]
+        peak_stats = (q = node_stats[state_vars[1]], h = node_stats[state_vars[2]])
+        d = peak_epoch_diagnostics(model, diag_batch, strat, TR_STATIC; peak_stats)
+        @test isfinite(d.c_peak)
+        @test isfinite(d.w_mean)
+    end
+
+    @testset "single-graph batch (length < 2) returns all-NaN32" begin
+        strat = TrainingStrategy([1, 2], [2, 2]; loss_type = :huber, peak_lambda = 2.0f0)
+        model = deepcopy(TR_MODEL)
+        d = peak_epoch_diagnostics(model, diag_batch[1:1], strat, TR_STATIC)
+        @test isnan(d.c_peak)
+    end
+
+end
+
+# ---------------------------------------------------------------------------
 # Integration: small training run
 # ---------------------------------------------------------------------------
 
@@ -233,6 +289,46 @@ end
         @test all(>(0), train_1step)
         @test all(>(0), val_1step)
     end
+
+    @testset "peak-loss history is all-NaN32 for :mse strategy (default)" begin
+        @test length(losses.peak_c_peak) == TR_EPOCHS
+        @test all(isnan, losses.peak_c_peak)
+        @test all(isnan, losses.peak_rmse_high)
+        @test all(isnan, losses.peak_mae_high)
+        @test all(isnan, losses.peak_w_mean)
+        @test all(isnan, losses.peak_w_max)
+        @test all(isnan, losses.peak_w_min)
+        @test all(isnan, losses.peak_q_grad_norm)
+        @test all(isnan, losses.peak_h_grad_norm)
+        @test all(isnan, losses.peak_grad_frac)
+    end
+
+end
+
+# ---------------------------------------------------------------------------
+# Integration: small training run with :huber peak-weighted loss
+# ---------------------------------------------------------------------------
+
+@testset "train_model! integration (huber loss, peak diagnostics)" begin
+
+    huber_strategy = TrainingStrategy([1, 2], [2, 2]; loss_type = :huber, peak_lambda = 2.0f0)
+    ts    = TrainSettings(; VALID_TS_KWARGS..., epochs = TR_EPOCHS, lr_steps = 2,
+                         strategy = huber_strategy)
+    model = deepcopy(TR_MODEL)
+
+    node_stats = peak_node_stats(TR_GRAPHS, "river"; frac_train = 0.7)
+    state_vars = DOMAIN_VARS["river"]["state"]
+    peak_stats = (q = node_stats[state_vars[1]], h = node_stats[state_vars[2]])
+
+    losses = train_model!(model, TR_TRAIN_LOADER, TR_VAL_LOADER, ts, TR_STATIC;
+                          peak_stats = peak_stats)
+
+    @test length(losses.peak_c_peak) == TR_EPOCHS
+    @test all(isfinite, losses.peak_c_peak)
+    @test all(isfinite, losses.peak_w_mean)
+    @test all(isfinite, losses.peak_q_grad_norm)
+    @test all(isfinite, losses.peak_h_grad_norm)
+    @test all(v -> 0f0 <= v <= 1f0, losses.peak_c_peak)
 
 end
 

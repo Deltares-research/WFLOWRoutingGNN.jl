@@ -50,6 +50,29 @@ Execution permissions:
 - Prefer targeted tests first (affected test files), then broader suites when needed.
 - Report exactly what was run and the outcome; if execution is unavailable, state this explicitly.
 
+Debugging scope:
+
+- You may analyze error messages, stacktraces, failing tests, and runtime anomalies.
+- Form and test concise root-cause hypotheses; clearly separate observed evidence from speculation.
+- Prefer minimal, local fixes first and verify with targeted tests before broader runs.
+- If the root cause is primarily scientific/modeling (not code correctness), escalate to the research/evaluation agent.
+
+## PowerShell command formatting (Windows, PS 5.1)
+
+- Chain with `;` never `&&` or `||`.
+- Prefer single quotes for literals; use double quotes only when you need
+  `$variable` expansion.
+- NEVER nest the same quote type. If a command already contains single quotes
+  (e.g. Julia `-e '...'`), wrap the outer string in double quotes, or better:
+  put the code in a file and run the file instead of inlining.
+- Do NOT pass multi-line or quote-heavy code through `julia -e '...'`.
+  Use `julia --project=. path\to\script.jl` or `include("test/foo.jl")` from a
+  clean REPL invocation.
+- Escape a literal double quote as `` `" `` (backtick), not `\"`.
+- Use backtick `` ` `` for line continuation, not `\`.
+- Paths with spaces: wrap in double quotes.
+- One command per invocation; don't stack unrelated steps.
+
 ## Required Response Structure
 
 - Proposed Changes

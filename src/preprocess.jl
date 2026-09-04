@@ -446,6 +446,58 @@ function build_wflow_graph(staticmaps_file::String, output_file::String, domain:
 end
 
 """
+    peak_node_stats(graphs, domain; frac_train = 1.0)
+        -> Dict{String, @NamedTuple{u::Vector{Float32}, s::Vector{Float32}}}
+
+Compute the per-node peak threshold `u_i` (98th percentile) and robust scale
+`s_i` (interquartile range) used by the peak-weighted Huber loss (see
+[`peak_weighted_huber_loss`](@ref) / [`loss_function`](@ref)), for every
+**state** variable of `domain`.
+
+Statistics are computed **only** from the first `frac_train` fraction of
+`graphs` (by timestep index) — the training-period slice — never the
+validation/test period, per the design notes. `graphs` should be the full,
+time-ordered `Vector{GNNGraph}` returned by [`build_wflow_graph`](@ref), and
+`frac_train` should match `DataSettings.train_frac` so the slice lines up with
+the training split produced by [`make_horizon_dataset`](@ref).
+
+Returns a `Dict` mapping each state variable name (e.g. `"river_q"`,
+`"river_h"`) to a `(u, s)` named tuple of `Vector{Float32}`, each of length
+`n_nodes` — the node count of a single (unbatched) graph.
+"""
+function peak_node_stats(graphs::Vector{<:GNNGraph}, domain::String; frac_train::Real = 1.0)
+    0 < frac_train <= 1 || throw(ArgumentError("frac_train must be in (0, 1]"))
+    isempty(graphs) && throw(ArgumentError("graphs must not be empty"))
+
+    state_vars = DOMAIN_VARS[domain]["state"]
+    n_times    = length(graphs)
+    n_train    = max(1, round(Int, frac_train * n_times))
+    n_nodes    = graphs[1].num_nodes
+    n_state    = length(state_vars)
+
+    stacked = Array{Float32}(undef, n_state, n_nodes, n_train)
+    for t in 1:n_train
+        stacked[:, :, t] = graphs[t].ndata.state
+    end
+
+    out = Dict{String, @NamedTuple{u::Vector{Float32}, s::Vector{Float32}}}()
+    for (vi, vname) in enumerate(state_vars)
+        u = Vector{Float32}(undef, n_nodes)
+        s = Vector{Float32}(undef, n_nodes)
+        for i in 1:n_nodes
+            x   = view(stacked, vi, i, :)
+            q98 = quantile(x, 0.98)
+            q25 = quantile(x, 0.25)
+            q75 = quantile(x, 0.75)
+            u[i] = Float32(q98)
+            s[i] = Float32(max(q75 - q25, eps(Float32)))
+        end
+        out[vname] = (u = u, s = s)
+    end
+    return out
+end
+
+"""
     make_horizon_dataset(graphs, nhorizon; at) -> (train, val, test)
 
 Slide a window of `nhorizon` consecutive `GNNGraph`s over `graphs` to produce

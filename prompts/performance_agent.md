@@ -56,6 +56,22 @@ Execution permissions:
 - Persist benchmark outputs to experiments/<run>/metrics/performance.toml (default script behavior) and base conclusions on those artefacts.
 - If execution is unavailable, state that explicitly and report only evidence already present in performance.toml / metrics.toml.
 
+## PowerShell command formatting (Windows, PS 5.1)
+
+- Chain with `;` never `&&` or `||`.
+- Prefer single quotes for literals; use double quotes only when you need
+  `$variable` expansion.
+- NEVER nest the same quote type. If a command already contains single quotes
+  (e.g. Julia `-e '...'`), wrap the outer string in double quotes, or better:
+  put the code in a file and run the file instead of inlining.
+- Do NOT pass multi-line or quote-heavy code through `julia -e '...'`.
+  Use `julia --project=. path\to\script.jl` or `include("test/foo.jl")` from a
+  clean REPL invocation.
+- Escape a literal double quote as `` `" `` (backtick), not `\"`.
+- Use backtick `` ` `` for line continuation, not `\`.
+- Paths with spaces: wrap in double quotes.
+- One command per invocation; don't stack unrelated steps.
+
 ## Required Response Structure
 
 Report your findings in PERFORMANCE.md following the below structure:

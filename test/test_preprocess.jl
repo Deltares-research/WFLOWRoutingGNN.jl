@@ -268,6 +268,49 @@ const STATIC_VARS  = DOMAIN_VARS["river"]["static"]
 end
 
 #########################
+# Tests peak_node_stats
+#########################
+
+@testset "peak_node_stats" begin
+    stats_full = peak_node_stats(BG_GRAPHS, "river"; frac_train = 1.0)
+
+    @testset "keys match state variables" begin
+        @test Set(keys(stats_full)) == Set(STATE_VARS)
+    end
+
+    @testset "u/s vectors have one entry per node" begin
+        for vname in STATE_VARS
+            @test length(stats_full[vname].u) == REF_N_NODES
+            @test length(stats_full[vname].s) == REF_N_NODES
+        end
+    end
+
+    @testset "matches manual per-node quantile computation" begin
+        vname  = STATE_VARS[1]
+        vi     = findfirst(==(vname), STATE_VARS)
+        node   = 1
+        series = Float32[g.ndata.state[vi, node] for g in BG_GRAPHS]
+        @test stats_full[vname].u[node] ≈ Float32(quantile(series, 0.98))
+        expected_s = Float32(max(quantile(series, 0.75) - quantile(series, 0.25), eps(Float32)))
+        @test stats_full[vname].s[node] ≈ expected_s
+    end
+
+    @testset "frac_train restricts to the earliest slice of timesteps" begin
+        n_train    = round(Int, 0.5 * REF_NTIMES)
+        stats_half = peak_node_stats(BG_GRAPHS, "river"; frac_train = 0.5)
+        vname      = STATE_VARS[1]
+        node       = 1
+        series     = Float32[BG_GRAPHS[t].ndata.state[1, node] for t in 1:n_train]
+        @test stats_half[vname].u[node] ≈ Float32(quantile(series, 0.98))
+    end
+
+    @testset "invalid frac_train throws" begin
+        @test_throws ArgumentError peak_node_stats(BG_GRAPHS, "river"; frac_train = 0.0)
+        @test_throws ArgumentError peak_node_stats(BG_GRAPHS, "river"; frac_train = 1.5)
+    end
+end
+
+#########################
 # Tests make_horizon_dataset
 #########################
 

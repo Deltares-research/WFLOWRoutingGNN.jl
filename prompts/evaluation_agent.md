@@ -96,6 +96,22 @@ Metrics included in metrics.toml and what they mean:
 - ramp.pearson_op_g: Pearson correlation between overprediction-only error and ramp rate; linear tendency to overpredict during ramps.
 - ramp.spearman_e_g: Spearman rank correlation between signed error and ramp rate; monotonic error-ramp dependence robust to outliers.
 
+## PowerShell command formatting (Windows, PS 5.1)
+
+- Chain with `;` never `&&` or `||`.
+- Prefer single quotes for literals; use double quotes only when you need
+  `$variable` expansion.
+- NEVER nest the same quote type. If a command already contains single quotes
+  (e.g. Julia `-e '...'`), wrap the outer string in double quotes, or better:
+  put the code in a file and run the file instead of inlining.
+- Do NOT pass multi-line or quote-heavy code through `julia -e '...'`.
+  Use `julia --project=. path\to\script.jl` or `include("test/foo.jl")` from a
+  clean REPL invocation.
+- Escape a literal double quote as `` `" `` (backtick), not `\"`.
+- Use backtick `` ` `` for line continuation, not `\`.
+- Paths with spaces: wrap in double quotes.
+- One command per invocation; don't stack unrelated steps.
+
 ## Required Response structure
 
 Report your findings of an experiment in EXPERIMENTS.md following the below structure:

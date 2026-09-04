@@ -33,6 +33,7 @@ const ST_MODEL  = WflowGNN(ModelSettings(domain = "river", hidden_dim = 8, nlaye
 @testset "TrainingStrategy constructor validation" begin
 
     @test TrainingStrategy([1, 2], [3, 4]) isa TrainingStrategy
+    @test TrainingStrategy([1], [3]; loss_type = :huber) isa TrainingStrategy
 
     @testset "mismatched steps/durations throws" begin
         @test_throws ArgumentError TrainingStrategy([1, 2], [3])
@@ -122,8 +123,207 @@ end
 end
 
 # ---------------------------------------------------------------------------
+# Huber loss helper
+# ---------------------------------------------------------------------------
+
+@testset "peak_weighted_huber_loss" begin
+    pred = Float32[1.0 2.0 3.0; 1.5 2.5 3.5]
+    target = Float32[1.1 2.2 2.4; 1.6 2.3 4.5]
+    u = Float32[2.0, 3.0]
+    s = Float32[1.0, 1.5]
+
+    loss = WflowRoutingGNN.peak_weighted_huber_loss(pred, target, u, s; delta = 1.0f0,
+                                                  lambda = 2.0f0,
+                                                  gamma = 1.0f0, w_max = 4.0f0)
+    @test loss isa Float32
+    @test isfinite(loss)
+    @test loss >= 0f0
+
+    loss_mse = WflowRoutingGNN.peak_weighted_huber_loss(pred, target, u, s; delta = 0.0f0,
+                                                      lambda = 0.0f0,
+                                                      gamma = 1.0f0, w_max = 1.0f0)
+    @test isfinite(loss_mse)
+    @test loss_mse >= 0f0
+
+    @testset "matrix u/s (per-node) reproduces vector (per-channel) result when constant per row" begin
+        # A (nvar, nnode) matrix with each row equal to the scalar channel
+        # value must give exactly the same loss as the plain-vector call.
+        u_mat = repeat(u, 1, size(pred, 2))
+        s_mat = repeat(s, 1, size(pred, 2))
+        loss_mat = WflowRoutingGNN.peak_weighted_huber_loss(pred, target, u_mat, s_mat;
+                                                          delta = 1.0f0, lambda = 2.0f0,
+                                                          gamma = 1.0f0, w_max = 4.0f0)
+        @test loss_mat ≈ loss
+    end
+
+    @testset "matrix u/s with genuinely different per-node thresholds" begin
+        # A node-varying threshold must change the loss relative to a
+        # uniform (per-channel scalar) threshold.
+        u_mat = Float32[1.0 2.0 5.0; 1.0 2.0 5.0]
+        s_mat = repeat(s, 1, size(pred, 2))
+        loss_mat = WflowRoutingGNN.peak_weighted_huber_loss(pred, target, u_mat, s_mat;
+                                                          delta = 1.0f0, lambda = 2.0f0,
+                                                          gamma = 1.0f0, w_max = 4.0f0)
+        @test isfinite(loss_mat)
+        @test loss_mat != loss
+    end
+end
+
+@testset "peak loss estimation helpers" begin
+    target = Float32[
+        1.0 2.0 3.0 4.0 5.0 6.0;
+        10.0 12.0 14.0 16.0 18.0 20.0
+    ]
+    u, s = WflowRoutingGNN.peak_quantile_stats(target)
+    @test length(u) == 2
+    @test length(s) == 2
+    @test all(>(0), u)
+    @test all(>(0), s)
+
+    est = WflowRoutingGNN.estimate_peak_loss_parameters(target)
+    @test est.delta > 0
+    @test est.w_max >= 1f0
+    @test length(est.u) == 2
+    @test length(est.s) == 2
+
+    summary = WflowRoutingGNN.peak_loss_summary(target, target .+ 0.5f0, u, s;
+                                              delta = 1.0f0, lambda = 2.0f0,
+                                              gamma = 1.0f0, w_max = 4.0f0)
+    @test summary.loss >= 0f0
+    @test summary.w_mean >= 0f0
+    @test summary.w_max >= 1f0
+end
+
+# ---------------------------------------------------------------------------
+# peak_weight_matrix
+# ---------------------------------------------------------------------------
+
+@testset "peak_weight_matrix" begin
+    pred = Float32[1.0 2.0 3.0; 1.5 2.5 3.5]
+    target = Float32[1.1 2.2 2.4; 1.6 2.3 4.5]
+    u = Float32[2.0, 3.0]
+    s = Float32[1.0, 1.5]
+
+    @testset "lambda == 0 gives all-ones weights and empty mask" begin
+        weights, mask = WflowRoutingGNN.peak_weight_matrix(target, u, s; lambda = 0.0f0)
+        @test size(weights) == size(target)
+        @test size(mask)    == size(target)
+        @test all(==(1f0), weights)
+        @test !any(mask)
+    end
+
+    @testset "mask marks exactly the cells above threshold" begin
+        weights, mask = WflowRoutingGNN.peak_weight_matrix(target, u, s; lambda = 2.0f0,
+                                                          gamma = 1.0f0, w_max = 4.0f0)
+        for i in 1:size(target, 1), j in 1:size(target, 2)
+            @test mask[i, j] == (target[i, j] > u[i])
+        end
+        @test all(w -> 1f0 <= w <= 4.0f0, weights)
+    end
+
+    @testset "matches peak_weighted_huber_loss's internal weighting" begin
+        # Reconstruct the (weight-normalised) loss from the forward-only
+        # weights/mask and compare against the differentiable loss function's
+        # own computation (peak_weighted_huber_loss normalises row_weights to
+        # sum to 1 when lambda > 0).
+        weights, _ = WflowRoutingGNN.peak_weight_matrix(target, u, s; lambda = 2.0f0,
+                                                       gamma = 1.0f0, w_max = 4.0f0)
+        delta = 1.0f0
+        elementwise = WflowRoutingGNN._huber_element.(pred .- target, delta) .* weights
+        reconstructed = sum(elementwise) / sum(weights)
+        loss = WflowRoutingGNN.peak_weighted_huber_loss(pred, target, u, s; delta,
+                                                       lambda = 2.0f0, gamma = 1.0f0,
+                                                       w_max = 4.0f0)
+        @test reconstructed ≈ loss
+    end
+
+    @testset "w_max caps the weight" begin
+        weights, _ = WflowRoutingGNN.peak_weight_matrix(target, u, s; lambda = 1000.0f0, w_max = 2.0f0)
+        @test all(<=(2.0f0), weights)
+    end
+end
+
+# ---------------------------------------------------------------------------
 # loss_function
 # ---------------------------------------------------------------------------
+
+@testset "tier 2 / tier 3 metrics" begin
+    pred = Float32[1.0, 2.0, 3.0, 4.0, 5.0]
+    truth = Float32[1.0, 2.0, 2.0, 4.0, 6.0]
+
+    kge = WflowRoutingGNN.kge_metrics(pred, truth)
+    @test isfinite(kge.kge)
+    @test isfinite(kge.r)
+    @test isfinite(kge.alpha)
+    @test isfinite(kge.beta)
+    @test kge.alpha > 0f0
+    @test kge.beta > 0f0
+
+    mae = WflowRoutingGNN.mae_metric(pred, truth)
+    @test isfinite(mae)
+    @test mae >= 0f0
+
+    pb = WflowRoutingGNN.pbias(pred, truth)
+    @test isfinite(pb)
+
+    peak = WflowRoutingGNN.event_peak_metrics(pred, truth)
+    @test isfinite(peak.peak_error)
+    @test isfinite(peak.fhv)
+
+    det = WflowRoutingGNN.event_detection_metrics(pred, truth; threshold = 2.5f0)
+    @test 0f0 <= det.pod <= 1f0
+    @test 0f0 <= det.false_alarm_ratio <= 1f0
+    @test 0f0 <= det.csi <= 1f0
+end
+
+@testset "river_q_performance_metrics" begin
+    # 3 nodes x 6 timesteps; node 3 has the largest upstream_area (outlet).
+    pred_q = Float32[
+        1.0 1.1 1.2 1.3 1.4 1.5;
+        2.0 2.1 2.0 2.2 2.1 2.3;
+        5.0 5.5 6.0 8.0 6.5 5.5
+    ]
+    true_q = Float32[
+        1.0 1.0 1.3 1.2 1.5 1.4;
+        2.0 2.0 2.1 2.1 2.0 2.2;
+        5.0 5.2 5.8 8.5 6.0 5.6
+    ]
+    upstream_area = Float32[10.0, 25.0, 100.0]
+
+    perf = WflowRoutingGNN.river_q_performance_metrics(pred_q, true_q, upstream_area)
+
+    @test perf.gauge.outlet_idx == 3
+
+    for m in (perf.pooled, perf.gauge)
+        @test isfinite(m.kge)
+        @test isfinite(m.r)
+        @test isfinite(m.alpha)
+        @test isfinite(m.beta)
+        @test isfinite(m.mae)
+        @test isfinite(m.pbias)
+        @test isfinite(m.peak_error)
+        @test isfinite(m.peak_ratio)
+        @test isfinite(m.fhv)
+        @test m.mae >= 0f0
+    end
+
+    # The gauge-only metrics must genuinely differ from the pooled ones
+    # (node 3 alone is not representative of the pooled mix of all 3 nodes).
+    @test perf.gauge.mae != perf.pooled.mae
+
+    @testset "mismatched shapes throw" begin
+        @test_throws ArgumentError WflowRoutingGNN.river_q_performance_metrics(
+            pred_q, true_q[1:2, :], upstream_area)
+        @test_throws ArgumentError WflowRoutingGNN.river_q_performance_metrics(
+            pred_q, true_q, upstream_area[1:2])
+    end
+
+    @testset "NaN upstream_area entries are ignored when finding the outlet" begin
+        ua_with_nan = Float32[10.0, NaN32, 100.0]
+        perf2 = WflowRoutingGNN.river_q_performance_metrics(pred_q, true_q, ua_with_nan)
+        @test perf2.gauge.outlet_idx == 3
+    end
+end
 
 @testset "loss_function" begin
 
@@ -152,6 +352,42 @@ end
         @test_throws ArgumentError loss_function(ST_MODEL, short_batch, strat_3, ST_STATIC)
     end
 
+end
+
+@testset "loss_function :huber with per-node peak_stats" begin
+    strat_huber = TrainingStrategy([1], [10]; loss_type = :huber)
+
+    peak_stats = (q = (u = Float32.(1:ST_N_NODES) .+ 1f0, s = fill(0.5f0, ST_N_NODES)),
+                  h = (u = Float32.(ST_N_NODES:-1:1) .+ 1f0, s = fill(0.3f0, ST_N_NODES)))
+
+    @testset "returns a finite non-negative Float32 with per-node stats supplied" begin
+        l = loss_function(ST_MODEL, ST_BATCH, strat_huber, ST_STATIC; peak_stats = peak_stats)
+        @test l isa Float32
+        @test isfinite(l)
+        @test l >= 0f0
+    end
+
+    @testset "falls back to coarse per-batch threshold when peak_stats omitted" begin
+        l = loss_function(ST_MODEL, ST_BATCH, strat_huber, ST_STATIC)
+        @test l isa Float32
+        @test isfinite(l)
+        @test l >= 0f0
+    end
+
+    @testset "tiles per-node stats across a multi-graph (batchsize > 1) batch" begin
+        double_batch = [GNNGraphs.batch([g, g]) for g in ST_BATCH]
+        l = loss_function(ST_MODEL, double_batch, strat_huber, ST_STATIC; peak_stats = peak_stats)
+        @test l isa Float32
+        @test isfinite(l)
+        @test l >= 0f0
+    end
+
+    @testset "peak_stats node count not dividing batch node count throws" begin
+        bad_stats = (q = (u = Float32[1.0, 2.0, 3.0, 4.0], s = Float32[1.0, 1.0, 1.0, 1.0]),
+                     h = (u = Float32[1.0, 2.0, 3.0, 4.0], s = Float32[1.0, 1.0, 1.0, 1.0]))
+        @test_throws ArgumentError loss_function(ST_MODEL, ST_BATCH, strat_huber, ST_STATIC;
+                                                 peak_stats = bad_stats)
+    end
 end
 
 # ---------------------------------------------------------------------------

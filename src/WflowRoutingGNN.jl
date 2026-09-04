@@ -13,7 +13,7 @@ export ldd_to_graph, build_wflow_graph, make_horizon_dataset, DOMAIN_VARS, LDD_O
        check_and_correct_grid_alignment,
        scale_river_q!, scale_river_h!, VAR_SCALERS,
        DataSettings, save_data_settings, load_data_settings,
-       get_timestep
+       get_timestep, peak_node_stats
 
 include("gnn.jl")
 export WflowGNN, MassBalanceLayer, mb_diagnostics, ModelSettings, save_model_settings, load_model_settings, ACTIVATIONS,
@@ -21,10 +21,13 @@ export WflowGNN, MassBalanceLayer, mb_diagnostics, ModelSettings, save_model_set
 
 include("strategy.jl")
 export TrainingStrategy, save_training_strategy, load_training_strategy,
-       update_steps!, loss_function, one_step_loss
+       update_steps!, peak_quantile_stats, estimate_peak_loss_parameters,
+       peak_loss_summary, peak_weighted_huber_loss, peak_weight_matrix,
+       loss_function, one_step_loss
 
 include("training.jl")
-export TrainSettings, save_train_settings, load_train_settings, train_model!
+export TrainSettings, save_train_settings, load_train_settings, train_model!,
+       peak_epoch_diagnostics
 
 include("run.jl")
 export run_wflow_gnn, run_wflow_gnn_from_toml, parse_run_config, build_gnn_model
@@ -45,6 +48,8 @@ include("postprocess.jl")
 export regrid, write_regrid_to_netcdf,
        spatial_error_metrics, write_spatial_metrics_to_netcdf, overprediction_vs_ramp,
        spatial_metric_summary, write_spatial_metrics_to_csv,
+       kge_metrics, mae_metric, pbias, event_peak_metrics, event_detection_metrics,
+       river_q_performance_metrics,
        SPATIAL_METRIC_NAMES, RAMP_LABELS, RAMP_EDGES
 
 end # module WflowRoutingGNN
