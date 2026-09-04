@@ -24,6 +24,43 @@ function _write_plot_csv(path::AbstractString, header::Vector{<:AbstractString},
 end
 
 """
+    write_fixed_horizon_anchor_table(path, fh, rmse_anchor, peak_ratio_anchor) -> path
+
+Write the per-anchor fixed-horizon diagnostics to CSV. Rows are anchors and
+columns are:
+- `anchor_index`            : 1-based anchor id in the batched eval.
+- `start_step`              : 1-based start index in the flattened validation
+                              timeseries (graph index).
+- `start_flow_q_phys`       : anchor start-state basin-mean physical discharge.
+- `start_flow_percentile`   : empirical percentile of `start_flow_q_phys`
+                              within the validation start-flow distribution.
+- `fixed_rmse`              : per-anchor fixed-horizon q RMSE (physical units).
+- `peak_ratio`              : per-anchor fixed-horizon peak ratio.
+"""
+function write_fixed_horizon_anchor_table(path::AbstractString,
+                                          fh,
+                                          rmse_anchor::AbstractVector,
+                                          peak_ratio_anchor::AbstractVector)
+    length(rmse_anchor) == fh.B ||
+        throw(ArgumentError("rmse_anchor length ($(length(rmse_anchor))) must equal fh.B ($(fh.B))"))
+    length(peak_ratio_anchor) == fh.B ||
+        throw(ArgumentError("peak_ratio_anchor length ($(length(peak_ratio_anchor))) must equal fh.B ($(fh.B))"))
+
+    header = ["anchor_index", "start_step", "start_flow_q_phys",
+              "start_flow_percentile", "fixed_rmse", "peak_ratio"]
+    columns = Any[
+        collect(1:fh.B),
+        fh.anchor_starts,
+        fh.start_q_phys,
+        fh.start_q_percentile,
+        collect(Float32, rmse_anchor),
+        collect(Float32, peak_ratio_anchor),
+    ]
+    _write_plot_csv(path, header, columns)
+    return path
+end
+
+"""
     plot_losses(train_rollout, val_rollout, train_1step, val_1step;
                 path = nothing) -> Figure
 
@@ -179,8 +216,11 @@ function plot_amplification(train_amp, val_amp;
 end
 
 """
-    plot_fixed_horizon(val_fixed_rmse, val_peak_ratio; horizon = nothing,
-                       path = nothing, csv = true, csv_path = nothing) -> Figure
+    plot_fixed_horizon(val_fixed_rmse, val_peak_ratio;
+                       val_peak_ratio_frac_gt2 = nothing,
+                       val_fixed_rmse_highflow = nothing,
+                       horizon = nothing, path = nothing, csv = true,
+                       csv_path = nothing) -> Figure
 
 Plot the per-epoch **fixed-horizon** validation metrics from `train_model!`: the
 constant-length autoregressive discharge RMSE (physical units) and the peak
@@ -193,10 +233,16 @@ Two stacked panels are drawn:
 - Bottom : peak ratio, with a dashed reference line at `1` (values above `1`
            indicate the rollout over-amplifies the hydrograph peak).
 
+When provided, `val_peak_ratio_frac_gt2` and `val_fixed_rmse_highflow` are
+appended as CSV-only columns (not drawn) so anti-masking fixed-horizon guard
+signals are persisted per epoch.
+
 Writes the plotted arrays to CSV alongside the figure when `csv` is `true`.
 Returns the `Figure`.
 """
 function plot_fixed_horizon(val_fixed_rmse, val_peak_ratio;
+                            val_peak_ratio_frac_gt2 = nothing,
+                            val_fixed_rmse_highflow = nothing,
                             horizon  = nothing,
                             path     = nothing,
                             csv      = true,
@@ -224,6 +270,14 @@ function plot_fixed_horizon(val_fixed_rmse, val_peak_ratio;
     if csv && !isnothing(csv_out)
         header  = ["epoch", "val_fixed_rmse", "val_peak_ratio"]
         columns = Any[collect(epochs), val_fixed_rmse, val_peak_ratio]
+        if !isnothing(val_peak_ratio_frac_gt2) && !isempty(val_peak_ratio_frac_gt2)
+            push!(header, "val_peak_ratio_frac_gt2")
+            push!(columns, val_peak_ratio_frac_gt2)
+        end
+        if !isnothing(val_fixed_rmse_highflow) && !isempty(val_fixed_rmse_highflow)
+            push!(header, "val_fixed_rmse_highflow")
+            push!(columns, val_fixed_rmse_highflow)
+        end
         _write_plot_csv(csv_out, header, columns)
     end
 

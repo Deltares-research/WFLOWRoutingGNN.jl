@@ -136,28 +136,35 @@ invalidates search arms.
   (block-diagonal batch, `fh.B` anchors, arrays shaped `(N, H, B)`) but then
   reduces with `mean`/`maximum` over **all** anchors into `(rmse_q, peak_ratio)`.
   The per-anchor information exists and is simply discarded before the reduction.
-- [ ] **Return per-anchor arrays, not just the two scalars.** Have
+- [x] **Return per-anchor arrays, not just the two scalars.** Have
       `fixed_horizon_metrics` also produce length-`B` vectors: per-anchor RMSE
       (`sqrt(mean(abs2, ...))` reduced over `(N, H)` only) and per-anchor peak
       ratio (`maximum(abs, pred)/max(true_peak_a, eps)` with a **per-anchor**
       truth peak). Keep the existing two aggregate scalars for backward
       compatibility (existing history fields / plot in
       [src/plot.jl](../src/plot.jl)).
-- [ ] **Tag each anchor with its start-state flow percentile.** In
+- [x] **Tag each anchor with its start-state flow percentile.** In
       `build_fixed_horizon_eval` ([src/rollout.jl](../src/rollout.jl)) the anchor
       `starts` and per-anchor initial `states0` are known; compute each anchor's
       start-state discharge summary (e.g. basin-mean or basin-max physical `q` at
       step 0) and its percentile within the val-split flow distribution, and
       store it on `FixedHorizonEval` (new field) so the diagnostic can be keyed
       by flow regime without recomputation.
-- [ ] **Persist it for one full-curriculum run.** Write the per-anchor table
+- [x] **Persist it for one full-curriculum run.** Write the per-anchor table
       (`anchor_index`, `start_time`/`start_step`, `start_flow_percentile`,
       `fixed_rmse`, `peak_ratio`) to the run's `metrics/` dir (CSV/TOML, mirror
       the existing `plot_fixed_horizon` CSV writer in
-      [src/plot.jl](../src/plot.jl)). Per-epoch logging of the full table is not
+      [src/plot.jl](../src/plot.jl)). Implemented as `metrics/fixed_horizon_anchors.csv`.
+      Per-epoch logging of the full table is not
       required — a final-epoch (or best-epoch) dump is enough to test the
       prediction; keep the two aggregate scalars in the per-epoch history.
-- [ ] **Guard against the reduction masking divergence.** Consider also logging a
+- [x] **Guard against the reduction masking divergence.** Added per-epoch
+      anti-masking aggregates in training history: `val_peak_ratio_frac_gt2`
+      (fraction of anchors with `peak_ratio > 2`) and
+      `val_fixed_rmse_highflow` (mean fixed-horizon RMSE over anchors with
+      `start_flow_percentile >= 0.8`), and surfaced them in fixed-horizon CSV /
+      metrics TOML outputs.
+      Consider also logging a
       cheap aggregate that is *not* max-dominated (e.g. fraction of anchors with
       `peak_ratio > threshold`, or a high-flow-anchor-only RMSE) as a first-class
       per-epoch signal, per RECOMMENDATION #3 ("report a high-flow-anchor rollout

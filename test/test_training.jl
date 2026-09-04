@@ -182,11 +182,33 @@ end
     @test fh.N == TR_N_NODES
     @test size(fh.forcing)     == (TR_N_FORCING, fh.N * fh.B, fh.horizon)
     @test size(fh.states0)     == (TR_N_STATE,   fh.N * fh.B)
+    @test length(fh.anchor_starts) == fh.B
+    @test length(fh.start_q_phys) == fh.B
+    @test length(fh.start_q_percentile) == fh.B
+    @test all(0f0 .<= fh.start_q_percentile .<= 1f0)
     @test size(fh.true_q_phys) == (fh.N, fh.horizon, fh.B)
 
-    rmse, peak = fixed_horizon_metrics(deepcopy(TR_MODEL), fh; device = :cpu)
-    @test isfinite(rmse) && rmse >= 0
-    @test isfinite(peak) && peak >= 0
+    m = fixed_horizon_metrics(deepcopy(TR_MODEL), fh; device = :cpu)
+    @test isfinite(m.rmse_q) && m.rmse_q >= 0
+    @test isfinite(m.peak_ratio) && m.peak_ratio >= 0
+    @test length(m.rmse_q_anchor) == fh.B
+    @test length(m.peak_ratio_anchor) == fh.B
+    @test all(isfinite, m.rmse_q_anchor)
+    @test all(>=(0), m.rmse_q_anchor)
+    @test all(isfinite, m.peak_ratio_anchor)
+    @test all(>=(0), m.peak_ratio_anchor)
+
+    @testset "per-anchor fixed-horizon CSV writer" begin
+        csv_path = tempname() * ".csv"
+        WflowRoutingGNN.write_fixed_horizon_anchor_table(csv_path, fh,
+                                                         m.rmse_q_anchor,
+                                                         m.peak_ratio_anchor)
+        lines = readlines(csv_path)
+        rm(csv_path)
+        @test length(lines) == fh.B + 1
+        @test occursin("anchor_index,start_step,start_flow_q_phys,start_flow_percentile,fixed_rmse,peak_ratio",
+                       first(lines))
+    end
 
     # Non-positive horizon / anchors → no metric.
     @test isnothing(build_fixed_horizon_eval(TR_DATASET.val, TR_STATIC, TR_STATS,
@@ -303,6 +325,13 @@ end
         @test all(isnan, losses.peak_grad_frac)
     end
 
+    @testset "fixed-horizon guard histories are NaN when fixed eval is disabled" begin
+        @test length(losses.val_peak_ratio_frac_gt2) == TR_EPOCHS
+        @test length(losses.val_fixed_rmse_highflow) == TR_EPOCHS
+        @test all(isnan, losses.val_peak_ratio_frac_gt2)
+        @test all(isnan, losses.val_fixed_rmse_highflow)
+    end
+
 end
 
 # ---------------------------------------------------------------------------
@@ -352,9 +381,13 @@ end
 
     @test length(losses.val_fixed_rmse) == TR_EPOCHS
     @test length(losses.val_peak_ratio) == TR_EPOCHS
+    @test length(losses.val_peak_ratio_frac_gt2) == TR_EPOCHS
+    @test length(losses.val_fixed_rmse_highflow) == TR_EPOCHS
     @test all(isfinite, losses.val_fixed_rmse)
     @test all(>=(0),    losses.val_fixed_rmse)
     @test all(isfinite, losses.val_peak_ratio)
+    @test all(v -> 0f0 <= v <= 1f0, losses.val_peak_ratio_frac_gt2)
+    @test all(v -> isnan(v) || v >= 0f0, losses.val_fixed_rmse_highflow)
     @test ckpt_epochs == [2, 4]          # checkpoint_every = 2, epochs = 4
     @test losses.stopped_epoch == TR_EPOCHS
 

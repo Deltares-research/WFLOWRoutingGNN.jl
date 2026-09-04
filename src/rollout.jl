@@ -326,6 +326,13 @@ Fields:
                   forward pass tiles them across the batch).
 - `forcing`     : `(n_forcing, N·B, horizon)` per-step forcing in block order.
 - `states0`     : `(n_state, N·B)` initial state in block order.
+- `anchor_starts`: length-`B` start indices in the flattened validation
+                  timeseries (1-based graph index).
+- `start_q_phys`: length-`B` anchor start-state discharge summary (basin-mean
+                  physical q at the anchor start step).
+- `start_q_percentile`: length-`B` empirical percentile of `start_q_phys`
+                  within the flattened validation-timeseries start-flow
+                  distribution (range `[0, 1]`).
 - `true_q_phys` : `(N, horizon, B)` ground-truth discharge in physical units.
 - `true_peak`   : global `max|true_q_phys|` (reference for the peak ratio).
 - `qi`          : row index of discharge in the state.
@@ -337,6 +344,9 @@ struct FixedHorizonEval
     static      :: Matrix{Float32}
     forcing     :: Array{Float32, 3}
     states0     :: Matrix{Float32}
+    anchor_starts :: Vector{Int}
+    start_q_phys  :: Vector{Float32}
+    start_q_percentile :: Vector{Float32}
     true_q_phys :: Array{Float32, 3}
     true_peak   :: Float32
     qi          :: Int
@@ -402,9 +412,24 @@ function build_fixed_horizon_eval(split, static::AbstractMatrix{Float32},
     σq    = Float32(norm_stats[qname].std)
     qpost = get(postscale, qname, ones(Float32, N))
 
+    # Start-state flow summary distribution over the full flattened validation
+    # timeseries (basin-mean physical q at each graph step).
+    q_start_dist = Vector{Float32}(undef, T)
+    for t in 1:T
+        qn = graphs[t].ndata.state[qi, :]
+        qp = (qn .* σq .+ μq) .* qpost
+        q_start_dist[t] = Float32(mean(qp))
+    end
+
+    # Anchor metadata for regime-conditioned diagnostics.
+    start_q_phys = Vector{Float32}(undef, B)
+    start_q_pct  = Vector{Float32}(undef, B)
+
     for (a, s) in enumerate(starts)
         cols = ((a - 1) * N + 1):(a * N)
         states0[:, cols] = graphs[s].ndata.state
+        start_q_phys[a] = q_start_dist[s]
+        start_q_pct[a]  = Float32(count(<=(q_start_dist[s]), q_start_dist) / length(q_start_dist))
         for k in 1:H
             forcing[:, cols, k]  = graphs[s + k - 1].ndata.forcing
             true_q_norm[:, k, a] = graphs[s + k].ndata.state[qi, :]
@@ -416,16 +441,25 @@ function build_fixed_horizon_eval(split, static::AbstractMatrix{Float32},
     gB          = GNNGraphs.batch([g0 for _ in 1:B])
 
     return FixedHorizonEval(gB, Matrix{Float32}(static), forcing, states0,
+                            starts, start_q_phys, start_q_pct,
                             true_q_phys, true_peak, qi, μq, σq, qpost, H, N, B)
 end
 
 """
-    fixed_horizon_metrics(model, fh; device = :cpu) -> (rmse_q, peak_ratio)
+    fixed_horizon_metrics(model, fh; device = :cpu) -> NamedTuple
 
 Run the constant-length autoregressive rollout for all anchors of `fh` (batched
-into one forward pass per step) and return the discharge RMSE in physical units
-and the global peak-amplification ratio `max|q_pred| / max|q_truth|`. No
-gradients are taken; `model` may live on either device.
+into one forward pass per step).
+
+Returns:
+- `rmse_q`: global discharge RMSE in physical units (pooled over all nodes,
+  horizons and anchors).
+- `peak_ratio`: global peak-amplification ratio `max|q_pred| / max|q_truth|`.
+- `rmse_q_anchor`: length-`B` per-anchor RMSE (reduced over node × horizon).
+- `peak_ratio_anchor`: length-`B` per-anchor peak ratio with a per-anchor truth
+  peak denominator.
+
+No gradients are taken; `model` may live on either device.
 """
 function fixed_horizon_metrics(model::WflowGNN, fh::FixedHorizonEval; device::Symbol = :cpu)
     dev     = device == :gpu ? Flux.gpu : identity
@@ -448,9 +482,23 @@ function fixed_horizon_metrics(model::WflowGNN, fh::FixedHorizonEval; device::Sy
     pred_q_norm = permutedims(reshape(q_norm, fh.N, fh.B, H), (1, 3, 2))
     pred_q_phys = (pred_q_norm .* fh.q_sigma .+ fh.q_mu) .* reshape(fh.q_postscale, fh.N, 1, 1)
 
-    rmse_q     = sqrt(mean(abs2, pred_q_phys .- fh.true_q_phys))
+    err = pred_q_phys .- fh.true_q_phys
+    rmse_q = sqrt(mean(abs2, err))
     peak_ratio = maximum(abs, pred_q_phys) / max(fh.true_peak, eps(Float32))
-    return Float32(rmse_q), Float32(peak_ratio)
+
+    rmse_q_anchor = Vector{Float32}(undef, fh.B)
+    peak_ratio_anchor = Vector{Float32}(undef, fh.B)
+    for a in 1:fh.B
+        rmse_q_anchor[a] = Float32(sqrt(mean(abs2, @view(err[:, :, a]))))
+        true_peak_a = maximum(abs, @view(fh.true_q_phys[:, :, a]))
+        peak_ratio_anchor[a] = Float32(maximum(abs, @view(pred_q_phys[:, :, a])) /
+                                       max(true_peak_a, eps(Float32)))
+    end
+
+    return (; rmse_q = Float32(rmse_q),
+              peak_ratio = Float32(peak_ratio),
+              rmse_q_anchor,
+              peak_ratio_anchor)
 end
 
 """

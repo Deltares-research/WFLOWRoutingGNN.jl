@@ -521,7 +521,12 @@ When a `fixed_eval::FixedHorizonEval` is supplied (see
 [`build_fixed_horizon_eval`](@ref)) the returned NamedTuple additionally holds
 `val_fixed_rmse` and `val_peak_ratio` — the constant-length rollout discharge
 RMSE and peak-amplification ratio, computed each epoch (filled with `NaN32` when
-no `fixed_eval` is given). It also reports `stopped_epoch` (the last completed
+no `fixed_eval` is given). To guard against single-anchor max masking, it also
+stores two per-epoch aggregates from the per-anchor arrays:
+`val_peak_ratio_frac_gt2` (fraction of anchors with `peak_ratio > 2`) and
+`val_fixed_rmse_highflow` (mean anchor RMSE over anchors with
+`start_q_percentile ≥ 0.8`; `NaN32` if none).
+It also reports `stopped_epoch` (the last completed
 epoch, `< ts.epochs` when early stopping triggered) and `best_epoch` (the
 fixed-horizon RMSE minimiser), plus the training-stability counters
 `n_nonfinite_skips` (total non-finite update skips), `n_backoffs` (adaptive LR
@@ -617,6 +622,12 @@ function train_model!(model,
     n_backoffs    = 0           # cumulative adaptive LR backoff events
     val_fixed_rmse  = Float32[] # fixed-horizon discharge RMSE (physical units)
     val_peak_ratio  = Float32[] # fixed-horizon max|q_pred|/max|q_truth|
+    val_peak_ratio_frac_gt2 = Float32[] # fraction anchors with peak_ratio > 2
+    val_fixed_rmse_highflow = Float32[] # mean anchor RMSE for start_q_percentile >= 0.8
+
+    # Reduction-masking guard constants for fixed-horizon per-anchor diagnostics.
+    const_peak_ratio_threshold = 2.0f0
+    const_highflow_percentile_threshold = 0.8f0
 
     # Tier-1 peak-loss diagnostics (huber loss_type only; NaN32 otherwise) —
     # see peak_epoch_diagnostics.
@@ -793,12 +804,22 @@ function train_model!(model,
         # Fixed-horizon validation metric (constant-length rollout from anchors),
         # comparable epoch-to-epoch and used for early stopping / best selection.
         if do_fixed_eval
-            ep_fixed_rmse, ep_peak_ratio = fixed_horizon_metrics(model, fixed_eval; device = ts.device)
+            fh_metrics = fixed_horizon_metrics(model, fixed_eval; device = ts.device)
+            ep_fixed_rmse = fh_metrics.rmse_q
+            ep_peak_ratio = fh_metrics.peak_ratio
+            ep_peak_ratio_frac = Float32(mean(fh_metrics.peak_ratio_anchor .> const_peak_ratio_threshold))
+            highflow_mask = fixed_eval.start_q_percentile .>= const_highflow_percentile_threshold
+            ep_fixed_rmse_highflow = any(highflow_mask) ?
+                Float32(mean(fh_metrics.rmse_q_anchor[highflow_mask])) : NaN32
         else
             ep_fixed_rmse, ep_peak_ratio = NaN32, NaN32
+            ep_peak_ratio_frac = NaN32
+            ep_fixed_rmse_highflow = NaN32
         end
         push!(val_fixed_rmse, ep_fixed_rmse)
         push!(val_peak_ratio, ep_peak_ratio)
+        push!(val_peak_ratio_frac_gt2, ep_peak_ratio_frac)
+        push!(val_fixed_rmse_highflow, ep_fixed_rmse_highflow)
 
         # Tier-1 peak-loss diagnostics (huber loss_type only), computed once per
         # epoch on the last training batch (a fresh forward/backward, not part of
@@ -852,6 +873,8 @@ function train_model!(model,
         fixed_vals = do_fixed_eval ? [
             (:val_fixed_rmse, round(ep_fixed_rmse, sigdigits = 4)),
             (:val_peak_ratio, round(ep_peak_ratio, sigdigits = 3)),
+            (:peak_ratio_frac_gt2, round(ep_peak_ratio_frac, sigdigits = 3)),
+            (:val_rmse_highflow, round(ep_fixed_rmse_highflow, sigdigits = 4)),
         ] : []
         peak_vals = do_peak_diagnostics ? [
             (:C_peak,     round(pdiag.c_peak, sigdigits = 3)),
@@ -898,6 +921,8 @@ function train_model!(model,
             steps         = steps_hist,
             val_fixed_rmse = val_fixed_rmse,
             val_peak_ratio = val_peak_ratio,
+            val_peak_ratio_frac_gt2 = val_peak_ratio_frac_gt2,
+            val_fixed_rmse_highflow = val_fixed_rmse_highflow,
             peak_c_peak       = peak_c_peak,
             peak_rmse_high    = peak_rmse_high,
             peak_mae_high     = peak_mae_high,

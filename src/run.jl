@@ -477,6 +477,8 @@ function write_run_metrics_toml(path::AbstractString, losses, ts::TrainSettings,
     putf!(fh_t, "final_val_rmse",   lastf(losses.val_fixed_rmse))
     putf!(fh_t, "best_val_rmse",    bestf(losses.val_fixed_rmse, minimum))
     putf!(fh_t, "final_peak_ratio", lastf(losses.val_peak_ratio))
+    putf!(fh_t, "final_peak_ratio_frac_gt2", lastf(get(losses, :val_peak_ratio_frac_gt2, nothing)))
+    putf!(fh_t, "final_val_rmse_highflow",   lastf(get(losses, :val_fixed_rmse_highflow, nothing)))
     root["fixed_horizon"] = fh_t
 
     if spatial_summary !== nothing
@@ -784,9 +786,20 @@ function run_wflow_gnn(ds::DataSettings, ms::ModelSettings, ts::TrainSettings)
     # Fixed-horizon validation metric (discharge RMSE + peak ratio per epoch)
     if haskey(losses, :val_fixed_rmse) && any(isfinite, losses.val_fixed_rmse)
         plot_fixed_horizon(losses.val_fixed_rmse, losses.val_peak_ratio;
-                           horizon = ts.eval_horizon,
-                           path    = joinpath(plots_dir, "fixed_horizon.png"),
+                           val_peak_ratio_frac_gt2 = get(losses, :val_peak_ratio_frac_gt2, nothing),
+                           val_fixed_rmse_highflow = get(losses, :val_fixed_rmse_highflow, nothing),
+                           horizon  = ts.eval_horizon,
+                           path     = joinpath(plots_dir, "fixed_horizon.png"),
                            csv_path = joinpath(metrics_dir, "fixed_horizon.csv"))
+
+        if fixed_eval !== nothing
+            fh_final = fixed_horizon_metrics(model, fixed_eval; device = ts.device)
+            write_fixed_horizon_anchor_table(
+                joinpath(metrics_dir, "fixed_horizon_anchors.csv"),
+                fixed_eval,
+                fh_final.rmse_q_anchor,
+                fh_final.peak_ratio_anchor)
+        end
     end
 
     # Grid lookup table (node index → raster position)
