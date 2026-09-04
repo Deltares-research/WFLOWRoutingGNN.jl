@@ -208,60 +208,7 @@ function hpar_search(toml_path::String)
         end
         d["data"]["run_name"] = base_name * "_hps$(lpad(idx, ndigits(n_combos), '0'))"
 
-        dd = d["data"]
-        ds = DataSettings(
-            run_name         = dd["run_name"],
-            runs_dir         = resolve(dd["runs_dir"]),
-            wflow_model_path = resolve(dd["wflow_model_path"]),
-            train_frac       = dd["train_frac"],
-            val_frac         = dd["val_frac"],
-            output_run_dir   = get(dd, "output_run_dir", "run_default"),
-            wflow_schema     = get(dd, "wflow_schema",   "v1"),
-        )
-
-        md = d["model"]
-        ms = ModelSettings(
-            domain          = md["domain"],
-            hidden_dim      = get(md, "hidden_dim",      64),
-            nlayers         = get(md, "nlayers",          3),
-            mlp_layers      = get(md, "mlp_layers",       1),
-            enc_activation  = ACTIVATIONS[get(md, "enc_activation",  "swish")],
-            proc_activation = ACTIVATIONS[get(md, "proc_activation", "swish")],
-            enforce_mass_balance = get(md, "enforce_mass_balance", true),
-            mb_theta        = Float32(get(md, "mb_theta", 1.0)),
-            mb_augment_decoder = get(md, "mb_augment_decoder", false),
-        )
-
-        td = d["train"]
-        sd = get(td, "strategy", Dict{String,Any}())
-        strategy = TrainingStrategy(
-            get(sd, "steps",       [1]),
-            get(sd, "durations",   [td["epochs"]]),
-            get(sd, "noise_scale", 0.0),
-        )
-        ts = TrainSettings(
-            epochs        = td["epochs"],
-            batch_size    = td["batch_size"],
-            lr_start      = td["lr_start"],
-            lr_final      = td["lr_final"],
-            lr_steps      = td["lr_steps"],
-            strategy      = strategy,
-            h_loss_scale  = Symbol(get(td, "h_loss_scale", "absolute")),
-            phase_backoff_factor = get(td, "phase_backoff_factor", 0.5),
-            eval_horizon     = get(td, "eval_horizon", 30),
-            eval_anchors     = get(td, "eval_anchors", 32),
-            early_stopping   = get(td, "early_stopping", false),
-            early_stopping_patience = get(td, "early_stopping_patience", 20),
-            checkpoint_every = get(td, "checkpoint_every", 0),
-            checkpoint_full_eval = get(td, "checkpoint_full_eval", false),
-            device        = Symbol(get(td, "device", "cpu")),
-            val_daterange = if haskey(td, "val_daterange")
-                r = td["val_daterange"]
-                (Dates.DateTime(r[1]), Dates.DateTime(r[2]))
-            else
-                nothing
-            end,
-        )
+        ds, ms, ts = settings_from_config(d, toml_dir)
 
         model, metrics = run_wflow_gnn(ds, ms, ts)
         push!(models, model)

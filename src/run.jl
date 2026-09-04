@@ -50,28 +50,28 @@ function run_wflow_gnn_from_toml(toml_path::String)
 end
 
 """
-    parse_run_config(toml_path) -> (ds, ms, ts)
+    settings_from_config(d, toml_dir) -> (ds, ms, ts)
 
-Parse an experiment config TOML into `(DataSettings, ModelSettings,
-TrainSettings)` without running any training. Relative paths in `[data]` are
-resolved relative to the directory containing the TOML file.
+Build `(DataSettings, ModelSettings, TrainSettings)` from an already-parsed
+config `Dict` `d` (the four `[data]`/`[model]`/`[train]`/`[train.strategy]`
+tables), resolving relative `[data]` paths against `toml_dir`.
 
-Shared by [`run_wflow_gnn_from_toml`](@ref) and standalone tuning scripts (e.g.
-the LR range test) so they interpret configs identically. The optional
+This is the single source of truth for the dict→settings mapping, shared by
+[`parse_run_config`](@ref) (path → loaded TOML → here) and the hyperparameter
+search (`hpar_search`, per-combo mutated dict → here) so both interpret configs
+identically and new config keys land in both paths automatically. The optional
 `[train]` keys `lr_warmup_epochs` and `lr_peak_decay` feed the curriculum LR
 schedule; `lr_steps` is retained for backward compatibility but unused by it.
 """
-function parse_run_config(toml_path::String)
-    isfile(toml_path) || throw(ArgumentError("TOML file not found: $toml_path"))
-    toml_dir = dirname(abspath(toml_path))
-    d        = TOML.parsefile(toml_path)
+function settings_from_config(d::AbstractDict, toml_dir::AbstractString)
+    toml_dir_abs = abspath(toml_dir)
 
     haskey(d, "data")  || throw(ArgumentError("TOML missing [data] table"))
     haskey(d, "model") || throw(ArgumentError("TOML missing [model] table"))
     haskey(d, "train") || throw(ArgumentError("TOML missing [train] table"))
 
     # Resolve relative paths against the directory of the TOML file
-    resolve(p) = isabspath(p) ? p : normpath(joinpath(toml_dir, p))
+    resolve(p) = isabspath(p) ? p : normpath(joinpath(toml_dir_abs, p))
 
     dd = d["data"]
     ds = DataSettings(
@@ -137,6 +137,24 @@ function parse_run_config(toml_path::String)
     )
 
     return (ds, ms, ts)
+end
+
+"""
+    parse_run_config(toml_path) -> (ds, ms, ts)
+
+Load an experiment config TOML from `toml_path` and parse it into
+`(DataSettings, ModelSettings, TrainSettings)` without running any training,
+via [`settings_from_config`](@ref). Relative paths in `[data]` are resolved
+relative to the directory containing the TOML file.
+
+Shared by [`run_wflow_gnn_from_toml`](@ref) and standalone tuning scripts (e.g.
+the LR range test) so they interpret configs identically.
+"""
+function parse_run_config(toml_path::String)
+    isfile(toml_path) || throw(ArgumentError("TOML file not found: $toml_path"))
+    toml_dir = dirname(abspath(toml_path))
+    d        = TOML.parsefile(toml_path)
+    return settings_from_config(d, toml_dir)
 end
 
 """

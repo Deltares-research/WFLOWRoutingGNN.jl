@@ -7,6 +7,59 @@ behind a toggle so it can be A/B-tested against current behaviour.
 
 ---
 
+# HParSearch config-parser drift (fix FIRST — blocks all future searches)
+
+From the `sava_small_v081_s2_stability` post-mortem
+([EXPERIMENTS.md](EXPERIMENTS.md) → *bug 1*): the intended `grad_clip` search
+arm never executed. All 8 runs trained at the default `grad_clip = 1.0` even
+though the config `search_space` requested `0.1`. Root cause: the hparsearch
+path builds its own `TrainSettings`/`TrainingStrategy` inline, and this
+constructor has **drifted out of sync** with the single-run parser in
+[src/run.jl](../src/run.jl). Any `[train]`/`[train.strategy]` key the inline
+constructor omits is silently written into the config dict but **never consumed**
+— it defaults instead. This is a code bug, not a config error, and it silently
+invalidates search arms.
+
+## 0. Eliminate the hparsearch ↔ run.jl config-parsing drift
+
+- **Evidence.** [src/hparsearch.jl](../src/hparsearch.jl) line ~242 builds
+  `TrainSettings(...)` and line ~237 builds `TrainingStrategy(...)` inline. The
+  single-run parser `parse_run_config` in [src/run.jl](../src/run.jl) (lines
+  ~100–139) is the correct reference. Diffing the two, the search path currently
+  **drops** the following keys (they can never be varied in a search):
+  - `TrainSettings`: `grad_clip`, `lr_warmup_epochs`, `lr_peak_decay` (the three
+    flagged in the post-mortem).
+  - `TrainingStrategy`: `loss_type`, `peak_delta`, `peak_lambda`, `peak_gamma`,
+    `peak_w_max` — so the **peak-weighted-Huber workstream (§2) is also
+    un-searchable** until this is fixed.
+  - Inconsistent default: `lr_steps` is a hard `td["lr_steps"]` (required) in
+    hparsearch vs `get(td, "lr_steps", 10)` in run.jl.
+- [x] **Preferred fix — remove the duplication, not patch it.** Refactor
+      `parse_run_config` so the dict→`(ds, ms, ts)` construction lives in a
+      shared helper that takes an already-loaded TOML `Dict` (+ resolve dir),
+      e.g. `settings_from_config(d, toml_dir)`. Have both `parse_run_config`
+      (path → load TOML → helper) and `run_hparsearch` (mutated dict → helper)
+      call it. This makes future config keys land in both paths automatically
+      and prevents the class of bug recurring.
+- [ ] **Minimum fix (if the refactor is deferred).** Add the missing keys to the
+      inline `TrainSettings`/`TrainingStrategy` in `src/hparsearch.jl`
+      (`grad_clip`, `lr_warmup_epochs`, `lr_peak_decay`; `loss_type`,
+      `peak_delta`, `peak_lambda`, `peak_gamma`, `peak_w_max`) and switch
+      `lr_steps` to `get(td, "lr_steps", 10)` to match run.jl.
+- [x] **Regression guard.** Add a test that a `search_space` overriding
+      `train.grad_clip` (and one `train.strategy.*` key) is actually reflected in
+      the constructed `TrainSettings`/`TrainingStrategy` for each combo — i.e.
+      assert the override reaches the settings object, not just the config dict.
+      Extend [test/test_strategy.jl](../test/test_strategy.jl) or
+      [test/test_training.jl](../test/test_training.jl).
+- [x] **Verify.** Re-ran a tiny 2-combo parser-level hparsearch harness varying
+      `grad_clip = {1.0, 0.1}` and confirmed each run's saved
+      `model/train_settings.toml` shows the intended value (`1.0` for one
+      combo and `0.10000000149011612` for the other).
+- Touch: `src/hparsearch.jl`, `src/run.jl` (extract shared parser), test file.
+
+---
+
 ## 1. Distribution- & physics-aware feature scaling
 
 - [ ] Keep physics channels (`q`, `h`, `inwater`) on **linear z-score** (nonlinear
@@ -64,6 +117,59 @@ behind a toggle so it can be A/B-tested against current behaviour.
   - Deferred: no detection/exceedance head exists in the codebase yet; wiring this in is out of scope until one is added.
 - Touch: `src/training.jl`, `src/postprocess.jl`, `src/rollout.jl`, `src/run.jl` — Tier 1 and
   Tier 2 helpers are now wired in; Tier 3 (`event_detection_metrics`) remains helper-only.
+
+## 2c. Per-anchor fixed-horizon rollout diagnostic (highest-priority diagnostic)
+
+- **Why (from [EXPERIMENTS.md](EXPERIMENTS.md) → `s2_stability` RECOMMENDATION
+  #2 / HYPOTHESES).** The fixed-horizon metric currently collapses all `B`
+  anchors into two **global** scalars, so a single diverging anchor dominates
+  `val_peak_ratio` / `val_fixed_rmse` and the regime that diverges is invisible.
+  The post-mortem established (by inference) that the MB rollout operator is
+  **conditionally unstable** — bounded from benign low-flow starts, geometrically
+  unstable (`peak_ratio ≈ amp^H`, `amp ≈ 12`) from stiff high-flow starts. This
+  diagnostic converts that from strong inference to **direct evidence** and
+  pinpoints the exact regime the `mb_theta` / peak-weighted-loss stability work
+  must target. **Prediction to test:** divergence concentrates in
+  high-flow-start anchors while low-flow anchors stay bounded.
+- **Current code.** `fixed_horizon_metrics(model, fh)` in
+  [src/rollout.jl](../src/rollout.jl) already runs each anchor independently
+  (block-diagonal batch, `fh.B` anchors, arrays shaped `(N, H, B)`) but then
+  reduces with `mean`/`maximum` over **all** anchors into `(rmse_q, peak_ratio)`.
+  The per-anchor information exists and is simply discarded before the reduction.
+- [ ] **Return per-anchor arrays, not just the two scalars.** Have
+      `fixed_horizon_metrics` also produce length-`B` vectors: per-anchor RMSE
+      (`sqrt(mean(abs2, ...))` reduced over `(N, H)` only) and per-anchor peak
+      ratio (`maximum(abs, pred)/max(true_peak_a, eps)` with a **per-anchor**
+      truth peak). Keep the existing two aggregate scalars for backward
+      compatibility (existing history fields / plot in
+      [src/plot.jl](../src/plot.jl)).
+- [ ] **Tag each anchor with its start-state flow percentile.** In
+      `build_fixed_horizon_eval` ([src/rollout.jl](../src/rollout.jl)) the anchor
+      `starts` and per-anchor initial `states0` are known; compute each anchor's
+      start-state discharge summary (e.g. basin-mean or basin-max physical `q` at
+      step 0) and its percentile within the val-split flow distribution, and
+      store it on `FixedHorizonEval` (new field) so the diagnostic can be keyed
+      by flow regime without recomputation.
+- [ ] **Persist it for one full-curriculum run.** Write the per-anchor table
+      (`anchor_index`, `start_time`/`start_step`, `start_flow_percentile`,
+      `fixed_rmse`, `peak_ratio`) to the run's `metrics/` dir (CSV/TOML, mirror
+      the existing `plot_fixed_horizon` CSV writer in
+      [src/plot.jl](../src/plot.jl)). Per-epoch logging of the full table is not
+      required — a final-epoch (or best-epoch) dump is enough to test the
+      prediction; keep the two aggregate scalars in the per-epoch history.
+- [ ] **Guard against the reduction masking divergence.** Consider also logging a
+      cheap aggregate that is *not* max-dominated (e.g. fraction of anchors with
+      `peak_ratio > threshold`, or a high-flow-anchor-only RMSE) as a first-class
+      per-epoch signal, per RECOMMENDATION #3 ("report a high-flow-anchor rollout
+      metric, not the single benign date-range trajectory").
+- **Validation.** On a full-curriculum `increment` run (e.g. reproduce hps4),
+  confirm the per-anchor `peak_ratio` rises monotonically with
+  `start_flow_percentile` and that low-percentile anchors stay `O(1)`. This
+  directly confirms/refutes the conditional-instability hypothesis.
+- Touch: `src/rollout.jl` (`FixedHorizonEval`, `build_fixed_horizon_eval`,
+  `fixed_horizon_metrics`), `src/training.jl` (thread/persist the per-anchor
+  table), `src/plot.jl` (writer), config toggle if per-epoch persistence is
+  wanted.
 
 ## 3. Pushforward / detached-rollout trick (toggle)
 
