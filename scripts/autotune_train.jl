@@ -51,6 +51,8 @@
 #   --grad-clip-mult X      grad_clip = X * healthy grad norm (default: 5)
 #   --grad-clip-min X       lower clamp for auto grad_clip      (default: 0.1)
 #   --grad-clip-max X       upper clamp for auto grad_clip      (default: 10)
+#   --seed N                base seed for probe reproducibility (default: 42)
+#   --range-inits N         number of inits for LR range test    (default: 3)
 #   --dry-run               tune + write config but do NOT train
 #
 # Example:
@@ -161,6 +163,8 @@ function autotune(config::AbstractString, opts::AbstractDict)
     clip_mult     = parse(Float64, optget(opts, "grad-clip-mult", "5.0"))
     clip_min      = parse(Float64, optget(opts, "grad-clip-min", "0.1"))
     clip_max      = parse(Float64, optget(opts, "grad-clip-max", "10.0"))
+    base_seed     = parse(Int,     optget(opts, "seed", "42"))
+    range_inits   = parse(Int,     optget(opts, "range-inits", "3"))
     probe_steps   = parse(Int,     optget(opts, "probe-steps", "12"))
     decay_min     = parse(Float64, optget(opts, "peak-decay-min", "0.3"))
     decay_max     = parse(Float64, optget(opts, "peak-decay-max", "0.9"))
@@ -188,6 +192,7 @@ function autotune(config::AbstractString, opts::AbstractDict)
 
     @info "Auto-tune config: $config"
     @info "Device=$(ts.device)  curriculum steps=$(ts.strategy.steps)  deepest horizon=$deep_horizon"
+    @info "Probe seed=$base_seed  range_inits=$range_inits"
 
     @info "Building graph time series (once)"
     gd = load_graphs(ds, ms)
@@ -213,34 +218,51 @@ function autotune(config::AbstractString, opts::AbstractDict)
         grad_clip = parse(Float64, optget(opts, "grad-clip", "0.0"))
         @info "Using user-supplied lr_start=$lr_start (skipping range test)."
     else
-        @info @sprintf("LR range test: %d steps  lr %.1e -> %.1e  horizon=%d  batch=%d",
-                       num_steps, lr_min, lr_max, range_horizon, batch_size)
-        setup = make_model_loader(gd, ds, ms, ts; horizon = range_horizon,
-                                  batch_size = batch_size)
-        lrs, losses, gnorms = lr_range_test(setup; num_steps = num_steps,
-                                            lr_min = lr_min, lr_max = lr_max)
-        print_curve(lrs, losses, gnorms)
-        csv = joinpath(dirname(abspath(config)),
-                       @sprintf("lr_range_test_h%d_b%d.csv", range_horizon, setup.batch_size))
-        write_csv(csv, lrs, losses, gnorms)
+        @info @sprintf("LR range test: %d steps  lr %.1e -> %.1e  horizon=%d  batch=%d  inits=%d",
+                       num_steps, lr_min, lr_max, range_horizon, batch_size, range_inits)
 
-        rec = recommend_lr(lrs, losses, gnorms)
-        @info @sprintf(
-            "  horizon=%d → safe=%.3e  (steep=%.3e  min/10=%.3e  gnorm_cap=%.3e  gnorm_ref=%.3e)",
-            range_horizon, rec.safe, rec.steep, rec.min_over_10, rec.gnorm_cap, rec.gnorm_ref)
-        isfinite(rec.safe) || error("LR range test produced no finite recommendation.")
-        rec.near_lr_floor && error(@sprintf(
-            "LR recommendation %.3e is within one decade of lr_min %.3e; range test likely failed. Re-run with explicit --lr-start or inspect the LR curve.",
-            rec.safe, minimum(lrs)))
-        lr_start = rec.safe
+        recs = NamedTuple[]
+        valid_batches = Int[]
+        for i in 1:max(1, range_inits)
+            seed_i = base_seed + i - 1
+            setup = make_model_loader(gd, ds, ms, ts;
+                                      horizon = range_horizon,
+                                      batch_size = batch_size,
+                                      seed = seed_i,
+                                      shuffle = false)
+            lrs, losses, gnorms = lr_range_test(setup; num_steps = num_steps,
+                                                lr_min = lr_min, lr_max = lr_max)
+            print_curve(lrs, losses, gnorms)
+            csv = joinpath(dirname(abspath(config)),
+                           @sprintf("lr_range_test_h%d_b%d_s%d_i%d.csv",
+                                    range_horizon, setup.batch_size, seed_i, i))
+            write_csv(csv, lrs, losses, gnorms)
+
+            rec = recommend_lr(lrs, losses, gnorms)
+            push!(recs, rec)
+            push!(valid_batches, setup.batch_size)
+            @info @sprintf(
+                "  init %d (seed=%d): safe=%.3e  steep=%.3e  min/10=%.3e  gnorm_cap=%.3e  gnorm_ref=%.3e  near_floor=%s",
+                i, seed_i, rec.safe, rec.steep, rec.min_over_10, rec.gnorm_cap, rec.gnorm_ref,
+                string(rec.near_lr_floor))
+            free_gpu!()
+        end
+
+        agg = aggregate_lr_recommendations(recs)
+        isfinite(agg.safe) || error("LR range test produced no robust finite recommendation across inits.")
+        agg.safe <= 10.0 * lr_min && error(@sprintf(
+            "Robust LR recommendation %.3e is within one decade of lr_min %.3e; range test likely failed across inits. Re-run with explicit --lr-start or inspect curves.",
+            agg.safe, lr_min))
+
+        lr_start = agg.safe
         # Clip the global grad norm to a few× the healthy (pre-blow-up) norm so a
         # transient spike at a curriculum restart is tamed without throttling
         # normal updates. Clamp to a sane range so spikes cannot inflate the
         # recommendation into a no-op clip threshold. `--grad-clip X` overrides.
-        grad_clip = isfinite(rec.gnorm_ref) ? clamp(clip_mult * rec.gnorm_ref, clip_min, clip_max) : clip_max
+        grad_clip = isfinite(agg.gnorm_ref) ? clamp(clip_mult * agg.gnorm_ref, clip_min, clip_max) : clip_max
         haskey(opts, "grad-clip") && (grad_clip = parse(Float64, opts["grad-clip"]))
-        @info @sprintf("Range test → lr_start=%.3e (horizon %d)  grad_clip=%.3e",
-                       lr_start, range_horizon, grad_clip)
+        @info @sprintf("Range test (robust median over %d/%d valid inits) → lr_start=%.3e (horizon %d)  grad_clip=%.3e",
+                       agg.n_valid, agg.n_total, lr_start, range_horizon, grad_clip)
         free_gpu!()
     end
 
@@ -264,12 +286,18 @@ function autotune(config::AbstractString, opts::AbstractDict)
     else
         shallow_h = ts.strategy.steps[1]
         deep_h    = ts.strategy.steps[end]
-        s_shallow = make_model_loader(gd, ds, ms, ts; horizon = shallow_h,
-                                      batch_size = batch_size)
+        s_shallow = make_model_loader(gd, ds, ms, ts;
+                          horizon = shallow_h,
+                          batch_size = batch_size,
+                          seed = base_seed + 10_000,
+                          shuffle = false)
         g_shallow = gradient_growth_probe(s_shallow; num_steps = probe_steps)
         free_gpu!()
-        s_deep = make_model_loader(gd, ds, ms, ts; horizon = deep_h,
-                                   batch_size = batch_size)
+        s_deep = make_model_loader(gd, ds, ms, ts;
+                       horizon = deep_h,
+                       batch_size = batch_size,
+                       seed = base_seed + 20_000,
+                       shuffle = false)
         g_deep = gradient_growth_probe(s_deep; num_steps = probe_steps)
         free_gpu!()
         if isfinite(g_shallow) && isfinite(g_deep) && g_deep > 0 && g_shallow > 0

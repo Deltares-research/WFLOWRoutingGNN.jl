@@ -33,3 +33,23 @@ include(joinpath(@__DIR__, "..", "scripts", "lr_range_test.jl"))
     @test !rec.near_lr_floor
     @test rec.gnorm_cap > 10.0 * minimum(lrs)
 end
+
+@testset "aggregate_lr_recommendations" begin
+    recs = [
+        (; safe = 1e-3, gnorm_ref = 2.0e2, near_lr_floor = false),
+        (; safe = 9e-4, gnorm_ref = 1.8e2, near_lr_floor = false),
+        (; safe = 1e-7, gnorm_ref = 1.0e6, near_lr_floor = true),
+    ]
+    agg = aggregate_lr_recommendations(recs)
+    @test agg.n_valid == 2
+    @test agg.n_total == 3
+    @test agg.safe ≈ 9.5e-4
+    @test agg.gnorm_ref ≈ 190.0
+
+    agg_none = aggregate_lr_recommendations([
+        (; safe = 1e-7, gnorm_ref = 1.0e6, near_lr_floor = true),
+        (; safe = NaN,  gnorm_ref = NaN,   near_lr_floor = false),
+    ])
+    @test agg_none.n_valid == 0
+    @test !isfinite(agg_none.safe)
+end

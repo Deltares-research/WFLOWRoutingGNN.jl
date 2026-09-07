@@ -64,6 +64,7 @@ using SparseArrays
 using Statistics
 using Printf
 using CUDA
+using Random
 
 # ---------------------------------------------------------------------------
 # CLI parsing
@@ -108,12 +109,16 @@ end
 
 # Build a model + single-horizon loader on the target device for a given
 # (horizon, batch_size). Reuses the pre-built graph data `gd`.
-function make_model_loader(gd, ds, ms, ts; horizon::Int, batch_size::Int)
+function make_model_loader(gd, ds, ms, ts;
+                           horizon::Int, batch_size::Int,
+                           seed::Union{Nothing,Int} = nothing,
+                           shuffle::Bool = true)
+    seed !== nothing && Random.seed!(seed)
     nhorizon = horizon + 1
     dataset  = make_horizon_dataset(gd.graphs, nhorizon; at = (ds.train_frac, ds.val_frac))
     bs = min(batch_size, length(dataset.train))
     loader = DataLoader(dataset.train;
-                        batchsize = bs, shuffle = true, collate = true, parallel = true)
+                        batchsize = bs, shuffle = shuffle, collate = true, parallel = true)
 
     # Fixed-horizon strategy: current_steps = horizon (single phase, no schedule).
     strategy = TrainingStrategy([horizon], [1], ts.strategy.noise_scale;
@@ -343,6 +348,24 @@ function recommend_lr(lrs, losses, gnorms = nothing;
     near_lr_floor = isfinite(lr_floor) && isfinite(safe) && safe <= lr_floor_factor * lr_floor
     return (steep = steep, min_over_10 = min_over_10, gnorm_cap = gnorm_cap,
             gnorm_ref = gnorm_ref, safe = safe, near_lr_floor = near_lr_floor)
+end
+
+"""
+    aggregate_lr_recommendations(recs) -> NamedTuple
+
+Aggregate multiple `recommend_lr` outputs robustly for init-sensitive curves.
+Returns median `safe` and median finite `gnorm_ref` over valid recommendations.
+Recommendations are considered valid only when `safe` is finite and not flagged
+as `near_lr_floor`.
+"""
+function aggregate_lr_recommendations(recs::AbstractVector)
+    valids = [r for r in recs if isfinite(r.safe) && !getproperty(r, :near_lr_floor)]
+    isempty(valids) && return (; safe = NaN, gnorm_ref = NaN, n_valid = 0, n_total = length(recs))
+    safes = [r.safe for r in valids]
+    refs  = [r.gnorm_ref for r in valids if isfinite(r.gnorm_ref)]
+    return (; safe = median(safes),
+            gnorm_ref = isempty(refs) ? NaN : median(refs),
+            n_valid = length(valids), n_total = length(recs))
 end
 
 function print_curve(lrs, losses, gnorms; rows::Int = 20)

@@ -67,6 +67,26 @@ Two independent failure modes, both in
 - [x] **Add a regression test** with a synthetic spiky-gradient curve asserting
   `recommend_lr` does not return within a decade of `lr_min`.
       - Added `test/test_lr_autotune.jl` and included it in `test/runtests.jl`.
+- [x] **Range test is init-dependent / flaky (NEW — post-fix follow-up).** After
+      the horizon-1 + guard fixes, a fresh E3 Step-0 rerun *still* failed: at the
+      identical `lr=1e-7`, horizon=1, batch=32, the earlier good run had step-1
+      loss 593 / gnorm 1.2e4 and descended cleanly, but this run started at loss
+      397 / gnorm **1.3e5** and exploded at step 2 (loss 5400, gnorm 1.8e6). Same
+      LR, ~10× grad norm → the only difference is the **unseeded random weight
+      init**. The guard correctly aborted (no silent floor write), but the range
+      test itself is a coin flip on init-sensitive (Huber) losses. Fix:
+      (a) **seed** the range-test model init and the gradient-growth probe for
+          reproducibility; and/or
+      (b) run the range test from **2–3 inits and take the median** recommendation
+          (discard inits that diverge at the first probe), so one unlucky init
+          doesn't fail the whole autotune.
+      Evidence: E3 `slurm-255160` lineage; both the good and failed horizon-1
+      curves above.
+      - Implemented in `scripts/autotune_train.jl` + `scripts/lr_range_test.jl`:
+            seeded probe setup (`--seed`), multi-init LR range test (`--range-inits`,
+            default 3), robust median aggregation across valid inits (discarding
+            near-floor recommendations), deterministic probe loaders (`shuffle=false`),
+            and seeded gradient-growth probes for reproducible `lr_peak_decay`.
 - Touch: `scripts/lr_range_test.jl` (`recommend_lr`), `scripts/autotune_train.jl`,
   a test file.
 
