@@ -4,6 +4,181 @@ Experiment configs live under `experiments/`. Newest at the top.
 
 ---
 
+# PROPOSED — not yet run
+
+*Post-S2 peak-accuracy / stability plan, unblocked by the 2026-09-04 code
+changes (shared config parser + verified `grad_clip` propagation; peak-weighted
+Huber; Tier-1 peak diagnostics; Tier-2 `river_q` KGE/PBIAS/FHV; per-anchor
+fixed-horizon diagnostics). E1 and E2 are **done** (see COMPLETED); E3 depends on
+E1. Full rationale in [TODO.md](TODO.md) and
+[notes/peak_accuracy_todo.md](notes/peak_accuracy_todo.md).*
+
+> **⚠ Cross-cutting finding from E1 + E2 (read before running E3).** No
+> configuration tested so far produces a stable 30-step free rollout: the
+> fixed-horizon metric diverges from **every** anchor regardless of start-flow
+> percentile (E1) and regardless of `grad_clip` (E2). The instability is a
+> property of the learned MB **rollout operator**, not a training-gradient or
+> initial-condition effect. There is also an **unresolved discrepancy** between
+> the bounded 222-step date-range rollout and the divergent 30-step anchor
+> rollout from the same start state — flagged for engineering
+> ([TODO.md](TODO.md)). E3's rollout/fixed-horizon numbers are therefore
+> **not trustworthy for selection** until that is resolved; select E3 on the
+> teacher-forced peak diagnostics (`c_peak`, `rmse_high`, KGE) instead.
+
+## E3 — peak-weighted Huber λ-sweep — `sava_small_v081_e3_huber_lambda` (PROPOSED)
+
+**Status:** config staged at
+[experiments/sava_small_v081_e3_huber_lambda/config.toml](../experiments/sava_small_v081_e3_huber_lambda/config.toml);
+not yet run. **Depends on E1** (for `peak_delta` + `h_loss_weight`). `box`
+hparsearch, 6 runs, `train.strategy.peak_lambda ∈ {0, 0.5, 1, 2, 4, 8}`
+(λ=0 = unweighted-Huber baseline). Per-node `u_i` (98th pct) / `s_i` (IQR)
+computed automatically (train split) when `loss_type = "huber"`.
+
+**Purpose.** The core peak-accuracy intervention
+([notes/peak_accuracy_todo.md](notes/peak_accuracy_todo.md) §2/§2a): does
+per-node peak-weighting improve peak-region skill without regressing the whole
+hydrograph, on the stable small basin, before any full-basin spend.
+
+**Autotune folded in (Step 0, once).** Loss changes MSE → Huber ⇒ gradient scale
+shifts, so re-tune. Peak weighting is Σw-normalised (≈λ-invariant) and Huber
+bounds residual gradients, so a **single** tune on the unweighted-Huber base
+config transfers across the λ grid:
+`autotune_train.jl <config> --dry-run --range-horizon 10` (deep-horizon peak,
+since S2 located the instability at the deep-horizon / high-flow end), then run
+the sweep. **`peak_delta`: E1 harvested `≈0.5`** (heavy-tailed standardised
+`river_q` residuals: median 0.098, mean 1.16, p90 2.0) — update the config's
+placeholder `1.0` to `0.5` before launching; sanity-check against `{0.5,1,2}`.
+
+**Selection (never weighted val loss; rollout metrics untrustworthy per the E1+E2
+finding above).** Target `peak_loss.final_c_peak ≈ 0.3–0.5`; minimise
+`peak_loss.final_rmse_high`; constraint `river_q_performance.pooled.kge` must not
+degrade materially vs λ=0 (**and treat KGE gaps < ~0.15 as seed noise, per E2**);
+guard `peak_loss.final_peak_grad_frac` (no tiny cell fraction dominating the
+gradient → sets `peak_w_max`).
+
+**Results:** _pending._
+
+---
+
+# COMPLETED
+
+## E1 — diagnostic baseline — `sava_small_v081_e1_diag`
+
+**NAME:** `sava_small_v081_e1_diag` (single MSE run; S2 winner: increment
+h-loss, full `[1,2,5,8,10]` curriculum, `grad_clip = 1.0`, 8×64 / mlp 2, 75,009
+params, 250 epochs; LR reused from autotuned `mb_sweep`). Config:
+[experiments/sava_small_v081_e1_diag/config.toml](../experiments/sava_small_v081_e1_diag/config.toml).
+
+**SUMMARY.** Purpose was to harvest the new diagnostics and test the S2
+conditional-instability hypothesis. Teacher-forced discharge fit is strong
+(`val_q_1step` 0.0144, spatial `river_q` NSE 0.973). But the 30-step free
+rollout diverges from **all 32 anchors** (`fixed_rmse = Inf`), and Tier-2
+selection metrics reveal only mediocre skill even on the bounded path
+(pooled KGE 0.577, outlet KGE **−0.043**, outlet PBIAS +46%, date-range peak
+overshoot 1.9×). `river_h` remains broken (spatial NSE −9.9).
+
+**IMPROVEMENTS.**
+- **New Tier-2 `river_q` metrics now available** — pooled vs outlet-gauge
+  KGE/r/α/β/MAE/PBIAS/peak_error/FHV, plus per-anchor fixed-horizon CSV and
+  `peak_ratio_frac_gt2` / `rmse_highflow`. First run to expose gauge-level skill.
+- **`peak_delta ≈ 0.5` harvested for E3** (evidence). Per-cell standardised
+  `river_q` RMSE is heavy-tailed: median 0.098, mean 1.16, p90 2.0, std 3.56.
+  A Huber knee ~0.5 keeps the bulk quadratic while linearising the extreme-cell
+  tail. **Confirms the heavy-tail hypothesis on the small basin** (previously
+  only asserted for the full basin).
+
+**DEGRADED / FAILURE MODES.**
+- **S2 conditional-instability hypothesis REFUTED (evidence).** The per-anchor
+  CSV shows **all 32 anchors → Inf** with *no* dependence on start-flow
+  percentile: the 2.2-percentile low-flow anchor (idx 19) blows up exactly like
+  the 98.5-percentile high-flow anchor (idx 12). Divergence is **unconditional
+  across initial states**, not high-flow-triggered as I inferred from the single
+  S2 trajectory. Only 5 / 250 epochs produced a finite (<1e6) fixed-horizon RMSE.
+- **Poor outlet skill (evidence).** Outlet-gauge KGE −0.043 (worse than the mean
+  baseline), PBIAS +46%, FHV +44% — systematic over-prediction concentrated at
+  the outlet even where the rollout stays bounded.
+
+**HYPOTHESES.**
+- **Two rollout paths disagree from the same start (evidence of a discrepancy;
+  cause = speculation).** The 222-step date-range rollout stays bounded
+  (pred q ∈ [3.9, 228.6]) while the 30-step anchor rollout from anchor 1
+  (start_step 1, ~same Jan-1 state) → Inf. Same model, same start, *shorter*
+  horizon diverges — so horizon length cannot be the cause. Points to a **code
+  discrepancy between the two rollout paths** (batched fixed-horizon metric vs
+  single date-range trajectory) or a checkpoint mismatch (best_epoch 37 vs the
+  date-range plot). Flagged for engineering ([TODO.md](TODO.md)). *Caveat:* the
+  "anchor 1 ≈ date-range start" equivalence is inferred, not code-verified.
+- **`h_loss_weight` not directly measurable here (evidence).** The MSE run does
+  not emit the huber-only per-channel grad-norm diagnostic; proxy from loss
+  magnitudes `val_q_1step` 0.0144 vs `val_h_1step` 0.848 (~59×). The Step-0
+  unweighted-Huber autotune run will give the real per-channel grad norms.
+
+**RECOMMENDATIONS.**
+1. **Reconcile the two rollout paths (engineering, top priority)** — blocks
+   trust in every fixed-horizon selection number. See [TODO.md](TODO.md).
+2. **Prioritise an inference-stability lever over peak accuracy** — no config
+   yet yields a stable free rollout; `mb_theta < 1` (damps the confirmed
+   `val_amp ≈ 11.5` q→h amplification), noise injection, or the detached-rollout
+   trick (TODO item 3).
+3. **E3 still worth running** for the peak signal, but read its rollout metrics
+   through the path-reconciliation outcome; update its `peak_delta` from `1.0`
+   to `≈0.5`.
+
+## E2 — grad_clip A/B — `sava_small_v081_e2_gradclip`
+
+**NAME:** `sava_small_v081_e2_gradclip` (3-run `box` hparsearch,
+`train.grad_clip ∈ {1.0, 0.5, 0.1}` = hps1/hps2/hps3; else E1/S2-winner config,
+MSE, full curriculum). Config:
+[experiments/sava_small_v081_e2_gradclip/config.toml](../experiments/sava_small_v081_e2_gradclip/config.toml).
+Run before the E1-derived revised recommendations could be applied.
+
+**⚠ Measurement note.** An earlier "hps3 = 32/32 finite anchors" reading was a
+**false positive** from filtering anchors by the literal string `Inf`: hps3's
+anchor RMSEs are finite-but-astronomical (1e10–1e12), i.e. diverged *below* the
+Float32 overflow threshold, not stable. **All three cells diverge.** Filter
+fixed-horizon anchors by *magnitude* (e.g. `< 10×` truth peak), never by `Inf`.
+
+**SUMMARY.**
+
+| clip | pooled KGE | outlet KGE | outlet PBIAS | pooled peak_ratio | final peak_ratio | anchor RMSE scale | best_val_rmse | n_backoffs |
+|---|---|---|---|---|---|---|---|---|
+| 1.0 (hps1) | **0.736** | **0.406** | 24.9% | 1.65 | 1.5e19 | Inf (overflow) | 3.80e6 | 0 |
+| 0.5 (hps2) | 0.701 | 0.228 | 31.7% | 1.55 | 4.4e27 | Inf (overflow) | 4.73e5 | 0 |
+| 0.1 (hps3) | 0.684 | 0.088 | 23.0% | 3.10 | 4.4e11 | 1e11 (finite, diverged) | 1769 | 0 |
+
+**IMPROVEMENTS.** None actionable — no clip value fixes the divergence, and the
+default (1.0) is already the best on skill.
+
+**DEGRADED / FAILURE MODES.**
+- **grad_clip does NOT fix the free-rollout divergence (evidence).** All three
+  cells diverge 11–27 orders of magnitude over 30 steps. Tighter clipping lowers
+  the blow-up *magnitude* (1e19 → 1e11) but never removes it. Confirms the
+  divergence is an **inference-time rollout-operator** property, not a
+  training-gradient effect a clip can cure.
+- **Tighter clipping actively hurts skill (evidence).** Monotonic pooled-KGE
+  degradation 0.736 → 0.701 → 0.684 as clip tightens; outlet KGE collapses
+  0.406 → 0.088 (approaching no-skill). **Keep `grad_clip = 1.0`.**
+
+**HYPOTHESES.**
+- **Lever-resistant structural instability (evidence, accumulating).** Curriculum
+  (S2) and now grad_clip (E2) both fail to stabilise the free rollout — it is
+  intrinsic to the learned MB rollout operator, reinforcing the inference-stability
+  priority.
+- **Large seed variance (evidence).** E2-hps1 and E1 are the *identical* config
+  yet differ pooled KGE 0.736 vs 0.577 (best_epoch 56 vs 37, peak_ratio 1.65 vs
+  2.29) — a ~0.15 KGE spread from RNG alone. Echoes the S2 replicate spread.
+  **Implication:** treat single-run KGE differences below ~0.15 as noise; compare
+  E3 λ cells with this band in mind (consider replicates). *Caveat:* assumes only
+  RNG differs between E1 and E2-hps1 (no seed pinning / config drift) — worth
+  confirming.
+
+**RECOMMENDATIONS.**
+1. **grad_clip is settled — keep 1.0**; no further grad_clip experiments.
+2. **Escalate the inference-stability workstream** (mb_theta / noise / detached
+   rollout) above peak accuracy.
+3. **Carry the seed-variance band into E3 selection** — don't over-read small
+   KGE gaps.
+
 ## Small-basin stability-lever sensitivity — `sava_small_v081_s2_stability`
 
 **NAME:** `sava_small_v081_s2_stability` (8-run `box` hparsearch, small Sava

@@ -7,6 +7,42 @@ behind a toggle so it can be A/B-tested against current behaviour.
 
 ---
 
+# Rollout-path discrepancy: fixed-horizon metric vs date-range trajectory (INVESTIGATE)
+
+From the `sava_small_v081_e1_diag` / `_e2_gradclip` evaluations
+([EXPERIMENTS.md](EXPERIMENTS.md) → E1/E2): the two autoregressive rollout code
+paths **disagree from the same initial state**, which corrupts every
+fixed-horizon-based selection decision (early stopping, best-epoch checkpoint).
+
+- **Symptom.** The single date-range rollout stays bounded over 222 steps
+  (E1: pred `river_q` ∈ [3.9, 228.6]), while the batched fixed-horizon metric
+  diverges to `Inf`/1e11 from **all 32 anchors** over just 30 steps — including
+  anchor 1, whose start step ≈ the date-range start. Shorter horizon, same
+  start, yet it diverges: horizon length is ruled out.
+- **What to check (engineering):**
+  - [ ] Diff the two rollout implementations (batched fixed-horizon eval in
+        `src/rollout.jl` / `src/training.jl` vs the single-trajectory date-range
+        path used for `downstream_timeseries_daterange.csv`). Look for
+        differences in MB-layer state threading, `forcing_next`, normalisation
+        round-trips, positivity floors, or batched-vs-single graph handling.
+  - [ ] Confirm which **checkpoint** each path uses (best_epoch vs final epoch);
+        E1 had best_epoch 37 with a 250-epoch final. A best-vs-final mismatch
+        alone could explain divergence.
+  - [ ] Verify anchor start-state construction (initial `state`/`forcing` at the
+        anchor step) matches what the date-range rollout seeds from.
+  - [ ] Add a regression check: a short free rollout from a fixed seed state must
+        agree (to tolerance) between the two paths.
+- **Why it matters.** Until resolved, `fixed_horizon.*` and `val_peak_ratio*`
+  cannot be trusted for model selection; E3 (peak-Huber sweep) must be judged on
+  teacher-forced peak diagnostics instead. Note the divergence is **also** a real
+  model property (lever-resistant across curriculum in S2 and grad_clip in E2) —
+  fixing the path discrepancy will not by itself make the rollout stable, but it
+  is a prerequisite for measuring whether the inference-stability work
+  (`mb_theta`, noise, detached rollout) actually helps.
+- Touch: `src/rollout.jl`, `src/training.jl`, `src/run.jl`, a test file.
+
+---
+
 # HParSearch config-parser drift (fix FIRST — blocks all future searches)
 
 From the `sava_small_v081_s2_stability` post-mortem
