@@ -176,19 +176,19 @@ end
 _peak_threshold_broadcast(u::AbstractVector) = reshape(Float32.(u), :, 1)
 _peak_threshold_broadcast(u::AbstractMatrix) = Float32.(u)
 
-_same_device_fill(x::AbstractArray, value::Real; T::Type = eltype(x)) = begin
+_same_device_fill(x::AbstractArray, value::Real; T::Type = eltype(x)) = Flux.ignore_derivatives() do
     out = similar(x, T)
     fill!(out, T(value))
     out
 end
 
-_same_device_fill(x::AbstractArray, value::Real, dims::Tuple{Vararg{Int}}; T::Type = eltype(x)) = begin
+_same_device_fill(x::AbstractArray, value::Real, dims::Tuple{Vararg{Int}}; T::Type = eltype(x)) = Flux.ignore_derivatives() do
     out = similar(x, T, dims...)
     fill!(out, T(value))
     out
 end
 
-_same_device_falses(x::AbstractArray) = begin
+_same_device_falses(x::AbstractArray) = Flux.ignore_derivatives() do
     out = similar(x, Bool)
     fill!(out, false)
     out
