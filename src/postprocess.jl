@@ -358,11 +358,12 @@ vectorised prediction/truth pair.
 """
 function kge_metrics(pred::AbstractVector, truth::AbstractVector)
     length(pred) == length(truth) || throw(ArgumentError("pred and truth must have equal length"))
-    p = Float32.(filter(isfinite, pred))
-    t = Float32.(filter(isfinite, truth))
-    isempty(p) && isempty(t) && return (; kge = NaN32, r = NaN32, alpha = NaN32, beta = NaN32)
-    length(p) == length(t) || throw(ArgumentError("pred and truth must have matching finite values"))
-    isempty(p) && return (; kge = NaN32, r = NaN32, alpha = NaN32, beta = NaN32)
+    p = Float32.(pred)
+    t = Float32.(truth)
+    mask = isfinite.(p) .& isfinite.(t)
+    any(mask) || return (; kge = NaN32, r = NaN32, alpha = NaN32, beta = NaN32)
+    p = p[mask]
+    t = t[mask]
 
     μp = mean(p)
     μt = mean(t)

@@ -259,12 +259,17 @@ end
 #                     see, with no chance to re-tune once training has begun.
 function recommend_lr(lrs, losses, gnorms = nothing;
                       skip_start::Int = 5, skip_end::Int = 5, smooth_win::Int = 3,
-                      gnorm_factor::Float64 = 3.0, gnorm_backoff::Float64 = 3.0)
+                      gnorm_factor::Float64 = 3.0, gnorm_backoff::Float64 = 3.0,
+                      gnorm_consecutive::Int = 3, gnorm_smooth_beta::Float64 = 0.9,
+                      loss_rise_lookback::Int = 3, loss_rise_factor::Float64 = 1.02,
+                      lr_floor_factor::Float64 = 10.0)
     n = length(lrs)
+    lr_floor = n >= 1 ? minimum(lrs) : NaN
     if n < 8
         m10 = n >= 1 ? lrs[argmin(losses)] / 10 : NaN
         return (steep = NaN, min_over_10 = m10, gnorm_cap = Inf,
-                gnorm_ref = NaN, safe = m10)
+                gnorm_ref = NaN, safe = m10,
+                near_lr_floor = isfinite(lr_floor) && isfinite(m10) && m10 <= lr_floor_factor * lr_floor)
     end
 
     loglr = log10.(lrs)
@@ -298,18 +303,46 @@ function recommend_lr(lrs, losses, gnorms = nothing;
         gnorm_ref = isempty(ref_slice) ? NaN : median(ref_slice)
         if isfinite(gnorm_ref) && gnorm_ref > 0
             thresh = gnorm_factor * gnorm_ref
-            for k in (skip_start + 1):n
-                if !isfinite(gnorms[k]) || gnorms[k] > thresh
-                    gnorm_cap = lrs[k] / gnorm_backoff
-                    break
+            # Smooth grad norms and require a sustained breach that coincides
+            # with rising loss, so one early transient spike cannot force the LR
+            # to the search floor.
+            g_ema = zeros(Float64, n)
+            first_finite = findfirst(isfinite, gnorms)
+            if first_finite !== nothing
+                g_ema[first_finite] = Float64(gnorms[first_finite])
+                for k in (first_finite + 1):n
+                    gk = isfinite(gnorms[k]) ? Float64(gnorms[k]) : Inf
+                    g_ema[k] = gnorm_smooth_beta * g_ema[k - 1] + (1 - gnorm_smooth_beta) * gk
+                end
+
+                warm_lo = max(skip_start + 1, first_finite + loss_rise_lookback)
+                streak = 0
+                for k in warm_lo:n
+                    prev_lo = max(1, k - loss_rise_lookback)
+                    recent_min = minimum(@view losses[prev_lo:k-1])
+                    rising = losses[k] > loss_rise_factor * recent_min
+                    breached = !isfinite(g_ema[k]) || g_ema[k] > thresh
+                    if breached && rising
+                        streak += 1
+                        if streak >= gnorm_consecutive
+                            gnorm_cap = lrs[k] / gnorm_backoff
+                            break
+                        end
+                    else
+                        streak = 0
+                    end
                 end
             end
         end
     end
 
-    safe = minimum(filter(isfinite, Float64[steep, min_over_10, gnorm_cap]))
+    # Robust aggregation: ignore one overly conservative outlier by taking the
+    # second-smallest finite estimate when possible.
+    candidates = sort(filter(isfinite, Float64[steep, min_over_10, gnorm_cap]))
+    safe = isempty(candidates) ? NaN : candidates[min(2, length(candidates))]
+    near_lr_floor = isfinite(lr_floor) && isfinite(safe) && safe <= lr_floor_factor * lr_floor
     return (steep = steep, min_over_10 = min_over_10, gnorm_cap = gnorm_cap,
-            gnorm_ref = gnorm_ref, safe = safe)
+            gnorm_ref = gnorm_ref, safe = safe, near_lr_floor = near_lr_floor)
 end
 
 function print_curve(lrs, losses, gnorms; rows::Int = 20)
@@ -450,6 +483,9 @@ function main()
         write_csv(out_path, lrs, losses, gnorms)
 
         rec = recommend_lr(lrs, losses, gnorms)
+        rec.near_lr_floor && @warn @sprintf(
+            "Recommended LR %.3e is within %.1fx of lr_min %.3e (likely fragile range test).",
+            rec.safe, 10.0, minimum(lrs))
         println()
         @info @sprintf("Recommended lr_start (safe)     : %.3e", rec.safe)
         @info @sprintf("  steepest descent              : %.3e", rec.steep)

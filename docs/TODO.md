@@ -7,6 +7,71 @@ behind a toggle so it can be A/B-tested against current behaviour.
 
 ---
 
+# LR autotune is too fragile — `recommend_lr` picks the noise floor (fix)
+
+From the E3 (`sava_small_v081_e3_huber_lambda`) Step-0 autotune attempts
+(`slurm-255160` and the horizon-1 rerun): the LR range test / recommendation
+returns a near-useless `lr_start ≈ 1e-7` on the Huber loss, so training runs
+effectively **frozen** (E3 attempt 1: `train_q_1step` moved only 188→152 over 250
+epochs, everything else NaN). Autotuning that collapses this easily defeats its
+own purpose — a hand-picked `1e-3` is obviously better from the same curve.
+
+Two independent failure modes, both in
+[scripts/autotune_train.jl](../scripts/autotune_train.jl) /
+[scripts/lr_range_test.jl](../scripts/lr_range_test.jl):
+
+- [x] **`--range-horizon` > 1 blows up the range test on the untrained rollout.**
+      At horizon 10 the free rollout is unstable at init (E1/E2), so the range
+      test loss is `Inf` at the very first probe (lr=1e-7) → autotune falls back
+      to the floor `safe=1e-8`. The range test must default to / be documented as
+      a **shallow (horizon-1)** test; deep-horizon conservatism belongs to the
+      separate `lr_peak_decay` gradient-growth probe, not the range test. Consider
+      hard-capping the range-test horizon to 1 (or `min(range_horizon, steps[1])`)
+      regardless of the flag, with a warning.
+  - Implemented in `scripts/autotune_train.jl`: requested `--range-horizon` is
+    capped to the shallow curriculum horizon with a warning.
+- [x] **`gnorm_cap` trips on a single early grad-norm spike (Huber = spiky).**
+      Horizon-1 rerun produced a healthy descending curve (loss 593→264) yet
+      `recommend_lr` returned `safe = gnorm_cap = 1.04e-7` because one early
+      transient grad norm exceeded `3× gnorm_ref` and the detector breaks on the
+      **first** over-threshold step with **no smoothing**. Harden it:
+      (a) smooth the grad-norm series (EMA/median) before thresholding;
+      (b) require **N consecutive** over-threshold steps, not one;
+      (c) only trip after the loss has actually started rising (tie the gnorm
+          blow-up to loss divergence, not gnorm alone);
+      (d) ignore the EMA-warmup head so the `steep` pick isn't planted on the
+          warmup hump (loss rose 593→1158 over steps 1–15 before descending).
+      - Implemented in `scripts/lr_range_test.jl`: grad-norm detector now uses
+            smoothed grad norms, requires consecutive breaches, and only trips once the
+            loss is rising.
+- [x] **Saner `safe` aggregation.** `safe = min(steep, min_over_10, gnorm_cap)`
+      lets any one fragile estimator veto the others down to the floor. Prefer a
+      robust combination (e.g. `min_over_10`-anchored with a divergence-based
+      upper bound), and **error out / warn loudly** when the recommendation lands
+      within ~1 decade of `lr_min` (a tell-tale of a failed test) instead of
+      silently writing it.
+      - Implemented in `scripts/lr_range_test.jl`: `safe` now uses a robust
+            second-smallest finite estimate, and surfaces a `near_lr_floor` flag.
+            `lr_range_test.jl` warns loudly; `autotune_train.jl` now fails fast instead
+            of silently writing near-floor `lr_start` values.
+- [x] **Fix `grad_clip` recommendation too.** `clip_mult × gnorm_ref` gave
+      `grad_clip ≈ 7e4` (never clips) while the same run showed grad-norm spikes
+      to 1e7 — useless. E1/E2 found `grad_clip = 1.0` best; the recommender should
+      not produce values orders of magnitude above the healthy norm.
+      - Implemented in `scripts/autotune_train.jl`: auto `grad_clip` is now clamped
+            to a configurable sane range (`--grad-clip-min`, `--grad-clip-max`; defaults
+            `0.1` to `10.0`).
+- **Interim workaround (already usable):** pass the LR explicitly to skip the
+  range test — `autotune_train.jl <config> --dry-run --in-place --lr-start 1e-3
+  --grad-clip 1.0` (still runs the batch-size and `lr_peak_decay` probes).
+- [x] **Add a regression test** with a synthetic spiky-gradient curve asserting
+  `recommend_lr` does not return within a decade of `lr_min`.
+      - Added `test/test_lr_autotune.jl` and included it in `test/runtests.jl`.
+- Touch: `scripts/lr_range_test.jl` (`recommend_lr`), `scripts/autotune_train.jl`,
+  a test file.
+
+---
+
 # HParSearch config-parser drift (fix FIRST — blocks all future searches)
 
 From the `sava_small_v081_s2_stability` post-mortem

@@ -293,6 +293,16 @@ end
     @test 0f0 <= det.pod <= 1f0
     @test 0f0 <= det.false_alarm_ratio <= 1f0
     @test 0f0 <= det.csi <= 1f0
+
+    @testset "kge_metrics uses pairwise finite mask" begin
+        pred_nf  = Float32[1.0, NaN32, 3.0, 4.0, Inf32]
+        truth_nf = Float32[1.0, 2.0, Inf32, 4.0, 5.0]
+        k_nf = WflowRoutingGNN.kge_metrics(pred_nf, truth_nf)
+        @test isfinite(k_nf.kge)
+        @test isfinite(k_nf.r)
+        @test isfinite(k_nf.alpha)
+        @test isfinite(k_nf.beta)
+    end
 end
 
 @testset "river_q_performance_metrics" begin
@@ -341,6 +351,16 @@ end
         ua_with_nan = Float32[10.0, NaN32, 100.0]
         perf2 = WflowRoutingGNN.river_q_performance_metrics(pred_q, true_q, ua_with_nan)
         @test perf2.gauge.outlet_idx == 3
+    end
+
+    @testset "non-finite mismatches do not throw" begin
+        pred_q_nf = copy(pred_q)
+        true_q_nf = copy(true_q)
+        pred_q_nf[1, 2] = NaN32
+        true_q_nf[2, 3] = Inf32
+        perf3 = WflowRoutingGNN.river_q_performance_metrics(pred_q_nf, true_q_nf, upstream_area)
+        @test isfinite(perf3.pooled.kge)
+        @test isfinite(perf3.gauge.kge)
     end
 end
 
