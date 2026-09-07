@@ -1,5 +1,21 @@
 This document serves as a concrete changelog of the code, summarizing briefly the changes of each commit.
 
+## 2026-09-07
+
+- Made the peak-weighted Huber loss GPU-safe: `peak_weighted_huber_loss`,
+	`peak_weight_matrix` and `_resolve_peak_thresholds` now allocate fallback
+	weight/threshold arrays on the same device as their inputs (device-matched
+	`similar`/`fill!` helpers) instead of host-side `ones`/`Float32[...]`. Fixes a
+	CUDA `KernelError: passing non-bitstype argument` that aborted `:huber`
+	hparsearch runs on GPU.
+- Added a CUDA regression for the Huber loss in `test/test_strategy.jl` (skipped
+	when CUDA is unavailable). Canonical suite passes (`test/runtests.jl`: 395/395).
+- Closed the rollout-path discrepancy investigation: a same-start regression
+	confirms the batched fixed-horizon anchor path and the date-range trajectory
+	path agree to tolerance when seeded from the same initial state; both run from
+	the restored best-epoch checkpoint. The residual divergence is a genuine model
+	instability, not a code-path mismatch. See DECISIONS.md.
+
 ## 2026-09-04
 
 - Fixed hparsearch config-parser drift by extracting a shared parser helper

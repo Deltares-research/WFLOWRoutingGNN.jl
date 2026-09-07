@@ -7,56 +7,6 @@ behind a toggle so it can be A/B-tested against current behaviour.
 
 ---
 
-# Rollout-path discrepancy: fixed-horizon metric vs date-range trajectory (INVESTIGATE)
-
-From the `sava_small_v081_e1_diag` / `_e2_gradclip` evaluations
-([EXPERIMENTS.md](EXPERIMENTS.md) → E1/E2): the two autoregressive rollout code
-paths **disagree from the same initial state**, which corrupts every
-fixed-horizon-based selection decision (early stopping, best-epoch checkpoint).
-
-- **Symptom.** The single date-range rollout stays bounded over 222 steps
-  (E1: pred `river_q` ∈ [3.9, 228.6]), while the batched fixed-horizon metric
-  diverges to `Inf`/1e11 from **all 32 anchors** over just 30 steps — including
-  anchor 1, whose start step ≈ the date-range start. Shorter horizon, same
-  start, yet it diverges: horizon length is ruled out.
-- **What to check (engineering):**
-  - [x] Diff the two rollout implementations (batched fixed-horizon eval in
-        `src/rollout.jl` / `src/training.jl` vs the single-trajectory date-range
-        path used for `downstream_timeseries_daterange.csv`). The batched anchor
-        path and the single-window trajectory path use the same state update and
-        `forcing_next` convention; a direct same-start regression now checks that
-        they agree to tolerance when seeded from the same initial graph.
-  - [x] Confirm which **checkpoint** each path uses (best_epoch vs final epoch);
-        the training loop records `best_epoch` on fixed-horizon RMSE and, when
-        early stopping is active, restores the best weights before returning the
-        model to the caller. Both the fixed-horizon evaluation and the
-        date-range trajectory path therefore run from the same post-training
-        checkpoint, not from the last un-restored epoch.
-  - [x] Verify anchor start-state construction (initial `state`/`forcing` at the
-        anchor step) matches what the date-range rollout seeds from. The fixed
-        horizon seeds `states0` from `graphs[s].ndata.state` and uses the matching
-        `forcing_next` sequence; this is consistent with the trajectory path.
-  - [x] Add a regression check: a short free rollout from a fixed seed state must
-        agree (to tolerance) between the two paths. Added in
-        `test/test_training.jl` to guard the anchor-vs-trajectory equivalence.
-- **Why it matters.** Until resolved, `fixed_horizon.*` and `val_peak_ratio*`
-  cannot be trusted for model selection; E3 (peak-Huber sweep) must be judged on
-  teacher-forced peak diagnostics instead. Note the divergence is **also** a real
-  model property (lever-resistant across curriculum in S2 and grad_clip in E2) —
-  fixing the path discrepancy will not by itself make the rollout stable, but it
-  is a prerequisite for measuring whether the inference-stability work
-  (`mb_theta`, noise, detached rollout) actually helps.
-- **Finding note (resolved).** The direct same-start regression shows the
-  fixed-horizon anchor path and the date-range trajectory path agree to
-  tolerance when seeded from the same initial state. The remaining issue is not
-  an implementation mismatch between rollout code paths; it is the underlying
-  model instability itself, plus the earlier checkpoint audit (best_epoch vs final
-  epoch), which has been confirmed to use the restored best weights when early
-  stopping is active.
-- Touch: `src/rollout.jl`, `src/training.jl`, `src/run.jl`, a test file.
-
----
-
 # HParSearch config-parser drift (fix FIRST — blocks all future searches)
 
 From the `sava_small_v081_s2_stability` post-mortem
@@ -84,7 +34,7 @@ invalidates search arms.
     un-searchable** until this is fixed.
   - Inconsistent default: `lr_steps` is a hard `td["lr_steps"]` (required) in
     hparsearch vs `get(td, "lr_steps", 10)` in run.jl.
-- [x] **Preferred fix — remove the duplication, not patch it.** Refactor
+- [ ] **Preferred fix — remove the duplication, not patch it.** Refactor
       `parse_run_config` so the dict→`(ds, ms, ts)` construction lives in a
       shared helper that takes an already-loaded TOML `Dict` (+ resolve dir),
       e.g. `settings_from_config(d, toml_dir)`. Have both `parse_run_config`
@@ -96,16 +46,15 @@ invalidates search arms.
       (`grad_clip`, `lr_warmup_epochs`, `lr_peak_decay`; `loss_type`,
       `peak_delta`, `peak_lambda`, `peak_gamma`, `peak_w_max`) and switch
       `lr_steps` to `get(td, "lr_steps", 10)` to match run.jl.
-- [x] **Regression guard.** Add a test that a `search_space` overriding
+- [ ] **Regression guard.** Add a test that a `search_space` overriding
       `train.grad_clip` (and one `train.strategy.*` key) is actually reflected in
       the constructed `TrainSettings`/`TrainingStrategy` for each combo — i.e.
       assert the override reaches the settings object, not just the config dict.
       Extend [test/test_strategy.jl](../test/test_strategy.jl) or
       [test/test_training.jl](../test/test_training.jl).
-- [x] **Verify.** Re-ran a tiny 2-combo parser-level hparsearch harness varying
-      `grad_clip = {1.0, 0.1}` and confirmed each run's saved
-      `model/train_settings.toml` shows the intended value (`1.0` for one
-      combo and `0.10000000149011612` for the other).
+- [ ] **Verify.** Re-run a tiny 2-combo search varying `grad_clip = {1.0, 0.1}`
+      and confirm each run's saved `model/train_settings.toml` shows the intended
+      value (the exact check that surfaced the bug).
 - Touch: `src/hparsearch.jl`, `src/run.jl` (extract shared parser), test file.
 
 ---
@@ -186,35 +135,28 @@ invalidates search arms.
   (block-diagonal batch, `fh.B` anchors, arrays shaped `(N, H, B)`) but then
   reduces with `mean`/`maximum` over **all** anchors into `(rmse_q, peak_ratio)`.
   The per-anchor information exists and is simply discarded before the reduction.
-- [x] **Return per-anchor arrays, not just the two scalars.** Have
+- [ ] **Return per-anchor arrays, not just the two scalars.** Have
       `fixed_horizon_metrics` also produce length-`B` vectors: per-anchor RMSE
       (`sqrt(mean(abs2, ...))` reduced over `(N, H)` only) and per-anchor peak
       ratio (`maximum(abs, pred)/max(true_peak_a, eps)` with a **per-anchor**
       truth peak). Keep the existing two aggregate scalars for backward
       compatibility (existing history fields / plot in
       [src/plot.jl](../src/plot.jl)).
-- [x] **Tag each anchor with its start-state flow percentile.** In
+- [ ] **Tag each anchor with its start-state flow percentile.** In
       `build_fixed_horizon_eval` ([src/rollout.jl](../src/rollout.jl)) the anchor
       `starts` and per-anchor initial `states0` are known; compute each anchor's
       start-state discharge summary (e.g. basin-mean or basin-max physical `q` at
       step 0) and its percentile within the val-split flow distribution, and
       store it on `FixedHorizonEval` (new field) so the diagnostic can be keyed
       by flow regime without recomputation.
-- [x] **Persist it for one full-curriculum run.** Write the per-anchor table
+- [ ] **Persist it for one full-curriculum run.** Write the per-anchor table
       (`anchor_index`, `start_time`/`start_step`, `start_flow_percentile`,
       `fixed_rmse`, `peak_ratio`) to the run's `metrics/` dir (CSV/TOML, mirror
       the existing `plot_fixed_horizon` CSV writer in
-      [src/plot.jl](../src/plot.jl)). Implemented as `metrics/fixed_horizon_anchors.csv`.
-      Per-epoch logging of the full table is not
+      [src/plot.jl](../src/plot.jl)). Per-epoch logging of the full table is not
       required — a final-epoch (or best-epoch) dump is enough to test the
       prediction; keep the two aggregate scalars in the per-epoch history.
-- [x] **Guard against the reduction masking divergence.** Added per-epoch
-      anti-masking aggregates in training history: `val_peak_ratio_frac_gt2`
-      (fraction of anchors with `peak_ratio > 2`) and
-      `val_fixed_rmse_highflow` (mean fixed-horizon RMSE over anchors with
-      `start_flow_percentile >= 0.8`), and surfaced them in fixed-horizon CSV /
-      metrics TOML outputs.
-      Consider also logging a
+- [ ] **Guard against the reduction masking divergence.** Consider also logging a
       cheap aggregate that is *not* max-dominated (e.g. fraction of anchors with
       `peak_ratio > threshold`, or a high-flow-anchor-only RMSE) as a first-class
       per-epoch signal, per RECOMMENDATION #3 ("report a high-flow-anchor rollout

@@ -5,6 +5,47 @@ note that holds the full reasoning. Newest at the top.
 
 ---
 
+# STATUS AS OF 07-09-2026
+
+## Peak-weighted Huber loss: implementation and device-safety
+
+- **Peak-aware Huber is the supported alternative to MSE.** Training keeps MSE
+  as default but supports `loss_type = :huber` with tunable
+  `peak_delta`/`peak_lambda`/`peak_gamma`/`peak_w_max`. Weights are computed
+  from untransformed targets and normalised by total weight, so peak emphasis is
+  explicit without changing the base optimisation interface.
+- **Per-node peak statistics are train-split derived and threaded explicitly.**
+  `peak_node_stats` (98th percentile / IQR) is computed from training graphs and
+  passed through training/loss evaluation so peak weighting is tied to local node
+  regimes rather than a global pooled threshold.
+- **GPU safety rule: fallback tensors must be allocated on the input device.**
+  Loss-path fallback arrays now use device-matched `similar`/`fill!` helpers
+  (`_same_device_fill`, `_same_device_falses`) instead of host `ones`/
+  `Float32[...]` literals. This avoids CUDA kernel argument type violations in
+  Zygote-broadcasted loss code and is now the required pattern for future loss
+  fallback allocations.
+
+---
+
+## Rollout-path equivalence: fixed-horizon metric vs date-range trajectory
+
+- **The two autoregressive rollout paths are equivalent from the same initial
+  state.** The batched fixed-horizon anchor eval (`fixed_horizon_metrics` /
+  `build_fixed_horizon_eval` in `src/rollout.jl`) and the single-trajectory
+  date-range path (`evaluate_trajectory`) share the same state update and
+  `forcing_next` convention, seed `states0` from `graphs[s].ndata.state`, and
+  both run from the restored best-epoch checkpoint. A same-start regression in
+  `test/test_training.jl` guards this to tolerance.
+- **The earlier "discrepancy" was a diagnostic-interpretation issue, not a bug.**
+  The fixed-horizon metric diverges from stiff high-flow-start anchors while the
+  single benign date-range trajectory stays bounded — a real *conditional*
+  instability of the MB rollout operator, surfaced (not caused) by the anchor
+  eval. Model-selection metrics (`fixed_horizon.*`, `val_peak_ratio*`) are
+  therefore trustworthy as a stability signal; the open work is the instability
+  itself (`mb_theta`, noise, detached rollout), tracked in TODO.md.
+
+---
+
 # OLD STATUS AS OF 27-08-2026
 
 *Everything below this header predates the introduction of these structured
