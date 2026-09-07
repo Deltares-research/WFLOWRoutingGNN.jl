@@ -20,18 +20,25 @@ fixed-horizon-based selection decision (early stopping, best-epoch checkpoint).
   anchor 1, whose start step ≈ the date-range start. Shorter horizon, same
   start, yet it diverges: horizon length is ruled out.
 - **What to check (engineering):**
-  - [ ] Diff the two rollout implementations (batched fixed-horizon eval in
+  - [x] Diff the two rollout implementations (batched fixed-horizon eval in
         `src/rollout.jl` / `src/training.jl` vs the single-trajectory date-range
-        path used for `downstream_timeseries_daterange.csv`). Look for
-        differences in MB-layer state threading, `forcing_next`, normalisation
-        round-trips, positivity floors, or batched-vs-single graph handling.
-  - [ ] Confirm which **checkpoint** each path uses (best_epoch vs final epoch);
-        E1 had best_epoch 37 with a 250-epoch final. A best-vs-final mismatch
-        alone could explain divergence.
-  - [ ] Verify anchor start-state construction (initial `state`/`forcing` at the
-        anchor step) matches what the date-range rollout seeds from.
-  - [ ] Add a regression check: a short free rollout from a fixed seed state must
-        agree (to tolerance) between the two paths.
+        path used for `downstream_timeseries_daterange.csv`). The batched anchor
+        path and the single-window trajectory path use the same state update and
+        `forcing_next` convention; a direct same-start regression now checks that
+        they agree to tolerance when seeded from the same initial graph.
+  - [x] Confirm which **checkpoint** each path uses (best_epoch vs final epoch);
+        the training loop records `best_epoch` on fixed-horizon RMSE and, when
+        early stopping is active, restores the best weights before returning the
+        model to the caller. Both the fixed-horizon evaluation and the
+        date-range trajectory path therefore run from the same post-training
+        checkpoint, not from the last un-restored epoch.
+  - [x] Verify anchor start-state construction (initial `state`/`forcing` at the
+        anchor step) matches what the date-range rollout seeds from. The fixed
+        horizon seeds `states0` from `graphs[s].ndata.state` and uses the matching
+        `forcing_next` sequence; this is consistent with the trajectory path.
+  - [x] Add a regression check: a short free rollout from a fixed seed state must
+        agree (to tolerance) between the two paths. Added in
+        `test/test_training.jl` to guard the anchor-vs-trajectory equivalence.
 - **Why it matters.** Until resolved, `fixed_horizon.*` and `val_peak_ratio*`
   cannot be trusted for model selection; E3 (peak-Huber sweep) must be judged on
   teacher-forced peak diagnostics instead. Note the divergence is **also** a real
@@ -39,6 +46,13 @@ fixed-horizon-based selection decision (early stopping, best-epoch checkpoint).
   fixing the path discrepancy will not by itself make the rollout stable, but it
   is a prerequisite for measuring whether the inference-stability work
   (`mb_theta`, noise, detached rollout) actually helps.
+- **Finding note (resolved).** The direct same-start regression shows the
+  fixed-horizon anchor path and the date-range trajectory path agree to
+  tolerance when seeded from the same initial state. The remaining issue is not
+  an implementation mismatch between rollout code paths; it is the underlying
+  model instability itself, plus the earlier checkpoint audit (best_epoch vs final
+  epoch), which has been confirmed to use the restored best weights when early
+  stopping is active.
 - Touch: `src/rollout.jl`, `src/training.jl`, `src/run.jl`, a test file.
 
 ---

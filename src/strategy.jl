@@ -170,8 +170,29 @@ end
 # `nnode` nodes; given as an `AbstractMatrix` of shape `(nvar, nnode)`, it
 # supplies a distinct threshold/scale **per node** and is used as-is. Purely
 # non-mutating (no in-place `.=`), so it stays differentiable under Zygote.
+# Keep all intermediate arrays on the same device as the inputs so the Huber
+# loss remains valid under CUDA/Zygote, where host-side `Matrix` arguments are
+# rejected by GPU kernels.
 _peak_threshold_broadcast(u::AbstractVector) = reshape(Float32.(u), :, 1)
 _peak_threshold_broadcast(u::AbstractMatrix) = Float32.(u)
+
+_same_device_fill(x::AbstractArray, value::Real; T::Type = eltype(x)) = begin
+    out = similar(x, T)
+    fill!(out, T(value))
+    out
+end
+
+_same_device_fill(x::AbstractArray, value::Real, dims::Tuple{Vararg{Int}}; T::Type = eltype(x)) = begin
+    out = similar(x, T, dims...)
+    fill!(out, T(value))
+    out
+end
+
+_same_device_falses(x::AbstractArray) = begin
+    out = similar(x, Bool)
+    fill!(out, false)
+    out
+end
 
 _peak_weight_and_score(target::AbstractMatrix,
                       u::Union{AbstractVector,AbstractMatrix},
@@ -193,10 +214,10 @@ end
 # batch of an epoch may be a short remainder).
 function _resolve_peak_thresholds(peak_stats, q_target::AbstractMatrix, h_target::AbstractMatrix)
     if peak_stats === nothing
-        q_u = Float32[maximum(abs, q_target)]
-        q_s = Float32[maximum(abs, q_target) + eps(Float32)]
-        h_u = Float32[maximum(abs, h_target)]
-        h_s = Float32[maximum(abs, h_target) + eps(Float32)]
+        q_u = _same_device_fill(q_target, maximum(abs, q_target), (1,); T = Float32)
+        q_s = _same_device_fill(q_target, maximum(abs, q_target) + eps(Float32), (1,); T = Float32)
+        h_u = _same_device_fill(h_target, maximum(abs, h_target), (1,); T = Float32)
+        h_s = _same_device_fill(h_target, maximum(abs, h_target) + eps(Float32), (1,); T = Float32)
         return q_u, q_s, h_u, h_s
     end
     n_graph_nodes = length(peak_stats.q.u)
@@ -235,7 +256,7 @@ function peak_weighted_huber_loss(pred::AbstractMatrix, target::AbstractMatrix,
         total_w = sum(row_weights)
         row_weights = total_w > 0f0 ? row_weights ./ total_w : row_weights
     else
-        row_weights = ones(Float32, size(pred))
+        row_weights = _same_device_fill(pred, 1f0, size(pred); T = Float32)
     end
     return Float32(sum(_huber_element.(residual, delta) .* row_weights))
 end
@@ -304,7 +325,7 @@ function peak_loss_summary(pred::AbstractMatrix, target::AbstractMatrix,
     if lambda > 0f0
         weights, _ = _peak_weight_and_score(target, u, s, lambda, gamma, w_max)
     else
-        weights = ones(Float32, size(pred))
+        weights = _same_device_fill(pred, 1f0, size(pred); T = Float32)
     end
     loss = peak_weighted_huber_loss(pred, target, u, s;
                                    delta = delta, lambda = lambda,
@@ -336,8 +357,8 @@ function peak_weight_matrix(target::AbstractMatrix,
         weights, peak_scores = _peak_weight_and_score(target, u, s, lambda, gamma, w_max)
         mask = peak_scores .> 0f0
     else
-        weights = ones(Float32, size(target))
-        mask    = falses(size(target))
+        weights = _same_device_fill(target, 1f0, size(target); T = Float32)
+        mask    = _same_device_falses(target)
     end
     return weights, mask
 end

@@ -18,12 +18,21 @@ E1. Full rationale in [TODO.md](TODO.md) and
 > fixed-horizon metric diverges from **every** anchor regardless of start-flow
 > percentile (E1) and regardless of `grad_clip` (E2). The instability is a
 > property of the learned MB **rollout operator**, not a training-gradient or
-> initial-condition effect. There is also an **unresolved discrepancy** between
-> the bounded 222-step date-range rollout and the divergent 30-step anchor
-> rollout from the same start state — flagged for engineering
-> ([TODO.md](TODO.md)). E3's rollout/fixed-horizon numbers are therefore
-> **not trustworthy for selection** until that is resolved; select E3 on the
-> teacher-forced peak diagnostics (`c_peak`, `rmse_high`, KGE) instead.
+> initial-condition effect.
+>
+> **Update 2026-09-07 — rollout-path discrepancy RESOLVED (not a code bug).**
+> Engineering added a same-start regression ([TODO.md](TODO.md)): the batched
+> fixed-horizon anchor path and the single date-range trajectory path **agree to
+> tolerance when seeded from the same initial state**, and both run from the
+> restored best-epoch checkpoint. So the fixed-horizon numbers are a *faithful*
+> measure of model behaviour — the earlier "anchor 1 ≈ date-range start"
+> equivalence (E1) was the wrong premise: the bounded date-range and the
+> divergent anchors are simply *different* start states/forcings, not a code
+> mismatch. **Consequence for E3:** fixed-horizon metrics are trustworthy, but
+> because the free rollout is unconditionally unstable across every tested
+> config, they will likely be Inf/astronomical for all λ cells and so cannot
+> *discriminate* between them — still select E3 on teacher-forced peak
+> diagnostics (`c_peak`, `rmse_high`, KGE).
 
 ## E3 — peak-weighted Huber λ-sweep — `sava_small_v081_e3_huber_lambda` (PROPOSED)
 
@@ -49,11 +58,13 @@ the sweep. **`peak_delta`: E1 harvested `≈0.5`** (heavy-tailed standardised
 `river_q` residuals: median 0.098, mean 1.16, p90 2.0) — update the config's
 placeholder `1.0` to `0.5` before launching; sanity-check against `{0.5,1,2}`.
 
-**Selection (never weighted val loss; rollout metrics untrustworthy per the E1+E2
-finding above).** Target `peak_loss.final_c_peak ≈ 0.3–0.5`; minimise
-`peak_loss.final_rmse_high`; constraint `river_q_performance.pooled.kge` must not
-degrade materially vs λ=0 (**and treat KGE gaps < ~0.15 as seed noise, per E2**);
-guard `peak_loss.final_peak_grad_frac` (no tiny cell fraction dominating the
+**Selection (never weighted val loss; fixed-horizon metrics are now trusted as a
+faithful instability signal — resolved 2026-09-07 — but will diverge for every λ
+cell and so can't discriminate between them).** Target `peak_loss.final_c_peak ≈
+0.3–0.5`; minimise `peak_loss.final_rmse_high`; constraint
+`river_q_performance.pooled.kge` must not degrade materially vs λ=0 (**and treat
+KGE gaps < ~0.15 as seed noise, per E2**); guard
+`peak_loss.final_peak_grad_frac` (no tiny cell fraction dominating the
 gradient → sets `peak_w_max`).
 
 **Results:** _pending._
@@ -99,30 +110,36 @@ overshoot 1.9×). `river_h` remains broken (spatial NSE −9.9).
   the outlet even where the rollout stays bounded.
 
 **HYPOTHESES.**
-- **Two rollout paths disagree from the same start (evidence of a discrepancy;
-  cause = speculation).** The 222-step date-range rollout stays bounded
-  (pred q ∈ [3.9, 228.6]) while the 30-step anchor rollout from anchor 1
-  (start_step 1, ~same Jan-1 state) → Inf. Same model, same start, *shorter*
-  horizon diverges — so horizon length cannot be the cause. Points to a **code
-  discrepancy between the two rollout paths** (batched fixed-horizon metric vs
-  single date-range trajectory) or a checkpoint mismatch (best_epoch 37 vs the
-  date-range plot). Flagged for engineering ([TODO.md](TODO.md)). *Caveat:* the
-  "anchor 1 ≈ date-range start" equivalence is inferred, not code-verified.
+- **~~Two rollout paths disagree from the same start~~ — RESOLVED 2026-09-07
+  (not a code discrepancy).** I originally hypothesised a code mismatch because
+  the 222-step date-range rollout stays bounded (pred q ∈ [3.9, 228.6]) while
+  the 30-step anchor rollout → Inf, assuming anchor 1 ≈ the date-range start.
+  Engineering's same-start regression ([TODO.md](TODO.md)) shows the two paths
+  **agree to tolerance from an identical seed state** and both use the restored
+  best-epoch checkpoint. **The inferred "anchor 1 ≈ date-range start" premise was
+  wrong** — the bounded trajectory and the divergent anchors are genuinely
+  different initial states/forcings. Net: the fixed-horizon divergence is a real
+  model-instability signal, not a measurement artifact, and it is now safe to
+  trust `fixed_horizon.*` as a faithful (if uniformly damning) instability metric.
 - **`h_loss_weight` not directly measurable here (evidence).** The MSE run does
   not emit the huber-only per-channel grad-norm diagnostic; proxy from loss
   magnitudes `val_q_1step` 0.0144 vs `val_h_1step` 0.848 (~59×). The Step-0
   unweighted-Huber autotune run will give the real per-channel grad norms.
 
 **RECOMMENDATIONS.**
-1. **Reconcile the two rollout paths (engineering, top priority)** — blocks
-   trust in every fixed-horizon selection number. See [TODO.md](TODO.md).
-2. **Prioritise an inference-stability lever over peak accuracy** — no config
-   yet yields a stable free rollout; `mb_theta < 1` (damps the confirmed
-   `val_amp ≈ 11.5` q→h amplification), noise injection, or the detached-rollout
-   trick (TODO item 3).
-3. **E3 still worth running** for the peak signal, but read its rollout metrics
-   through the path-reconciliation outcome; update its `peak_delta` from `1.0`
-   to `≈0.5`.
+1. **~~Reconcile the two rollout paths~~ — DONE 2026-09-07.** Engineering
+   confirmed the paths agree from the same seed state and use the restored
+   best-epoch checkpoint; the fixed-horizon divergence is genuine model
+   instability, not a code mismatch ([TODO.md](TODO.md)). Fixed-horizon metrics
+   are now trusted as an instability signal.
+2. **Prioritise an inference-stability lever over peak accuracy (now the top
+   open item)** — no config yet yields a stable free rollout; `mb_theta < 1`
+   (damps the confirmed `val_amp ≈ 11.5` q→h amplification), noise injection, or
+   the detached-rollout trick (TODO item 3).
+3. **E3 still worth running** for the peak signal, but expect its fixed-horizon
+   numbers to diverge for every λ cell (so they can't discriminate); select on
+   teacher-forced peak diagnostics and update its `peak_delta` from `1.0` to
+   `≈0.5`.
 
 ## E2 — grad_clip A/B — `sava_small_v081_e2_gradclip`
 

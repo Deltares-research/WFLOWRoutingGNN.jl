@@ -2,6 +2,7 @@ using Test
 using Flux
 using GraphNeuralNetworks
 using Statistics
+using CUDA
 
 # ---------------------------------------------------------------------------
 # Shared synthetic graph data
@@ -192,6 +193,24 @@ end
     @test summary.loss >= 0f0
     @test summary.w_mean >= 0f0
     @test summary.w_max >= 1f0
+end
+
+if CUDA.functional()
+    @testset "peak_weighted_huber_loss CUDA regression" begin
+        pred = CUDA.rand(Float32, 2, 4)
+        target = CUDA.rand(Float32, 2, 4)
+        u = CUDA.rand(Float32, 2)
+        s = CUDA.rand(Float32, 2)
+        s = max.(s, eps(Float32))
+        loss = WflowRoutingGNN.peak_weighted_huber_loss(pred, target, u, s;
+                                                        delta = 1.0f0,
+                                                        lambda = 2.0f0,
+                                                        gamma = 1.0f0,
+                                                        w_max = 4.0f0)
+        @test loss isa Float32
+        @test isfinite(loss)
+        @test loss >= 0f0
+    end
 end
 
 # ---------------------------------------------------------------------------

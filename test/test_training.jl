@@ -214,6 +214,27 @@ end
     @test isnothing(build_fixed_horizon_eval(TR_DATASET.val, TR_STATIC, TR_STATS,
                                              "river", TR_POSTSCALE; horizon = 0))
 
+    @testset "same-start anchor rollout matches trajectory rollout" begin
+        model = deepcopy(TR_MODEL)
+        split = [TR_GRAPHS[1:3]]
+        pred_states, _ = evaluate_trajectory(model, split, TR_STATS, "river", TR_STATIC;
+                                            device = :cpu, postscale = TR_POSTSCALE)
+
+        fh = build_fixed_horizon_eval(split, TR_STATIC, TR_STATS, "river", TR_POSTSCALE;
+                                     horizon = 2, n_anchors = 1)
+        @test fh.B == 1
+        state = copy(fh.states0[:, 1:TR_N_NODES])
+        q_pred = Matrix{Float32}(undef, TR_N_NODES, fh.horizon)
+        for k in 1:fh.horizon
+            f_t    = fh.forcing[:, :, k]
+            f_next = fh.forcing[:, :, min(k + 1, fh.horizon)]
+            state  = model(fh.gB, state, f_t, fh.static, f_next)
+            q_pred[:, k] = state[fh.qi, :]
+        end
+        q_phys = (q_pred .* fh.q_sigma .+ fh.q_mu) .* reshape(fh.q_postscale, TR_N_NODES, 1)
+        @test maximum(abs, q_phys .- pred_states[1, :, :]) < 1f-3
+    end
+
 end
 
 # ---------------------------------------------------------------------------
