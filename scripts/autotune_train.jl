@@ -230,8 +230,7 @@ function autotune(config::AbstractString, opts::AbstractDict)
             range_horizon, rec.safe, rec.steep, rec.min_over_10, rec.gnorm_cap, rec.gnorm_ref)
         isfinite(rec.safe) || error("LR range test produced no finite recommendation.")
         rec.near_lr_floor && error(@sprintf(
-            "LR recommendation %.3e is within one decade of lr_min %.3e; range test likely failed. " *
-            "Re-run with explicit --lr-start or inspect the LR curve.",
+            "LR recommendation %.3e is within one decade of lr_min %.3e; range test likely failed. Re-run with explicit --lr-start or inspect the LR curve.",
             rec.safe, minimum(lrs)))
         lr_start = rec.safe
         # Clip the global grad norm to a few× the healthy (pre-blow-up) norm so a
