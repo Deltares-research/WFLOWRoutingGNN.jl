@@ -434,18 +434,23 @@ function peak_epoch_diagnostics(model::WflowGNN, batch::Vector{<:GNNGraph},
             peak_mass  = sum(q_elem[qmask]) + strategy.h_loss_weight * sum(h_elem[hmask])
             cpk        = total_mass > 0f0 ? Float32(peak_mass / total_mass) : NaN32
 
-            sq_err = Float32[]
-            ab_err = Float32[]
+            sq_sum = 0f0
+            ab_sum = 0f0
+            n_high = 0
             if any(qmask)
-                sq_err = vcat(sq_err, abs2.(q_pred0[qmask] .- q_target[qmask]))
-                ab_err = vcat(ab_err, abs.(q_pred0[qmask] .- q_target[qmask]))
+                q_diff = q_pred0[qmask] .- q_target[qmask]
+                sq_sum += sum(abs2, q_diff)
+                ab_sum += sum(abs, q_diff)
+                n_high += Int(sum(qmask))
             end
             if any(hmask)
-                sq_err = vcat(sq_err, abs2.(h_pred0[hmask] .- h_target[hmask]))
-                ab_err = vcat(ab_err, abs.(h_pred0[hmask] .- h_target[hmask]))
+                h_diff = h_pred0[hmask] .- h_target[hmask]
+                sq_sum += sum(abs2, h_diff)
+                ab_sum += sum(abs, h_diff)
+                n_high += Int(sum(hmask))
             end
-            rmse_h = isempty(sq_err) ? NaN32 : Float32(sqrt(mean(sq_err)))
-            mae_h  = isempty(ab_err) ? NaN32 : Float32(mean(ab_err))
+            rmse_h = n_high == 0 ? NaN32 : Float32(sqrt(sq_sum / n_high))
+            mae_h  = n_high == 0 ? NaN32 : Float32(ab_sum / n_high)
 
             wm  = Float32((mean(qw) + mean(hw)) / 2)
             wmx = Float32(max(maximum(qw), maximum(hw)))
