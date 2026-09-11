@@ -7,140 +7,98 @@ behind a toggle so it can be A/B-tested against current behaviour.
 
 ---
 
-# LR autotune is too fragile — `recommend_lr` picks the noise floor (fix)
-
-From the E3 (`sava_small_v081_e3_huber_lambda`) Step-0 autotune attempts
-(`slurm-255160` and the horizon-1 rerun): the LR range test / recommendation
-returns a near-useless `lr_start ≈ 1e-7` on the Huber loss, so training runs
-effectively **frozen** (E3 attempt 1: `train_q_1step` moved only 188→152 over 250
-epochs, everything else NaN). Autotuning that collapses this easily defeats its
-own purpose — a hand-picked `1e-3` is obviously better from the same curve.
-
-Two independent failure modes, both in
-[scripts/autotune_train.jl](../scripts/autotune_train.jl) /
-[scripts/lr_range_test.jl](../scripts/lr_range_test.jl):
-
-- [x] **`--range-horizon` > 1 blows up the range test on the untrained rollout.**
-      At horizon 10 the free rollout is unstable at init (E1/E2), so the range
-      test loss is `Inf` at the very first probe (lr=1e-7) → autotune falls back
-      to the floor `safe=1e-8`. The range test must default to / be documented as
-      a **shallow (horizon-1)** test; deep-horizon conservatism belongs to the
-      separate `lr_peak_decay` gradient-growth probe, not the range test. Consider
-      hard-capping the range-test horizon to 1 (or `min(range_horizon, steps[1])`)
-      regardless of the flag, with a warning.
-  - Implemented in `scripts/autotune_train.jl`: requested `--range-horizon` is
-    capped to the shallow curriculum horizon with a warning.
-- [x] **`gnorm_cap` trips on a single early grad-norm spike (Huber = spiky).**
-      Horizon-1 rerun produced a healthy descending curve (loss 593→264) yet
-      `recommend_lr` returned `safe = gnorm_cap = 1.04e-7` because one early
-      transient grad norm exceeded `3× gnorm_ref` and the detector breaks on the
-      **first** over-threshold step with **no smoothing**. Harden it:
-      (a) smooth the grad-norm series (EMA/median) before thresholding;
-      (b) require **N consecutive** over-threshold steps, not one;
-      (c) only trip after the loss has actually started rising (tie the gnorm
-          blow-up to loss divergence, not gnorm alone);
-      (d) ignore the EMA-warmup head so the `steep` pick isn't planted on the
-          warmup hump (loss rose 593→1158 over steps 1–15 before descending).
-      - Implemented in `scripts/lr_range_test.jl`: grad-norm detector now uses
-            smoothed grad norms, requires consecutive breaches, and only trips once the
-            loss is rising.
-- [x] **Saner `safe` aggregation.** `safe = min(steep, min_over_10, gnorm_cap)`
-      lets any one fragile estimator veto the others down to the floor. Prefer a
-      robust combination (e.g. `min_over_10`-anchored with a divergence-based
-      upper bound), and **error out / warn loudly** when the recommendation lands
-      within ~1 decade of `lr_min` (a tell-tale of a failed test) instead of
-      silently writing it.
-      - Implemented in `scripts/lr_range_test.jl`: `safe` now uses a robust
-            second-smallest finite estimate, and surfaces a `near_lr_floor` flag.
-            `lr_range_test.jl` warns loudly; `autotune_train.jl` now fails fast instead
-            of silently writing near-floor `lr_start` values.
-- [x] **Fix `grad_clip` recommendation too.** `clip_mult × gnorm_ref` gave
-      `grad_clip ≈ 7e4` (never clips) while the same run showed grad-norm spikes
-      to 1e7 — useless. E1/E2 found `grad_clip = 1.0` best; the recommender should
-      not produce values orders of magnitude above the healthy norm.
-      - Implemented in `scripts/autotune_train.jl`: auto `grad_clip` is now clamped
-            to a configurable sane range (`--grad-clip-min`, `--grad-clip-max`; defaults
-            `0.1` to `10.0`).
-- **Interim workaround (already usable):** pass the LR explicitly to skip the
-  range test — `autotune_train.jl <config> --dry-run --in-place --lr-start 1e-3
-  --grad-clip 1.0` (still runs the batch-size and `lr_peak_decay` probes).
-- [x] **Add a regression test** with a synthetic spiky-gradient curve asserting
-  `recommend_lr` does not return within a decade of `lr_min`.
-      - Added `test/test_lr_autotune.jl` and included it in `test/runtests.jl`.
-- [x] **Range test is init-dependent / flaky (NEW — post-fix follow-up).** After
-      the horizon-1 + guard fixes, a fresh E3 Step-0 rerun *still* failed: at the
-      identical `lr=1e-7`, horizon=1, batch=32, the earlier good run had step-1
-      loss 593 / gnorm 1.2e4 and descended cleanly, but this run started at loss
-      397 / gnorm **1.3e5** and exploded at step 2 (loss 5400, gnorm 1.8e6). Same
-      LR, ~10× grad norm → the only difference is the **unseeded random weight
-      init**. The guard correctly aborted (no silent floor write), but the range
-      test itself is a coin flip on init-sensitive (Huber) losses. Fix:
-      (a) **seed** the range-test model init and the gradient-growth probe for
-          reproducibility; and/or
-      (b) run the range test from **2–3 inits and take the median** recommendation
-          (discard inits that diverge at the first probe), so one unlucky init
-          doesn't fail the whole autotune.
-      Evidence: E3 `slurm-255160` lineage; both the good and failed horizon-1
-      curves above.
-      - Implemented in `scripts/autotune_train.jl` + `scripts/lr_range_test.jl`:
-            seeded probe setup (`--seed`), multi-init LR range test (`--range-inits`,
-            default 3), robust median aggregation across valid inits (discarding
-            near-floor recommendations), deterministic probe loaders (`shuffle=false`),
-            and seeded gradient-growth probes for reproducible `lr_peak_decay`.
-- Touch: `scripts/lr_range_test.jl` (`recommend_lr`), `scripts/autotune_train.jl`,
-  a test file.
-
----
-
-# HParSearch config-parser drift (fix FIRST — blocks all future searches)
+# HParSearch config-parser drift — RESOLVED 2026-09-04
 
 From the `sava_small_v081_s2_stability` post-mortem
 ([EXPERIMENTS.md](EXPERIMENTS.md) → *bug 1*): the intended `grad_clip` search
 arm never executed. All 8 runs trained at the default `grad_clip = 1.0` even
 though the config `search_space` requested `0.1`. Root cause: the hparsearch
-path builds its own `TrainSettings`/`TrainingStrategy` inline, and this
-constructor has **drifted out of sync** with the single-run parser in
+path built its own `TrainSettings`/`TrainingStrategy` inline, and this
+constructor had **drifted out of sync** with the single-run parser in
 [src/run.jl](../src/run.jl). Any `[train]`/`[train.strategy]` key the inline
-constructor omits is silently written into the config dict but **never consumed**
-— it defaults instead. This is a code bug, not a config error, and it silently
-invalidates search arms.
+constructor omitted was silently written into the config dict but **never
+consumed** — it defaulted instead. This was a code bug, not a config error, and
+it silently invalidated search arms.
+
+**Status: FIXED (preferred refactor taken).** Verified live by the E3 sweep,
+which correctly varied `peak_lambda` and honoured `loss_type=huber` /
+`grad_clip=1.0` (the per-cell `peak_loss.*` diagnostics only emit under Huber).
 
 ## 0. Eliminate the hparsearch ↔ run.jl config-parsing drift
 
-- **Evidence.** [src/hparsearch.jl](../src/hparsearch.jl) line ~242 builds
-  `TrainSettings(...)` and line ~237 builds `TrainingStrategy(...)` inline. The
-  single-run parser `parse_run_config` in [src/run.jl](../src/run.jl) (lines
-  ~100–139) is the correct reference. Diffing the two, the search path currently
-  **drops** the following keys (they can never be varied in a search):
-  - `TrainSettings`: `grad_clip`, `lr_warmup_epochs`, `lr_peak_decay` (the three
-    flagged in the post-mortem).
-  - `TrainingStrategy`: `loss_type`, `peak_delta`, `peak_lambda`, `peak_gamma`,
-    `peak_w_max` — so the **peak-weighted-Huber workstream (§2) is also
-    un-searchable** until this is fixed.
-  - Inconsistent default: `lr_steps` is a hard `td["lr_steps"]` (required) in
-    hparsearch vs `get(td, "lr_steps", 10)` in run.jl.
-- [ ] **Preferred fix — remove the duplication, not patch it.** Refactor
-      `parse_run_config` so the dict→`(ds, ms, ts)` construction lives in a
-      shared helper that takes an already-loaded TOML `Dict` (+ resolve dir),
-      e.g. `settings_from_config(d, toml_dir)`. Have both `parse_run_config`
-      (path → load TOML → helper) and `run_hparsearch` (mutated dict → helper)
-      call it. This makes future config keys land in both paths automatically
-      and prevents the class of bug recurring.
-- [ ] **Minimum fix (if the refactor is deferred).** Add the missing keys to the
-      inline `TrainSettings`/`TrainingStrategy` in `src/hparsearch.jl`
-      (`grad_clip`, `lr_warmup_epochs`, `lr_peak_decay`; `loss_type`,
-      `peak_delta`, `peak_lambda`, `peak_gamma`, `peak_w_max`) and switch
-      `lr_steps` to `get(td, "lr_steps", 10)` to match run.jl.
-- [ ] **Regression guard.** Add a test that a `search_space` overriding
-      `train.grad_clip` (and one `train.strategy.*` key) is actually reflected in
-      the constructed `TrainSettings`/`TrainingStrategy` for each combo — i.e.
-      assert the override reaches the settings object, not just the config dict.
-      Extend [test/test_strategy.jl](../test/test_strategy.jl) or
-      [test/test_training.jl](../test/test_training.jl).
-- [ ] **Verify.** Re-run a tiny 2-combo search varying `grad_clip = {1.0, 0.1}`
-      and confirm each run's saved `model/train_settings.toml` shows the intended
-      value (the exact check that surfaced the bug).
-- Touch: `src/hparsearch.jl`, `src/run.jl` (extract shared parser), test file.
+- [x] **Preferred fix — remove the duplication, not patch it.** Done: the
+      dict→`(ds, ms, ts)` construction now lives in a shared
+      `settings_from_config(d, toml_dir)` in [src/run.jl](../src/run.jl#L66);
+      `parse_run_config` ([src/run.jl](../src/run.jl#L153)) and the hparsearch
+      path ([src/hparsearch.jl](../src/hparsearch.jl#L211)) both call it, so
+      future config keys land in both paths automatically.
+- [x] **Regression guard.** Added in
+      [test/test_hparsearch.jl](../test/test_hparsearch.jl) — asserts a
+      `search_space` override reaches the constructed settings object, not just
+      the config dict.
+- [x] **Verify.** Confirmed via the E3 sweep (grad_clip / loss_type / peak_* all
+      propagated per cell) and documented in
+      [docs/CHANGELOG.md](CHANGELOG.md).
+- Touched: `src/hparsearch.jl`, `src/run.jl` (shared parser), `test/test_hparsearch.jl`.
+
+---
+
+# Autotune ignores the configured loss — tunes on MSE even for Huber (fix)
+
+From the E3 (`sava_small_v081_e3_huber_lambda`) post-mortem
+([EXPERIMENTS.md](EXPERIMENTS.md) → E3): the whole point of re-running Step-0
+autotune for E3 was that "MSE → Huber changes the gradient scale". But the LR
+range test **never sees the Huber loss** — it silently tunes on MSE, so the
+`lr_start = 0.012` it recommended was an MSE-scaled value applied to a Huber run.
+Combined with the ~90× jump from the E1/E2 LR (1.3e-4), this is a prime suspect
+for E3's rollout **collapse-to-zero** (see EXPERIMENTS.md).
+
+- **Root cause.** [scripts/lr_range_test.jl](../scripts/lr_range_test.jl)
+  `make_model_loader` (~line 124) builds its own strategy and forwards **only**
+  `noise_scale` and `h_loss_weight`:
+  ```julia
+  strategy = TrainingStrategy([horizon], [1], ts.strategy.noise_scale;
+                              h_loss_weight = ts.strategy.h_loss_weight)
+  ```
+  `loss_type`, `peak_delta`, `peak_lambda`, `peak_gamma`, `peak_w_max` are
+  dropped, so the constructor defaults (`loss_type = :mse`, `peak_delta = 1`,
+  `peak_lambda = 0`) take over and `loss_function` computes **MSE** regardless of
+  the config.
+- [ ] **Fix.** Forward the full loss config from `ts.strategy` into the
+      `TrainingStrategy` that `make_model_loader` constructs (`loss_type`,
+      `peak_delta`, `peak_lambda`, `peak_gamma`, `peak_w_max`). One-line change;
+      no trained model needed (still a horizon-1, teacher-forced test).
+      - Note: keep `peak_lambda` at the base (0) is fine for a λ-swept box search
+        (one tune for the whole grid), **but `loss_type = :huber` and
+        `peak_delta` must be forwarded** so the gradient scale matches the run.
+- [ ] **Guard.** Log the effective `loss_type`/`peak_delta` used by the range
+      test so a mismatch with the config is visible in the autotune output.
+- [ ] **Regression test.** Assert the strategy built by `make_model_loader`
+      inherits `loss_type` from `ts.strategy` (extend `test/test_lr_autotune.jl`).
+- **NOT in scope (documented limitation, do not "fix").** The range test is
+  teacher-forced / horizon-1 and therefore **blind to multi-step rollout
+  collapse** — doing it "properly" would need a pre-trained model, which defeats
+  the purpose of tuning *before* training. Mitigation is to treat the autotuned
+  LR as an **upper bound** for rollout-curriculum runs and hand-set lower if a
+  run collapses, not to change the range test.
+- Touch: `scripts/lr_range_test.jl` (`make_model_loader`), `scripts/autotune_train.jl`
+  (logging), `test/test_lr_autotune.jl`.
+
+---
+
+# Enforce non-negative predicted discharge (physics floor)
+
+From E3: the free-rollout produced **unphysical negative discharge** (daterange
+`river_q_pred` min ≈ −6 m³/s across cells) as the model collapsed toward zero.
+River discharge cannot be negative.
+
+- [ ] Apply a positivity floor to predicted `river_q` (and any physically
+      non-negative channel) at the decoder / MB-layer output — e.g. `softplus`,
+      `relu`, or `max(·, 0)` on the reconstructed absolute flow, chosen so it does
+      not break the MB water-balance derivation of `river_h` or its gradients.
+- [ ] Verify it does not mask instability (a floored-but-still-collapsing model
+      should still be detectable via PBIAS / peak_ratio, not hidden by clamping).
+- Touch: `src/gnn.jl` (decoder / MB layer), a test asserting `q ≥ 0`.
 
 ---
 
@@ -254,6 +212,91 @@ invalidates search arms.
   `fixed_horizon_metrics`), `src/training.jl` (thread/persist the per-anchor
   table), `src/plot.jl` (writer), config toggle if per-epoch persistence is
   wanted.
+
+## 2d. System water-volume validation diagnostic (pred AND truth)
+
+- **Why (see [DECISIONS.md](DECISIONS.md) → PROPOSED 08-09-2026).** Per-cell
+  RMSE hides slow, systematic storage error. An integrated total-volume signal
+  is the natural probe for the compounding `river_h` drift flagged in the
+  `s2_stability` post-mortem. Total volume is **not** a conservation check (open
+  system; local conservation is already guaranteed by the hard-MB layer) — it is
+  a **pred-vs-truth storage-tracking** signal, so it MUST be computed for both
+  the predicted and the ground-truth trajectory and always plotted/scored
+  together.
+- **Current code.** `rollout_mb_diagnostics(model, split, static)` in
+  [src/rollout.jl](../src/rollout.jl) already returns per-node physical
+  `(n_nodes × T)` matrices for both prediction and truth: `pred_h`, `true_h`,
+  `inwater`, `net_flux`, `upstream_q`, `pred_q`, `true_q`. The
+  `MassBalanceLayer` (`model.mass_balance`) exposes `postscale_q` (= drainage
+  area `A`) and `postscale_h` (= `A/(w·l)`), so per-node `w_i·l_i =
+  postscale_q_i / postscale_h_i` (equivalently `1 / ph_over_pq_i`).
+- [ ] **Compute storage series for BOTH pred and truth.**
+      `V_pred(t) = Σ_i pred_h[i,t] · (w_i l_i)` and
+      `V_true(t) = Σ_i true_h[i,t] · (w_i l_i)` (m³). Never compute one without
+      the other — the diagnostic value is the comparison.
+- [ ] **Headline scalars → run metrics TOML.** `volume_pbias`
+      (`100·Σ(V_pred−V_true)/Σ V_true`) and `volume_drift` (least-squares slope
+      of `V_pred(t) − V_true(t)` vs `t`, units m³/step). Mirror the existing
+      metrics-writing path (`evaluate_and_write` / `write_run_metrics_toml` in
+      [src/run.jl](../src/run.jl)).
+- [ ] **Budget-closure series for BOTH pred and truth.** Cumulative lateral
+      inflow `Σ inwater·Δt`, cumulative outlet outflow `Σ q_outlet·Δt`, and
+      `ΔV(t) = V(t) − V(0)`, computed once with the predicted trajectory and once
+      with the ground-truth trajectory. For the hard-MB model
+      `ΔV_pred ≈ Δt·Σ_i net_flux_i`, so the pred budget residual should be ~0 —
+      log it as a self-test. Do not assume the truth budget closes (daily
+      discretisation).
+- [ ] **Outlet definition (OPEN — decide before implementing).** Either the
+      single `argmax(upstream_area)` node (reuse the
+      `plot_downstream_timeseries` rule) or the full set of sink nodes (no
+      downstream neighbour in the routing adjacency). Multi-outlet basins need
+      the sink-set variant; document the choice.
+- [ ] **Plot.** New `plot_volume_budget(diags; path, timestamps)` alongside the
+      existing `plot_mb_diagnostics` in [src/plot.jl](../src/plot.jl): row 1 =
+      `V_pred(t)` vs `V_true(t)`; row 2 = budget closure (cumulative inflow /
+      outflow / `ΔV`) for pred and truth. Write a companion CSV like the other
+      plot writers.
+- **Validation.** On a known-good full-curriculum `increment` run: confirm the
+  pred budget residual is ~0 (self-test passes), and that `volume_drift` is small
+  where 1-step q-skill is high. Cross-check `volume_pbias` sign against the
+  existing per-node `bias`/`relbias` maps.
+- Touch: `src/rollout.jl` (or a small reduction helper on its output),
+  `src/plot.jl` (`plot_volume_budget`), `src/run.jl` (scalars into metrics TOML).
+
+## 2e. Longitudinal upstream timeseries (percentile ladder + catchment inset)
+
+- **Why (see [DECISIONS.md](DECISIONS.md) → PROPOSED 08-09-2026).** Localise
+  *where* along the network routing error is injected vs merely advected, and
+  expose the regime-dependence of the `river_h` failure (low-flow / small-area
+  headwaters vs the outlet). Extends the outlet-only
+  `plot_downstream_timeseries`.
+- **Current code.** `plot_downstream_timeseries(pred_grids, true_grids, domain,
+  grid, upstream_area; ...)` in [src/plot.jl](../src/plot.jl) selects a single
+  node via `argmax(upstream_area)` and forwards to `plot_timeseries`. `grid`
+  carries `rows`/`cols`/`nrows`/`ncols` for the inset.
+- [ ] **Percentile ladder over `upstream_area`.** Select `K` active nodes
+      spanning the drainage-area distribution from outlet (max) to headwater
+      (min active): e.g. the nodes nearest the `K` evenly-spaced percentiles of
+      `upstream_area` over active (non-NaN) nodes. Order panels
+      downstream → upstream.
+- [ ] **`K` configurable via TOML, default 5.** Thread a config key (e.g.
+      `[eval].upstream_points = 5`) through to the plotting call; fall back to 5
+      when absent.
+- [ ] **Per-panel catchment inset.** Add a small inset to each timeseries panel
+      showing all active nodes in grid space (`grid.rows`/`grid.cols`) as faint
+      points with the selected node highlighted, so the reader sees where in the
+      catchment the series sits. Reuse `plot_timeseries` per node; extend it (or
+      wrap it) to accept an optional inset spec rather than duplicating the
+      panel-drawing code.
+- [ ] **CSV.** Keep the existing per-node CSV export from `plot_timeseries`; name
+      outputs by node so the K series are distinguishable.
+- **Validation.** On a full-curriculum `increment` run, confirm the `river_h`
+  noise/negative-NSE concentrates in the low-`upstream_area` (headwater) panels
+  relative to the outlet — reproducing the regime-dependence inferred in the
+  post-mortem.
+- Touch: `src/plot.jl` (`plot_downstream_timeseries` → multi-node ladder +
+  inset, possibly a new `plot_upstream_ladder`), `src/run.jl` (config key +
+  call site).
 
 ## 3. Pushforward / detached-rollout trick (toggle)
 

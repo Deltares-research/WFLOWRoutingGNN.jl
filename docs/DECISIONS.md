@@ -5,6 +5,56 @@ note that holds the full reasoning. Newest at the top.
 
 ---
 
+# PROPOSED 08-09-2026
+
+## System water-volume and longitudinal upstream validation diagnostics
+
+- **Add a system water-volume diagnostic on the validation set, computed for
+  BOTH prediction and ground truth.** Total storage
+  `V(t) = Σ_i h_i(t) · w_i · l_i` (m³) is reduced from the per-node physical
+  series already produced by `rollout_mb_diagnostics` (`src/rollout.jl`), using
+  `w_i · l_i = postscale_q_i / postscale_h_i` from the `MassBalanceLayer`. Both
+  the `pred_h` and `true_h` matrices are summed, so `V_pred(t)` and
+  `V_true(t)` are always plotted and scored together — the diagnostic is a
+  **pred-vs-truth storage-tracking** signal, not a conservation check (the river
+  is an open system; local conservation is already guaranteed by the hard-MB
+  layer). Two framings are recorded:
+  - **Storage series** `V_pred(t)` vs `V_true(t)` over the validation
+    trajectory, plus headline scalars written to the run's metrics TOML:
+    **volume PBIAS** (`V_pred` vs `V_true`) and **volume drift** (slope of
+    `V_pred − V_true` over the horizon). Drift is the integrated signature of the
+    compounding `river_h` error flagged in the `s2_stability` post-mortem, which
+    per-cell RMSE hides.
+  - **Budget closure** for both pred and truth: cumulative lateral inflow
+    `Σ inwater·Δt`, cumulative outlet outflow `Σ q_outlet·Δt`, and
+    `ΔV(t) = V(t) − V(0)`. For the hard-MB model
+    `ΔV = Δt · Σ_i net_flux_i` holds by construction, so the pred budget closing
+    to ~0 residual doubles as a self-test; the truth budget need not close
+    through the daily discretisation, which is itself informative.
+- **Rationale for computing both.** Comparing the model's storage trajectory to
+  the ground-truth storage trajectory (rather than to a constant) is what makes
+  volume drift/PBIAS interpretable; a truth-only or pred-only curve carries no
+  accuracy information.
+- **Add longitudinal upstream timeseries plots.** Generalise
+  `plot_downstream_timeseries` (`src/plot.jl`, currently outlet-only via
+  `argmax(upstream_area)`) to a **percentile ladder over `upstream_area`** —
+  outlet (max) → headwater (min active) — with the number of points **K
+  configurable via TOML, default 5**. Each node reuses `plot_timeseries`, with a
+  **small per-panel inset** showing the node's location within the catchment
+  (all active nodes in grid space, selected node highlighted). Purpose: localise
+  *where* along the network routing error is injected vs merely advected, and
+  expose the regime-dependence of the `river_h` failure (low-flow / small-area
+  headwaters vs the outlet).
+- **Cadence: end-of-run only.** Both diagnostics are derived from the
+  date-range validation rollout already produced for the MB plots — no new
+  rollout cost and no per-epoch overhead. A per-epoch volume-drift scalar is
+  deferred.
+- **Open question carried into TODO.** Outlet definition for the outflow term
+  (single max-`upstream_area` node vs all sink nodes) is left to the engineering
+  task; multi-outlet basins need the sink-set variant.
+
+---
+
 # STATUS AS OF 07-09-2026
 
 ## Peak-weighted Huber loss: implementation and device-safety

@@ -6,72 +6,137 @@ Experiment configs live under `experiments/`. Newest at the top.
 
 # PROPOSED — not yet run
 
-*Post-S2 peak-accuracy / stability plan, unblocked by the 2026-09-04 code
-changes (shared config parser + verified `grad_clip` propagation; peak-weighted
-Huber; Tier-1 peak diagnostics; Tier-2 `river_q` KGE/PBIAS/FHV; per-anchor
-fixed-horizon diagnostics). E1 and E2 are **done** (see COMPLETED); E3 depends on
-E1. Full rationale in [TODO.md](TODO.md) and
-[notes/peak_accuracy_todo.md](notes/peak_accuracy_todo.md).*
+*Post-E3 disentangling run. E1, E2 and E3 are **done** (see COMPLETED). E3's
+peak-weighted-Huber sweep collapsed discharge to ~zero, but confounded three
+changes at once (loss, LR, and an MSE-tuned LR applied to a Huber run) — E4
+isolates the loss change at a known-stable LR. Full rationale in
+[TODO.md](TODO.md) and [notes/peak_accuracy_todo.md](notes/peak_accuracy_todo.md).*
 
-> **⚠ Cross-cutting finding from E1 + E2 (read before running E3).** No
-> configuration tested so far produces a stable 30-step free rollout: the
-> fixed-horizon metric diverges from **every** anchor regardless of start-flow
-> percentile (E1) and regardless of `grad_clip` (E2). The instability is a
-> property of the learned MB **rollout operator**, not a training-gradient or
-> initial-condition effect.
+> **⚠ Cross-cutting finding from E1 + E2 + E3 (read before any peak-accuracy
+> run).** No configuration tested so far produces a *faithful* stable 30-step
+> free rollout. The failure is **regime-dependent on loss + LR**:
+> - **E1/E2 (MSE, lr ≈ 1.3e-4):** rollout **over-predicts and diverges to +Inf**
+>   from every anchor, regardless of start-flow percentile (E1) and `grad_clip`
+>   (E2).
+> - **E3 (Huber δ0.5, autotuned lr = 0.012):** rollout **under-predicts and
+>   collapses to ~0** (even negative flows) — "bounded" anchors, but degenerate.
 >
-> **Update 2026-09-07 — rollout-path discrepancy RESOLVED (not a code bug).**
-> Engineering added a same-start regression ([TODO.md](TODO.md)): the batched
-> fixed-horizon anchor path and the single date-range trajectory path **agree to
-> tolerance when seeded from the same initial state**, and both run from the
-> restored best-epoch checkpoint. So the fixed-horizon numbers are a *faithful*
-> measure of model behaviour — the earlier "anchor 1 ≈ date-range start"
-> equivalence (E1) was the wrong premise: the bounded date-range and the
-> divergent anchors are simply *different* start states/forcings, not a code
-> mismatch. **Consequence for E3:** fixed-horizon metrics are trustworthy, but
-> because the free rollout is unconditionally unstable across every tested
-> config, they will likely be Inf/astronomical for all λ cells and so cannot
-> *discriminate* between them — still select E3 on teacher-forced peak
-> diagnostics (`c_peak`, `rmse_high`, KGE).
+> So loss/LR can move the rollout **attractor** (from +∞ to 0) but neither MSE
+> nor Huber yields a *faithful* stable rollout. **Always cross-check a "bounded"
+> fixed-horizon RMSE against the daterange pred-vs-true magnitude and pooled
+> PBIAS/peak_ratio** — a collapse-to-zero is trivially bounded too. The
+> rollout-path discrepancy is *resolved* (2026-09-07, not a code bug): the
+> fixed-horizon metric is a faithful measure; it's the model that's unstable.
+> The standing priority remains an **inference-stability mechanism**
+> (`mb_theta < 1`, noise injection, detached rollout), not the loss function.
 
-## E3 — peak-weighted Huber λ-sweep — `sava_small_v081_e3_huber_lambda` (PROPOSED)
+## E4 — single Huber baseline at a sane LR — `sava_small_v081_e4_huber_baseline` (PROPOSED)
 
 **Status:** config staged at
-[experiments/sava_small_v081_e3_huber_lambda/config.toml](../experiments/sava_small_v081_e3_huber_lambda/config.toml);
-not yet run. **Depends on E1** (for `peak_delta` + `h_loss_weight`). `box`
-hparsearch, 6 runs, `train.strategy.peak_lambda ∈ {0, 0.5, 1, 2, 4, 8}`
-(λ=0 = unweighted-Huber baseline). Per-node `u_i` (98th pct) / `s_i` (IQR)
-computed automatically (train split) when `loss_type = "huber"`.
+[experiments/sava_small_v081_e4_huber_baseline/config.toml](../experiments/sava_small_v081_e4_huber_baseline/config.toml);
+not yet run. Single train run (`scripts/train.jl`, no autotune).
 
-**Purpose.** The core peak-accuracy intervention
-([notes/peak_accuracy_todo.md](notes/peak_accuracy_todo.md) §2/§2a): does
-per-node peak-weighting improve peak-region skill without regressing the whole
-hydrograph, on the stable small basin, before any full-basin spend.
+**Purpose.** Disentangle the E3 collapse confound. E3 changed **three** things vs
+the stable E1/E2 baseline — loss (MSE→Huber), LR (1.3e-4→0.012, ~90×), and the
+0.012 was an **MSE-tuned** recommendation (autotune is loss-blind, see
+[TODO.md](TODO.md)). E4 holds the LR at the **known-stable E1/E2 value** and runs
+peak-weighted Huber with the E3-optimal knobs (`peak_lambda = 2`, `peak_delta =
+0.5`, `peak_w_max = 4`), so the *only* change vs E1 is the loss.
 
-**Autotune folded in (Step 0, once).** Loss changes MSE → Huber ⇒ gradient scale
-shifts, so re-tune. Peak weighting is Σw-normalised (≈λ-invariant) and Huber
-bounds residual gradients, so a **single** tune on the unweighted-Huber base
-config transfers across the λ grid:
-`autotune_train.jl <config> --dry-run --range-horizon 10` (deep-horizon peak,
-since S2 located the instability at the deep-horizon / high-flow end), then run
-the sweep. **`peak_delta`: E1 harvested `≈0.5`** (heavy-tailed standardised
-`river_q` residuals: median 0.098, mean 1.16, p90 2.0) — update the config's
-placeholder `1.0` to `0.5` before launching; sanity-check against `{0.5,1,2}`.
-
-**Selection (never weighted val loss; fixed-horizon metrics are now trusted as a
-faithful instability signal — resolved 2026-09-07 — but will diverge for every λ
-cell and so can't discriminate between them).** Target `peak_loss.final_c_peak ≈
-0.3–0.5`; minimise `peak_loss.final_rmse_high`; constraint
-`river_q_performance.pooled.kge` must not degrade materially vs λ=0 (**and treat
-KGE gaps < ~0.15 as seed noise, per E2**); guard
-`peak_loss.final_peak_grad_frac` (no tiny cell fraction dominating the
-gradient → sets `peak_w_max`).
+**Read-out.** Does Huber at lr ≈ 1.3e-4 **avoid the collapse**? Compare daterange
+`river_q_pred` range (should span ≈[4, 122], not collapse to ~0 / negatives)
+against E1 (MSE) and the E3 λ=2 cell. Then `river_q_performance.pooled.{kge,
+pbias,peak_ratio}`, fixed-horizon anchor **magnitudes** (not just finiteness),
+and `peak_loss.{final_c_peak, final_rmse_high}`.
+- If E4 avoids the collapse → the E3 failure was **LR-driven** (the 90× jump +
+  MSE-tuned LR), and Huber peak-weighting is worth pursuing at a sane LR.
+- If E4 still collapses → the failure is **Huber-driven**, and the loss switch
+  itself destabilises the rollout on this basin.
 
 **Results:** _pending._
 
 ---
 
 # COMPLETED
+
+## E3 — peak-weighted Huber λ-sweep — `sava_small_v081_e3_huber_lambda`
+
+**NAME:** `sava_small_v081_e3_huber_lambda` (6-run `box` hparsearch,
+`train.strategy.peak_lambda ∈ {0, 0.5, 1, 2, 4, 8}` = hps1…hps6; `loss_type =
+"huber"`, `peak_delta = 0.5`, `peak_w_max = 4.0`, full `[1,2,5,8,10]` curriculum,
+8×64 / mlp 2, 250 epochs). **LR autotuned (Step 0, 20 inits, seeded):
+`lr_start = 0.012`, `grad_clip = 1.0`, `batch_size = 32`.** Config:
+[experiments/sava_small_v081_e3_huber_lambda/config.toml](../experiments/sava_small_v081_e3_huber_lambda/config.toml).
+
+**SUMMARY.** All 6 cells trained and all diagnostics wrote (the first fully clean
+run of the peak-accuracy tooling after the autotune/parser fixes). Teacher-forced
+1-step is accurate (`val_q_1step ≈ 0.0133`, as good as E1). For the first time
+ever the **free rollout is "bounded"** — all 32 fixed-horizon anchors finite
+(median RMSE ~0.9) across every cell, vs all-Inf in E1/E2. **But this is a
+degenerate collapse, not learned stability:** the model drove discharge to ~zero.
+
+**⚠ Read-the-magnitude lesson.** "Bounded" ≠ stable. The daterange rollout shows
+`river_q_pred` max ≈ 5 / mean ≈ 1.8 vs **true max 122 / mean 21.7** (a ~12×
+under-prediction even for the best cell), with **unphysical negative flows**
+(≈ −6). It's bounded only because predicting ~0 is trivially bounded; spatial
+`river_q` NSE is negative (−5.3, worse than climatology). Always cross-check
+fixed-horizon RMSE against pred-vs-true magnitude + pooled PBIAS/peak_ratio.
+
+**λ table (teacher-forced + rollout eval):**
+
+| hps | λ | pooled KGE | outlet KGE | pooled PBIAS | pooled r | c_peak | rmse_high | best_ep |
+|---|---|---|---|---|---|---|---|---|
+| 1 | 0 | −0.583 | −0.728 | −108% | −0.16 | 0.0 | — | 69 |
+| 2 | 0.5 | −0.186 | −0.443 | −74% | 0.10 | 0.788 | 4.00 | 138 |
+| 3 | 1 | −0.030 | −0.361 | −61% | 0.21 | 0.005 | 52.7 | 72 |
+| **4** | **2** | **+0.356** | −0.230 | **−30%** | **0.49** | **0.964** | 3.43 | 124 |
+| 5 | 4 | −0.009 | −0.351 | −60% | 0.23 | 0.911 | 0.93 | 225 |
+| 6 | 8 | −0.152 | −0.424 | −71% | 0.12 | 0.386 | 0.92 | 185 |
+
+**IMPROVEMENTS.**
+- **Tooling works end-to-end.** Autotune (20 seeded inits, robust median →
+  `lr_start = 0.012`), the parser fix (grad_clip propagates), and all Tier-1/2
+  diagnostics wrote for every cell. The prior blockers are cleared.
+- **λ=2 is a clear non-monotonic optimum** on every whole-hydrograph metric
+  (pooled KGE +0.356 vs ≈ −0.02 neighbours — beyond the ~0.15 seed-noise band;
+  PBIAS −30% vs −60–108%; r 0.49). Higher λ nudges the mean prediction up
+  (0.49 → 1.84), partially counteracting the collapse — which is *why* KGE peaks
+  at λ=2. So the λ signal is real but only measures "how much the peak weight
+  offsets the collapse", not genuine peak skill.
+
+**DEGRADED / FAILURE MODES.**
+- **Rollout collapse-to-zero** (the headline) — degenerate under-prediction,
+  negative flows, spatial NSE negative. Mirror image of E1/E2's over-predict →
+  +Inf. Peak-weighting-on-1-step cannot fix an autoregressive collapse.
+- **`river_h` catastrophically broken** — spatial NSE −5.7e6, predicted head
+  exploding while q collapses; q and h have **decoupled** despite the MB coupling
+  (worse than E1's −9.9).
+- **Degenerate outlet** — outlet-gauge `r` is identical (−0.171) across all six
+  cells: a near-flat outlet prediction.
+
+**HYPOTHESES.**
+- **Triple confound (evidence).** E3 changed loss (MSE→Huber), LR (1.3e-4→0.012,
+  ~90×), **and** the LR was tuned on MSE, not Huber — autotune's range test drops
+  `loss_type`/`peak_delta` and silently tunes MSE
+  ([TODO.md](TODO.md); [scripts/lr_range_test.jl](../scripts/lr_range_test.jl)
+  `make_model_loader`). So even "we re-tuned for Huber" is false. The ~90× LR
+  jump + MSE-scaling is the prime suspect for the collapse. **E4 isolates the
+  loss** by holding lr at the E1/E2 value.
+- **Peak-weighting question is unanswerable while collapsed** — λ=2 only "wins" a
+  bad lot; do not read the λ sweep as evidence for/against peak-weighting until
+  the model is in a non-degenerate regime.
+
+**RECOMMENDATIONS.**
+1. **Do NOT promote any λ setting to the full basin** — λ=2 wins a collapsed
+   regime; the result is an artifact.
+2. **Run E4 (loss-vs-LR disentangling)** — single Huber run at lr ≈ 1.3e-4.
+   Decides whether the collapse is LR- or Huber-driven.
+3. **Fix autotune loss-blindness** (forward `loss_type`/`peak_delta` to the range
+   test) and **enforce `q ≥ 0`** at the decoder (negative flow is unphysical) —
+   both in [TODO.md](TODO.md).
+4. **Inference-stability remains the top lever** — loss/LR moved the attractor
+   (+∞ → 0) but neither gives a faithful rollout; prioritise `mb_theta < 1` /
+   noise / detached rollout.
 
 ## E1 — diagnostic baseline — `sava_small_v081_e1_diag`
 
