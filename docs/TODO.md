@@ -43,7 +43,14 @@ which correctly varied `peak_lambda` and honoured `loss_type=huber` /
 
 ---
 
-# Autotune ignores the configured loss — tunes on MSE even for Huber (fix)
+# Autotune ignores the configured loss — tunes on MSE even for Huber — RESOLVED 2026-09-11
+
+Fixed in commit `4731de3` ("fix autotune with huber loss"): `make_model_loader`
+now builds its probe strategy via `probe_training_strategy`, which forwards the
+full loss config (`loss_type`, `peak_delta`, `peak_lambda`, `peak_gamma`,
+`peak_w_max`); the effective loss is logged, and `test/test_lr_autotune.jl`
+asserts inheritance. The documented teacher-forced / horizon-1 limitation below
+still stands (treat autotuned LR as an upper bound).
 
 From the E3 (`sava_small_v081_e3_huber_lambda`) post-mortem
 ([EXPERIMENTS.md](EXPERIMENTS.md) → E3): the whole point of re-running Step-0
@@ -92,13 +99,26 @@ From E3: the free-rollout produced **unphysical negative discharge** (daterange
 `river_q_pred` min ≈ −6 m³/s across cells) as the model collapsed toward zero.
 River discharge cannot be negative.
 
-- [ ] Apply a positivity floor to predicted `river_q` (and any physically
-      non-negative channel) at the decoder / MB-layer output — e.g. `softplus`,
-      `relu`, or `max(·, 0)` on the reconstructed absolute flow, chosen so it does
-      not break the MB water-balance derivation of `river_h` or its gradients.
+- **Current code (partial floor already exists — do NOT re-implement it).** The
+  MB layer already floors its *internal* physical discharge at zero
+  (`q_phys_new = max.(0f0, …)`, [src/gnn.jl](../src/gnn.jl#L281), since commit
+  `5cb4922`), and `rollout_mb_diagnostics` reports that floored copy. The gap is
+  that this floored value does **not** propagate: the MB layer returns only `h`,
+  so the **state/decoder q that carries to the next step is un-floored**, and
+  `fixed_horizon_metrics` reconstructs its reported q directly from `q_norm`
+  **without** a floor ([src/rollout.jl](../src/rollout.jl#L483)) — hence E3's
+  negative anchor/daterange q.
+- [ ] Floor the **propagating** predicted `river_q` (the decoder/state q, not
+      just the internal h-path copy) so negative flow cannot feed the next step —
+      e.g. `softplus`/`relu`/`max(·,0)` on the reconstructed absolute flow, chosen
+      so it does not break the MB water-balance derivation of `river_h` or its
+      gradients.
+- [ ] Floor the reported q in `fixed_horizon_metrics`
+      ([src/rollout.jl](../src/rollout.jl#L483)) consistently with the state floor.
 - [ ] Verify it does not mask instability (a floored-but-still-collapsing model
       should still be detectable via PBIAS / peak_ratio, not hidden by clamping).
-- Touch: `src/gnn.jl` (decoder / MB layer), a test asserting `q ≥ 0`.
+- Touch: `src/gnn.jl` (decoder / state q), `src/rollout.jl`
+  (`fixed_horizon_metrics`), a test asserting `q ≥ 0`.
 
 ---
 
@@ -174,32 +194,32 @@ River discharge cannot be negative.
   must target. **Prediction to test:** divergence concentrates in
   high-flow-start anchors while low-flow anchors stay bounded.
 - **Current code.** `fixed_horizon_metrics(model, fh)` in
-  [src/rollout.jl](../src/rollout.jl) already runs each anchor independently
-  (block-diagonal batch, `fh.B` anchors, arrays shaped `(N, H, B)`) but then
-  reduces with `mean`/`maximum` over **all** anchors into `(rmse_q, peak_ratio)`.
-  The per-anchor information exists and is simply discarded before the reduction.
-- [ ] **Return per-anchor arrays, not just the two scalars.** Have
+  [src/rollout.jl](../src/rollout.jl) now returns both the global scalars and
+  per-anchor arrays (`rmse_q_anchor`, `peak_ratio_anchor`); `FixedHorizonEval`
+  stores anchor start-flow summaries/percentiles; and the final run writes a
+  per-anchor table via `write_fixed_horizon_anchor_table`.
+- [x] **Return per-anchor arrays, not just the two scalars.** Have
       `fixed_horizon_metrics` also produce length-`B` vectors: per-anchor RMSE
       (`sqrt(mean(abs2, ...))` reduced over `(N, H)` only) and per-anchor peak
       ratio (`maximum(abs, pred)/max(true_peak_a, eps)` with a **per-anchor**
       truth peak). Keep the existing two aggregate scalars for backward
       compatibility (existing history fields / plot in
       [src/plot.jl](../src/plot.jl)).
-- [ ] **Tag each anchor with its start-state flow percentile.** In
+- [x] **Tag each anchor with its start-state flow percentile.** In
       `build_fixed_horizon_eval` ([src/rollout.jl](../src/rollout.jl)) the anchor
       `starts` and per-anchor initial `states0` are known; compute each anchor's
       start-state discharge summary (e.g. basin-mean or basin-max physical `q` at
       step 0) and its percentile within the val-split flow distribution, and
       store it on `FixedHorizonEval` (new field) so the diagnostic can be keyed
       by flow regime without recomputation.
-- [ ] **Persist it for one full-curriculum run.** Write the per-anchor table
+- [x] **Persist it for one full-curriculum run.** Write the per-anchor table
       (`anchor_index`, `start_time`/`start_step`, `start_flow_percentile`,
       `fixed_rmse`, `peak_ratio`) to the run's `metrics/` dir (CSV/TOML, mirror
       the existing `plot_fixed_horizon` CSV writer in
       [src/plot.jl](../src/plot.jl)). Per-epoch logging of the full table is not
       required — a final-epoch (or best-epoch) dump is enough to test the
       prediction; keep the two aggregate scalars in the per-epoch history.
-- [ ] **Guard against the reduction masking divergence.** Consider also logging a
+- [x] **Guard against the reduction masking divergence.** Consider also logging a
       cheap aggregate that is *not* max-dominated (e.g. fraction of anchors with
       `peak_ratio > threshold`, or a high-flow-anchor-only RMSE) as a first-class
       per-epoch signal, per RECOMMENDATION #3 ("report a high-flow-anchor rollout
