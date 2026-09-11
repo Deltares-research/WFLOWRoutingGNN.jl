@@ -64,16 +64,16 @@ for E3's rollout **collapse-to-zero** (see EXPERIMENTS.md).
   dropped, so the constructor defaults (`loss_type = :mse`, `peak_delta = 1`,
   `peak_lambda = 0`) take over and `loss_function` computes **MSE** regardless of
   the config.
-- [ ] **Fix.** Forward the full loss config from `ts.strategy` into the
+- [x] **Fix.** Forward the full loss config from `ts.strategy` into the
       `TrainingStrategy` that `make_model_loader` constructs (`loss_type`,
       `peak_delta`, `peak_lambda`, `peak_gamma`, `peak_w_max`). One-line change;
       no trained model needed (still a horizon-1, teacher-forced test).
       - Note: keep `peak_lambda` at the base (0) is fine for a λ-swept box search
         (one tune for the whole grid), **but `loss_type = :huber` and
         `peak_delta` must be forwarded** so the gradient scale matches the run.
-- [ ] **Guard.** Log the effective `loss_type`/`peak_delta` used by the range
+- [x] **Guard.** Log the effective `loss_type`/`peak_delta` used by the range
       test so a mismatch with the config is visible in the autotune output.
-- [ ] **Regression test.** Assert the strategy built by `make_model_loader`
+- [x] **Regression test.** Assert the strategy built by `make_model_loader`
       inherits `loss_type` from `ts.strategy` (extend `test/test_lr_autotune.jl`).
 - **NOT in scope (documented limitation, do not "fix").** The range test is
   teacher-forced / horizon-1 and therefore **blind to multi-step rollout
@@ -83,6 +83,10 @@ for E3's rollout **collapse-to-zero** (see EXPERIMENTS.md).
   run collapses, not to change the range test.
 - Touch: `scripts/lr_range_test.jl` (`make_model_loader`), `scripts/autotune_train.jl`
   (logging), `test/test_lr_autotune.jl`.
+      - Implemented via `probe_training_strategy(base, horizon)` in
+            `scripts/lr_range_test.jl`, used by `make_model_loader`; both
+            `lr_range_test.jl` and `autotune_train.jl` now log effective probe loss
+            settings, and `test/test_lr_autotune.jl` guards the inheritance contract.
 
 ---
 

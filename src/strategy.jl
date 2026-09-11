@@ -430,7 +430,9 @@ function loss_function(model      ::WflowGNN,
             h_target = targets[t][2:2, :]
             q_pred = pred_state[1:1, :]
             h_pred = pred_state[2:2, :]
-            q_u, q_s, h_u, h_s = _resolve_peak_thresholds(peak_stats, q_target, h_target)
+            q_u, q_s, h_u, h_s = Flux.ignore_derivatives() do
+                _resolve_peak_thresholds(peak_stats, q_target, h_target)
+            end
             q_loss = peak_weighted_huber_loss(q_pred, q_target, q_u, q_s;
                                               delta = strategy.peak_delta,
                                               lambda = strategy.peak_lambda,

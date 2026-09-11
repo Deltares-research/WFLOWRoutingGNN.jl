@@ -230,6 +230,9 @@ function autotune(config::AbstractString, opts::AbstractDict)
                                       batch_size = batch_size,
                                       seed = seed_i,
                                       shuffle = false)
+            @info "Range test init $i effective loss: loss_type=$(setup.strategy.loss_type) " *
+                "peak_delta=$(setup.strategy.peak_delta) peak_lambda=$(setup.strategy.peak_lambda) " *
+                "peak_gamma=$(setup.strategy.peak_gamma) peak_w_max=$(setup.strategy.peak_w_max)"
             lrs, losses, gnorms = lr_range_test(setup; num_steps = num_steps,
                                                 lr_min = lr_min, lr_max = lr_max)
             print_curve(lrs, losses, gnorms)
@@ -253,6 +256,7 @@ function autotune(config::AbstractString, opts::AbstractDict)
         agg.safe <= 10.0 * lr_min && error(@sprintf(
             "Robust LR recommendation %.3e is within one decade of lr_min %.3e; range test likely failed across inits. Re-run with explicit --lr-start or inspect curves.",
             agg.safe, lr_min))
+        agg.used_fallback && @warn "All conservative safe picks were near-floor; using median min_over_10 fallback across inits."
 
         lr_start = agg.safe
         # Clip the global grad norm to a few× the healthy (pre-blow-up) norm so a

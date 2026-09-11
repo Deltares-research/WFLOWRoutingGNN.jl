@@ -107,6 +107,19 @@ function load_graphs(ds, ms)
     return (; graphs, norm_stats, postscale, static_arr, output_file)
 end
 
+# Build the single-horizon probe strategy used by LR autotune/range tests.
+# It must preserve the configured loss setup so probe gradients match the
+# eventual training run's loss scale (especially for :huber).
+function probe_training_strategy(base::TrainingStrategy, horizon::Int)
+    return TrainingStrategy([horizon], [1], base.noise_scale;
+                            h_loss_weight = base.h_loss_weight,
+                            loss_type = base.loss_type,
+                            peak_delta = base.peak_delta,
+                            peak_lambda = base.peak_lambda,
+                            peak_gamma = base.peak_gamma,
+                            peak_w_max = base.peak_w_max)
+end
+
 # Build a model + single-horizon loader on the target device for a given
 # (horizon, batch_size). Reuses the pre-built graph data `gd`.
 function make_model_loader(gd, ds, ms, ts;
@@ -120,9 +133,9 @@ function make_model_loader(gd, ds, ms, ts;
     loader = DataLoader(dataset.train;
                         batchsize = bs, shuffle = shuffle, collate = true, parallel = true)
 
-    # Fixed-horizon strategy: current_steps = horizon (single phase, no schedule).
-    strategy = TrainingStrategy([horizon], [1], ts.strategy.noise_scale;
-                                h_loss_weight = ts.strategy.h_loss_weight)
+    # Fixed-horizon strategy: current_steps = horizon (single phase, no schedule),
+    # while preserving the configured loss setup.
+    strategy = probe_training_strategy(ts.strategy, horizon)
 
     model = build_gnn_model(ms, gd.graphs, gd.norm_stats, gd.postscale,
                             gd.output_file, bs; strategy = strategy,
@@ -272,9 +285,10 @@ function recommend_lr(lrs, losses, gnorms = nothing;
     lr_floor = n >= 1 ? minimum(lrs) : NaN
     if n < 8
         m10 = n >= 1 ? lrs[argmin(losses)] / 10 : NaN
+        min10_near = isfinite(lr_floor) && isfinite(m10) && m10 <= lr_floor_factor * lr_floor
         return (steep = NaN, min_over_10 = m10, gnorm_cap = Inf,
                 gnorm_ref = NaN, safe = m10,
-                near_lr_floor = isfinite(lr_floor) && isfinite(m10) && m10 <= lr_floor_factor * lr_floor)
+            near_lr_floor = min10_near, min10_near_floor = min10_near)
     end
 
     loglr = log10.(lrs)
@@ -346,8 +360,10 @@ function recommend_lr(lrs, losses, gnorms = nothing;
     candidates = sort(filter(isfinite, Float64[steep, min_over_10, gnorm_cap]))
     safe = isempty(candidates) ? NaN : candidates[min(2, length(candidates))]
     near_lr_floor = isfinite(lr_floor) && isfinite(safe) && safe <= lr_floor_factor * lr_floor
+        min10_near = isfinite(lr_floor) && isfinite(min_over_10) && min_over_10 <= lr_floor_factor * lr_floor
     return (steep = steep, min_over_10 = min_over_10, gnorm_cap = gnorm_cap,
-            gnorm_ref = gnorm_ref, safe = safe, near_lr_floor = near_lr_floor)
+            gnorm_ref = gnorm_ref, safe = safe, near_lr_floor = near_lr_floor,
+            min10_near_floor = min10_near)
 end
 
 """
@@ -360,12 +376,26 @@ as `near_lr_floor`.
 """
 function aggregate_lr_recommendations(recs::AbstractVector)
     valids = [r for r in recs if isfinite(r.safe) && !getproperty(r, :near_lr_floor)]
-    isempty(valids) && return (; safe = NaN, gnorm_ref = NaN, n_valid = 0, n_total = length(recs))
+    if isempty(valids)
+        # If every conservative pick is near-floor, fall back to a robust
+        # loss-curve estimate (`min_over_10`) across inits.
+        min10_valid = [r for r in recs if hasproperty(r, :min_over_10) &&
+                                     isfinite(r.min_over_10) &&
+                                     !(hasproperty(r, :min10_near_floor) && r.min10_near_floor)]
+        if isempty(min10_valid)
+            return (; safe = NaN, gnorm_ref = NaN, n_valid = 0, n_total = length(recs), used_fallback = false)
+        end
+        m10s = [r.min_over_10 for r in min10_valid]
+        refs = [r.gnorm_ref for r in min10_valid if isfinite(r.gnorm_ref)]
+        return (; safe = median(m10s),
+                gnorm_ref = isempty(refs) ? NaN : median(refs),
+                n_valid = 0, n_total = length(recs), used_fallback = true)
+    end
     safes = [r.safe for r in valids]
     refs  = [r.gnorm_ref for r in valids if isfinite(r.gnorm_ref)]
     return (; safe = median(safes),
             gnorm_ref = isempty(refs) ? NaN : median(refs),
-            n_valid = length(valids), n_total = length(recs))
+            n_valid = length(valids), n_total = length(recs), used_fallback = false)
 end
 
 function print_curve(lrs, losses, gnorms; rows::Int = 20)
@@ -496,6 +526,9 @@ function main()
         @info @sprintf("LR range test: %d steps  lr %.1e -> %.1e  horizon=%d  batch=%d",
                        num_steps, lr_min, lr_max, horizon, batch_size)
         setup = make_model_loader(gd, ds, ms, ts; horizon = horizon, batch_size = batch_size)
+        @info "Range test effective loss: loss_type=$(setup.strategy.loss_type) " *
+              "peak_delta=$(setup.strategy.peak_delta) peak_lambda=$(setup.strategy.peak_lambda) " *
+              "peak_gamma=$(setup.strategy.peak_gamma) peak_w_max=$(setup.strategy.peak_w_max)"
         lrs, losses, gnorms = lr_range_test(setup; num_steps = num_steps,
                                             lr_min = lr_min, lr_max = lr_max)
         print_curve(lrs, losses, gnorms)
