@@ -5,9 +5,17 @@ note that holds the full reasoning. Newest at the top.
 
 ---
 
-# PROPOSED 08-09-2026
+# IMPLEMENTED 08-09-2026 (shipped 2026-09-11)
 
 ## System water-volume and longitudinal upstream validation diagnostics
+
+**Status: IMPLEMENTED.** Both diagnostics landed on 2026-09-11 (see
+[CHANGELOG.md](CHANGELOG.md)): `volume_budget_diagnostics` +
+`plot_volume_budget` + `volume_pbias`/`volume_drift` metrics for the storage
+diagnostic, and the `plot_downstream_timeseries` percentile-ladder + inset
+generalisation with `[eval].upstream_points` (default 5) for the longitudinal
+plots. The single-outlet `argmax(upstream_area)` convention was taken; the
+multi-sink variant remains a documented future extension.
 
 - **Add a system water-volume diagnostic on the validation set, computed for
   BOTH prediction and ground truth.** Total storage
