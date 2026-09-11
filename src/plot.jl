@@ -5,6 +5,40 @@ import CairoMakie: record
 # Returns `nothing` when `path` is `nothing`.
 _csv_from_path(path) = isnothing(path) ? nothing : string(splitext(path)[1], ".csv")
 
+_path_with_suffix(path::AbstractString, suffix::AbstractString) =
+    string(splitext(path)[1], suffix, splitext(path)[2])
+
+# Select K active nodes spanning the upstream-area distribution from
+# downstream (largest catchment) to upstream (smallest catchment).
+function _upstream_percentile_nodes(upstream_area::AbstractVector{<:Real}, k::Int)
+    k > 0 || throw(ArgumentError("k must be positive"))
+    idx_active = [i for i in eachindex(upstream_area) if isfinite(upstream_area[i])]
+    isempty(idx_active) && throw(ArgumentError("upstream_area has no finite entries"))
+
+    vals = Float32.(upstream_area[idx_active])
+    k_eff = min(k, length(idx_active))
+    qs = reverse(collect(range(0f0, 1f0; length = k_eff)))
+    chosen = Int[]
+    for q in qs
+        target = quantile(vals, q)
+        best = idx_active[argmin(abs.(vals .- target))]
+        if !(best in chosen)
+            push!(chosen, best)
+        end
+    end
+
+    if length(chosen) < k_eff
+        by_area = sort(idx_active; by = i -> upstream_area[i], rev = true)
+        for i in by_area
+            (i in chosen) || push!(chosen, i)
+            length(chosen) == k_eff && break
+        end
+    end
+
+    sort!(chosen; by = i -> upstream_area[i], rev = true)
+    return chosen
+end
+
 # Write named columns to a CSV file (no external dependency; mirrors the manual
 # CSV writers in `hparsearch.jl` / `lr_range_test.jl`). `header` is a Vector of
 # column names; `columns` is a Vector of equal-length column vectors.
@@ -439,6 +473,9 @@ Arguments:
 - `domain`     : routing domain string (key of `DOMAIN_VARS`).
 - `row`, `col` : 1-based raster position of the cell to inspect.
 - `path`       : optional output file path; format inferred from extension.
+- `inset`      : optional named tuple `(rows, cols, nrows, ncols)` describing
+                 active-node grid coordinates; when provided, each panel gets a
+                 small catchment inset with the selected node highlighted.
 - `csv`        : when `true` (default) and a `path` (or `csv_path`) is available,
                  the plotted timeseries (truth, prediction and absolute error per
                  state variable) are written to a CSV file alongside the figure.
@@ -455,6 +492,7 @@ function plot_timeseries(
         col        :: Int;
         path       = nothing,
         timestamps = nothing,
+    inset      = nothing,
         csv        = true,
         csv_path   = nothing)
 
@@ -495,6 +533,26 @@ function plot_timeseries(
         lines!(ax_ts, ts, pred;  label = "prediction", color = :orangered,
                linestyle = :dash)
         axislegend(ax_ts; position = :rt)
+
+        if inset !== nothing
+            active_rows = inset.rows
+            active_cols = inset.cols
+            inset_ax = Axis(fig[vi, 1];
+                            width = Relative(0.24),
+                            height = Relative(0.35),
+                            halign = 0.98,
+                            valign = 0.98,
+                            alignmode = Inside(),
+                            title = "node map")
+            scatter!(inset_ax, active_cols, active_rows;
+                     color = (:gray40, 0.25), markersize = 3)
+            scatter!(inset_ax, [col], [row];
+                     color = :orangered, markersize = 10)
+            xlims!(inset_ax, 0.5, inset.ncols + 0.5)
+            ylims!(inset_ax, inset.nrows + 0.5, 0.5)
+            hidedecorations!(inset_ax)
+            hidespines!(inset_ax)
+        end
 
         # --- pred vs truth scatter panel ---
         mask        = isfinite.(truth) .& isfinite.(pred)
@@ -558,11 +616,15 @@ end
 """
     plot_downstream_timeseries(pred_grids, true_grids, domain, grid, upstream_area; path) -> Figure
 
-Identify the most downstream active node of the river network using the
-provided per-node upstream area values and call `plot_timeseries` for it.
+Plot longitudinal node timeseries chosen from upstream-area percentiles.
 
-The most downstream node is the one with the largest upstream catchment area
-among all active (non-NaN) nodes.
+With `upstream_points = 1`, this reproduces the legacy behaviour: select the
+most downstream active node (largest upstream catchment area) and call
+`plot_timeseries` once.
+
+With `upstream_points > 1`, selects a percentile ladder over active nodes
+(downstream to upstream), writes one figure per selected node and reuses
+`plot_timeseries` CSV export per node.
 
 Arguments:
 - `pred_grids`    : `Dict{String, Array{Float32,3}}` as returned by `ungrid`.
@@ -579,7 +641,7 @@ Arguments:
                     (forwarded to `plot_timeseries`).
 - `csv_path`      : optional explicit CSV output path.
 
-Returns the `Figure` object.
+Returns the last generated `Figure` object.
 """
 function plot_downstream_timeseries(
         pred_grids    :: Dict{String, Array{Float32,3}},
@@ -588,19 +650,43 @@ function plot_downstream_timeseries(
         grid          :: NamedTuple,
         upstream_area :: AbstractVector{<:Real};
         path          = nothing,
+        upstream_points::Int = 1,
         timestamps    = nothing,
         csv           = true,
         csv_path      = nothing)
+    upstream_points > 0 || throw(ArgumentError("upstream_points must be positive"))
+    node_idxs = _upstream_percentile_nodes(upstream_area, upstream_points)
 
-    # Most downstream node = largest upstream catchment area (ignore NaN)
-    outlet_idx = argmax(i -> isnan(upstream_area[i]) ? -Inf : upstream_area[i],
-                        1:length(upstream_area))
+    inset_spec = (rows = grid.rows, cols = grid.cols, nrows = grid.nrows, ncols = grid.ncols)
+    fig = nothing
+    for (rank, node_idx) in enumerate(node_idxs)
+        row = grid.rows[node_idx]
+        col = grid.cols[node_idx]
 
-    row = grid.rows[outlet_idx]
-    col = grid.cols[outlet_idx]
+        node_path = if isnothing(path)
+            nothing
+        elseif length(node_idxs) == 1
+            path
+        else
+            _path_with_suffix(String(path), "_node$(node_idx)_r$(rank)")
+        end
+        node_csv_path = if isnothing(csv_path)
+            nothing
+        elseif length(node_idxs) == 1
+            csv_path
+        else
+            _path_with_suffix(String(csv_path), "_node$(node_idx)_r$(rank)")
+        end
 
-    return plot_timeseries(pred_grids, true_grids, domain, row, col;
-                           path, timestamps, csv, csv_path)
+        fig = plot_timeseries(pred_grids, true_grids, domain, row, col;
+                              path = node_path,
+                              timestamps = timestamps,
+                              inset = inset_spec,
+                              csv = csv,
+                              csv_path = node_csv_path)
+    end
+
+    return fig
 end
 
 """

@@ -64,16 +64,16 @@ for E3's rollout **collapse-to-zero** (see EXPERIMENTS.md).
   dropped, so the constructor defaults (`loss_type = :mse`, `peak_delta = 1`,
   `peak_lambda = 0`) take over and `loss_function` computes **MSE** regardless of
   the config.
-- [ ] **Fix.** Forward the full loss config from `ts.strategy` into the
+- [x] **Fix.** Forward the full loss config from `ts.strategy` into the
       `TrainingStrategy` that `make_model_loader` constructs (`loss_type`,
       `peak_delta`, `peak_lambda`, `peak_gamma`, `peak_w_max`). One-line change;
       no trained model needed (still a horizon-1, teacher-forced test).
       - Note: keep `peak_lambda` at the base (0) is fine for a λ-swept box search
         (one tune for the whole grid), **but `loss_type = :huber` and
         `peak_delta` must be forwarded** so the gradient scale matches the run.
-- [ ] **Guard.** Log the effective `loss_type`/`peak_delta` used by the range
+- [x] **Guard.** Log the effective `loss_type`/`peak_delta` used by the range
       test so a mismatch with the config is visible in the autotune output.
-- [ ] **Regression test.** Assert the strategy built by `make_model_loader`
+- [x] **Regression test.** Assert the strategy built by `make_model_loader`
       inherits `loss_type` from `ts.strategy` (extend `test/test_lr_autotune.jl`).
 - **NOT in scope (documented limitation, do not "fix").** The range test is
   teacher-forced / horizon-1 and therefore **blind to multi-step rollout
@@ -275,32 +275,33 @@ River discharge cannot be negative.
   headwaters vs the outlet). Extends the outlet-only
   `plot_downstream_timeseries`.
 - **Current code.** `plot_downstream_timeseries(pred_grids, true_grids, domain,
-  grid, upstream_area; ...)` in [src/plot.jl](../src/plot.jl) selects a single
-  node via `argmax(upstream_area)` and forwards to `plot_timeseries`. `grid`
-  carries `rows`/`cols`/`nrows`/`ncols` for the inset.
-- [ ] **Percentile ladder over `upstream_area`.** Select `K` active nodes
+  grid, upstream_area; upstream_points=K, ...)` in [src/plot.jl](../src/plot.jl)
+  now selects `K` percentile-spanning active nodes (downstream→upstream) and
+  renders per-node timeseries outputs with inset maps.
+- [x] **Percentile ladder over `upstream_area`.** Select `K` active nodes
       spanning the drainage-area distribution from outlet (max) to headwater
       (min active): e.g. the nodes nearest the `K` evenly-spaced percentiles of
       `upstream_area` over active (non-NaN) nodes. Order panels
       downstream → upstream.
-- [ ] **`K` configurable via TOML, default 5.** Thread a config key (e.g.
+- [x] **`K` configurable via TOML, default 5.** Thread a config key (e.g.
       `[eval].upstream_points = 5`) through to the plotting call; fall back to 5
       when absent.
-- [ ] **Per-panel catchment inset.** Add a small inset to each timeseries panel
+- [x] **Per-panel catchment inset.** Add a small inset to each timeseries panel
       showing all active nodes in grid space (`grid.rows`/`grid.cols`) as faint
       points with the selected node highlighted, so the reader sees where in the
       catchment the series sits. Reuse `plot_timeseries` per node; extend it (or
       wrap it) to accept an optional inset spec rather than duplicating the
       panel-drawing code.
-- [ ] **CSV.** Keep the existing per-node CSV export from `plot_timeseries`; name
+- [x] **CSV.** Keep the existing per-node CSV export from `plot_timeseries`; name
       outputs by node so the K series are distinguishable.
 - **Validation.** On a full-curriculum `increment` run, confirm the `river_h`
   noise/negative-NSE concentrates in the low-`upstream_area` (headwater) panels
   relative to the outlet — reproducing the regime-dependence inferred in the
   post-mortem.
-- Touch: `src/plot.jl` (`plot_downstream_timeseries` → multi-node ladder +
-  inset, possibly a new `plot_upstream_ladder`), `src/run.jl` (config key +
-  call site).
+- Touch: `src/plot.jl` (`plot_downstream_timeseries` multi-node percentile
+      ladder + per-panel inset; `plot_timeseries` inset support), `src/run.jl`
+      (`[eval].upstream_points` parse + call site), `src/training.jl`
+      (`TrainSettings.upstream_points` persistence/validation).
 
 ## 3. Pushforward / detached-rollout trick (toggle)
 

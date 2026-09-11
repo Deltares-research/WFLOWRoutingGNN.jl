@@ -37,6 +37,9 @@ using WflowRoutingGNN
                     "peak_w_max" => 3.0,
                 ),
             ),
+            "eval" => Dict{String, Any}(
+                "upstream_points" => 6,
+            ),
             "hparsearch" => Dict{String, Any}(
                 "search_type" => "box",
                 "search_space" => Dict{String, Any}(
@@ -65,6 +68,8 @@ using WflowRoutingGNN
         @test ts_a.strategy.peak_delta ≈ 0.7f0
         @test ts_a.strategy.peak_gamma ≈ 1.5f0
         @test ts_a.strategy.peak_w_max ≈ 3.0f0
+        @test ts_a.upstream_points == 6
+        @test ts_b.upstream_points == 6
         @test ds_a.runs_dir == ds_b.runs_dir
         @test ds_a.wflow_model_path == ds_b.wflow_model_path
         @test ms_a.hidden_dim == ms_b.hidden_dim

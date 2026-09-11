@@ -37,6 +37,9 @@ device     = "cpu"
 steps       = [1, 2, 4]
 durations   = [10, 20, 20]
 noise_scale = 0.0
+
+[eval]
+upstream_points = 5
 ```
 
 Relative paths in `[data]` are resolved relative to the directory containing
@@ -98,6 +101,7 @@ function settings_from_config(d::AbstractDict, toml_dir::AbstractString)
     )
 
     td = d["train"]
+    ed = get(d, "eval", Dict{String,Any}())
     sd = get(td, "strategy", Dict{String,Any}())
     strategy = TrainingStrategy(
         get(sd, "steps",       [1]),
@@ -122,6 +126,7 @@ function settings_from_config(d::AbstractDict, toml_dir::AbstractString)
         phase_backoff_factor = get(td, "phase_backoff_factor", 0.5),
         eval_horizon     = get(td, "eval_horizon", 30),
         eval_anchors     = get(td, "eval_anchors", 32),
+        upstream_points  = get(ed, "upstream_points", get(td, "upstream_points", 5)),
         early_stopping   = get(td, "early_stopping", false),
         early_stopping_patience = get(td, "early_stopping_patience", 20),
         checkpoint_every = get(td, "checkpoint_every", 0),
@@ -312,6 +317,7 @@ function evaluate_and_write(model, dataset, norm_stats, grid, postscale,
             plot_downstream_timeseries(p_grids, t_grids, ms.domain, grid,
                                        postscale["river_q"];  # upstream area per node
                                        path       = joinpath(plots_dir, "downstream_timeseries.png"),
+                                       upstream_points = ts.upstream_points,
                                        timestamps = split_times,
                                        csv_path   = joinpath(metrics_dir, "downstream_timeseries.csv"))
 
@@ -411,6 +417,7 @@ function evaluate_and_write(model, dataset, norm_stats, grid, postscale,
                     plot_downstream_timeseries(dr_p_grids, dr_t_grids, ms.domain, grid,
                                                postscale["river_q"];
                                                path       = joinpath(plots_dir, "downstream_timeseries_daterange.png"),
+                                               upstream_points = ts.upstream_points,
                                                timestamps = dr_pred_times,
                                                csv_path   = joinpath(metrics_dir, "downstream_timeseries_daterange.csv"))
                 end

@@ -137,6 +137,7 @@ end
     s = TrainSettings(; VALID_TS_KWARGS...)
     @test s.eval_horizon            == 30
     @test s.eval_anchors            == 32
+    @test s.upstream_points         == 5
     @test s.early_stopping          == false
     @test s.early_stopping_patience == 20
     @test s.checkpoint_every        == 0
@@ -146,12 +147,14 @@ end
         @test_throws ArgumentError TrainSettings(; VALID_TS_KWARGS..., eval_horizon = -1)
         @test_throws ArgumentError TrainSettings(; VALID_TS_KWARGS..., early_stopping_patience = 0)
         @test_throws ArgumentError TrainSettings(; VALID_TS_KWARGS..., checkpoint_every = -1)
+        @test_throws ArgumentError TrainSettings(; VALID_TS_KWARGS..., upstream_points = 0)
         @test_throws ArgumentError TrainSettings(; VALID_TS_KWARGS..., early_stopping = true, eval_horizon = 0)
         @test TrainSettings(; VALID_TS_KWARGS..., eval_horizon = 0) isa TrainSettings
     end
 
     @testset "TOML round-trip" begin
         sc = TrainSettings(; VALID_TS_KWARGS..., eval_horizon = 12, eval_anchors = 5,
+                             upstream_points = 7,
                              early_stopping = true, early_stopping_patience = 7,
                              checkpoint_every = 3, checkpoint_full_eval = true)
         path = tempname() * ".toml"
@@ -160,12 +163,26 @@ end
         rm(path)
         @test sc2.eval_horizon            == 12
         @test sc2.eval_anchors            == 5
+        @test sc2.upstream_points         == 7
         @test sc2.early_stopping          == true
         @test sc2.early_stopping_patience == 7
         @test sc2.checkpoint_every        == 3
         @test sc2.checkpoint_full_eval    == true
     end
 
+end
+
+# ---------------------------------------------------------------------------
+# Upstream percentile node selection
+# ---------------------------------------------------------------------------
+
+@testset "upstream percentile ladder selection" begin
+    areas = Float32[100, 80, 60, 40, 20]
+    idxs = WflowRoutingGNN._upstream_percentile_nodes(areas, 3)
+    @test idxs == [1, 3, 5]
+
+    idxs_nan = WflowRoutingGNN._upstream_percentile_nodes(Float32[NaN, 90, 30, NaN, 10], 4)
+    @test idxs_nan == [2, 3, 5]
 end
 
 # ---------------------------------------------------------------------------

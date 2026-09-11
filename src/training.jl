@@ -63,6 +63,9 @@ Fields:
 - `eval_anchors`   : number of evenly-spaced start points in the validation split
                      used as anchors for the fixed-horizon rollout (batched into a
                      single ensemble forward pass per step).
+- `upstream_points`: number of percentile-ladder nodes to plot for validation
+                     upstream/downstream timeseries diagnostics. `1` reproduces
+                     the previous outlet-only behaviour.
 - `early_stopping` : when `true`, stop training once the fixed-horizon validation
                      discharge RMSE has not improved for `early_stopping_patience`
                      epochs, and restore the best-metric weights. Requires
@@ -92,6 +95,7 @@ struct TrainSettings
     val_daterange    :: Union{Nothing, Tuple{Dates.DateTime, Dates.DateTime}}
     eval_horizon     :: Int
     eval_anchors     :: Int
+    upstream_points  :: Int
     early_stopping   :: Bool
     early_stopping_patience :: Int
     checkpoint_every :: Int
@@ -120,6 +124,7 @@ function TrainSettings(;
         val_daterange    :: Union{Nothing, Tuple{Dates.DateTime, Dates.DateTime}} = nothing,
         eval_horizon     :: Int = 30,
         eval_anchors     :: Int = 32,
+        upstream_points  :: Int = 5,
         early_stopping   :: Bool = false,
         early_stopping_patience :: Int = 20,
         checkpoint_every :: Int = 0,
@@ -142,6 +147,7 @@ function TrainSettings(;
     eval_horizon >= 0 || throw(ArgumentError("eval_horizon must be non-negative (0 disables the fixed-horizon eval)"))
     eval_horizon == 0 || eval_anchors > 0 ||
         throw(ArgumentError("eval_anchors must be positive when eval_horizon > 0"))
+    upstream_points > 0 || throw(ArgumentError("upstream_points must be positive"))
     early_stopping_patience > 0 ||
         throw(ArgumentError("early_stopping_patience must be positive"))
     checkpoint_every >= 0 || throw(ArgumentError("checkpoint_every must be non-negative (0 disables checkpointing)"))
@@ -165,7 +171,8 @@ function TrainSettings(;
                   Float32(lr_start), Float32(lr_final),
                   lr_steps, lr_warmup_epochs, Float32(lr_peak_decay), Float32(grad_clip),
                   h_loss_scale, Float32(phase_backoff_factor), strategy, device, val_daterange,
-                  eval_horizon, eval_anchors, early_stopping, early_stopping_patience,
+                  eval_horizon, eval_anchors, upstream_points,
+                  early_stopping, early_stopping_patience,
                   checkpoint_every, checkpoint_full_eval)
 end
 
@@ -186,6 +193,7 @@ function Base.show(io::IO, s::TrainSettings)
                                      string(s.val_daterange[1], " – ", s.val_daterange[2]))
     println(io, "  eval_horizon     : ", s.eval_horizon)
     println(io, "  eval_anchors     : ", s.eval_anchors)
+    println(io, "  upstream_points  : ", s.upstream_points)
     println(io, "  early_stopping   : ", s.early_stopping)
     println(io, "  early_stopping_patience : ", s.early_stopping_patience)
     println(io, "  checkpoint_every : ", s.checkpoint_every)
@@ -214,6 +222,7 @@ function save_train_settings(path::String, s::TrainSettings)
         "device"     => String(s.device),
         "eval_horizon"     => s.eval_horizon,
         "eval_anchors"     => s.eval_anchors,
+        "upstream_points"  => s.upstream_points,
         "early_stopping"   => s.early_stopping,
         "early_stopping_patience" => s.early_stopping_patience,
         "checkpoint_every" => s.checkpoint_every,
@@ -268,6 +277,7 @@ function load_train_settings(path::String)
         phase_backoff_factor = Float32(get(d, "phase_backoff_factor", 0.5)),
         eval_horizon     = get(d, "eval_horizon", 30),
         eval_anchors     = get(d, "eval_anchors", 32),
+        upstream_points  = get(d, "upstream_points", 5),
         early_stopping   = get(d, "early_stopping", false),
         early_stopping_patience = get(d, "early_stopping_patience", 20),
         checkpoint_every = get(d, "checkpoint_every", 0),
