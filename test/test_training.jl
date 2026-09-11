@@ -238,6 +238,40 @@ end
 end
 
 # ---------------------------------------------------------------------------
+# System volume / budget diagnostic
+# ---------------------------------------------------------------------------
+
+@testset "volume_budget_diagnostics" begin
+    diags = (
+        pred_h = Float32[1 2 3; 2 3 4],
+        true_h = Float32[1 2 2; 1 2 3],
+        pred_q = Float32[5 6 7; 8 9 10],
+        true_q = Float32[4 5 6; 7 8 9],
+        inwater = Float32[1 1 1; 2 2 2],
+        net_flux = Float32[0 2 2; 0 3 3],
+    )
+
+    vb = volume_budget_diagnostics(diags;
+                                   postscale_q = Float32[10, 20],
+                                   postscale_h = Float32[2, 4],
+                                   dt = 2f0,
+                                   upstream_area = Float32[10, 50])
+
+    @test vb.outlet_idx == 2
+    @test vb.v_pred ≈ Float32[15, 25, 35]
+    @test vb.v_true ≈ Float32[10, 20, 25]
+    @test vb.delta_v_pred ≈ Float32[0, 10, 20]
+    @test vb.delta_v_true ≈ Float32[0, 10, 15]
+    @test vb.cum_inflow_pred ≈ Float32[6, 12, 18]
+    @test vb.cum_outflow_pred ≈ Float32[16, 34, 54]
+    @test vb.cum_outflow_true ≈ Float32[14, 30, 48]
+    @test vb.budget_residual_pred ≈ Float32[0, 0, 0]
+    @test isapprox(vb.volume_pbias, 36.363636f0; atol = 1f-4)
+    @test isapprox(vb.volume_drift, 2.5f0; atol = 1f-5)
+    @test vb.budget_residual_rms ≈ 0f0
+end
+
+# ---------------------------------------------------------------------------
 # Tier-1 peak-loss diagnostics
 # ---------------------------------------------------------------------------
 

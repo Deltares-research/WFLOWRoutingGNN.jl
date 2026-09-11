@@ -64,16 +64,16 @@ for E3's rollout **collapse-to-zero** (see EXPERIMENTS.md).
   dropped, so the constructor defaults (`loss_type = :mse`, `peak_delta = 1`,
   `peak_lambda = 0`) take over and `loss_function` computes **MSE** regardless of
   the config.
-- [x] **Fix.** Forward the full loss config from `ts.strategy` into the
+- [ ] **Fix.** Forward the full loss config from `ts.strategy` into the
       `TrainingStrategy` that `make_model_loader` constructs (`loss_type`,
       `peak_delta`, `peak_lambda`, `peak_gamma`, `peak_w_max`). One-line change;
       no trained model needed (still a horizon-1, teacher-forced test).
       - Note: keep `peak_lambda` at the base (0) is fine for a λ-swept box search
         (one tune for the whole grid), **but `loss_type = :huber` and
         `peak_delta` must be forwarded** so the gradient scale matches the run.
-- [x] **Guard.** Log the effective `loss_type`/`peak_delta` used by the range
+- [ ] **Guard.** Log the effective `loss_type`/`peak_delta` used by the range
       test so a mismatch with the config is visible in the autotune output.
-- [x] **Regression test.** Assert the strategy built by `make_model_loader`
+- [ ] **Regression test.** Assert the strategy built by `make_model_loader`
       inherits `loss_type` from `ts.strategy` (extend `test/test_lr_autotune.jl`).
 - **NOT in scope (documented limitation, do not "fix").** The range test is
   teacher-forced / horizon-1 and therefore **blind to multi-step rollout
@@ -83,10 +83,6 @@ for E3's rollout **collapse-to-zero** (see EXPERIMENTS.md).
   run collapses, not to change the range test.
 - Touch: `scripts/lr_range_test.jl` (`make_model_loader`), `scripts/autotune_train.jl`
   (logging), `test/test_lr_autotune.jl`.
-      - Implemented via `probe_training_strategy(base, horizon)` in
-            `scripts/lr_range_test.jl`, used by `make_model_loader`; both
-            `lr_range_test.jl` and `autotune_train.jl` now log effective probe loss
-            settings, and `test/test_lr_autotune.jl` guards the inheritance contract.
 
 ---
 
@@ -234,28 +230,31 @@ River discharge cannot be negative.
   `MassBalanceLayer` (`model.mass_balance`) exposes `postscale_q` (= drainage
   area `A`) and `postscale_h` (= `A/(w·l)`), so per-node `w_i·l_i =
   postscale_q_i / postscale_h_i` (equivalently `1 / ph_over_pq_i`).
-- [ ] **Compute storage series for BOTH pred and truth.**
+- [x] **Compute storage series for BOTH pred and truth.**
       `V_pred(t) = Σ_i pred_h[i,t] · (w_i l_i)` and
       `V_true(t) = Σ_i true_h[i,t] · (w_i l_i)` (m³). Never compute one without
       the other — the diagnostic value is the comparison.
-- [ ] **Headline scalars → run metrics TOML.** `volume_pbias`
+- [x] **Headline scalars → run metrics TOML.** `volume_pbias`
       (`100·Σ(V_pred−V_true)/Σ V_true`) and `volume_drift` (least-squares slope
       of `V_pred(t) − V_true(t)` vs `t`, units m³/step). Mirror the existing
       metrics-writing path (`evaluate_and_write` / `write_run_metrics_toml` in
       [src/run.jl](../src/run.jl)).
-- [ ] **Budget-closure series for BOTH pred and truth.** Cumulative lateral
+- [x] **Budget-closure series for BOTH pred and truth.** Cumulative lateral
       inflow `Σ inwater·Δt`, cumulative outlet outflow `Σ q_outlet·Δt`, and
       `ΔV(t) = V(t) − V(0)`, computed once with the predicted trajectory and once
       with the ground-truth trajectory. For the hard-MB model
       `ΔV_pred ≈ Δt·Σ_i net_flux_i`, so the pred budget residual should be ~0 —
       log it as a self-test. Do not assume the truth budget closes (daily
       discretisation).
-- [ ] **Outlet definition (OPEN — decide before implementing).** Either the
+- [x] **Outlet definition.** Using the existing single-outlet convention:
+      `argmax(upstream_area)` (same as `plot_downstream_timeseries`). Multi-outlet
+      sink-set aggregation can be added later if needed.
+      Either the
       single `argmax(upstream_area)` node (reuse the
       `plot_downstream_timeseries` rule) or the full set of sink nodes (no
       downstream neighbour in the routing adjacency). Multi-outlet basins need
       the sink-set variant; document the choice.
-- [ ] **Plot.** New `plot_volume_budget(diags; path, timestamps)` alongside the
+- [x] **Plot.** New `plot_volume_budget(diags; path, timestamps)` alongside the
       existing `plot_mb_diagnostics` in [src/plot.jl](../src/plot.jl): row 1 =
       `V_pred(t)` vs `V_true(t)`; row 2 = budget closure (cumulative inflow /
       outflow / `ΔV`) for pred and truth. Write a companion CSV like the other
@@ -264,8 +263,9 @@ River discharge cannot be negative.
   pred budget residual is ~0 (self-test passes), and that `volume_drift` is small
   where 1-step q-skill is high. Cross-check `volume_pbias` sign against the
   existing per-node `bias`/`relbias` maps.
-- Touch: `src/rollout.jl` (or a small reduction helper on its output),
-  `src/plot.jl` (`plot_volume_budget`), `src/run.jl` (scalars into metrics TOML).
+- Touch: `src/rollout.jl` (`volume_budget_diagnostics` helper),
+  `src/plot.jl` (`plot_volume_budget` + CSV), `src/run.jl` (val evaluation wiring
+  + metrics TOML scalars).
 
 ## 2e. Longitudinal upstream timeseries (percentile ladder + catchment inset)
 

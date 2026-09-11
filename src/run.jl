@@ -259,10 +259,11 @@ Shared by [`run_wflow_gnn`](@ref) for the final model and, when
 `ts.checkpoint_full_eval` is set, for each periodic checkpoint.
 
 Returns a `NamedTuple` `(; val_rollout_duration, val_n_timesteps,
-spatial_summary, ramp, river_q_perf)`; the last three feed the per-run
+spatial_summary, ramp, river_q_perf, volume_budget)`; the last four feed the per-run
 `metrics.toml` summary (`spatial_summary` from [`spatial_metric_summary`](@ref),
 `ramp` from [`overprediction_vs_ramp`](@ref), `river_q_perf` from
-[`river_q_performance_metrics`](@ref)) and are `nothing` when not applicable.
+[`river_q_performance_metrics`](@ref), `volume_budget` from
+[`volume_budget_diagnostics`](@ref)) and are `nothing` when not applicable.
 """
 function evaluate_and_write(model, dataset, norm_stats, grid, postscale,
                             static_arr, ms::ModelSettings, ts::TrainSettings,
@@ -276,6 +277,7 @@ function evaluate_and_write(model, dataset, norm_stats, grid, postscale,
     spatial_summary      = nothing
     ramp_summary         = nothing
     river_q_perf         = nothing
+    volume_budget_summary = nothing
 
     for (split_name, split_data, t_offset) in (
             ("train", dataset.train, 0),
@@ -348,6 +350,20 @@ function evaluate_and_write(model, dataset, norm_stats, grid, postscale,
                                     path       = joinpath(plots_dir, "mb_diagnostics.png"),
                                     timestamps = split_times,
                                     csv_path   = joinpath(metrics_dir, "mb_diagnostics.csv"))
+
+                volume_budget_summary = volume_budget_diagnostics(
+                    mb_diags;
+                    postscale_q = cpu_model.mass_balance.postscale_q,
+                    postscale_h = cpu_model.mass_balance.postscale_h,
+                    dt = cpu_model.mass_balance.dt,
+                    upstream_area = postscale["river_q"])
+                plot_volume_budget(volume_budget_summary;
+                                   path       = joinpath(plots_dir, "volume_budget.png"),
+                                   timestamps = split_times,
+                                   csv_path   = joinpath(metrics_dir, "volume_budget.csv"))
+                    @info "Volume budget: outlet=$(volume_budget_summary.outlet_idx) " *
+                        "pbias=$(round(volume_budget_summary.volume_pbias; digits=3))% " *
+                        "drift=$(round(volume_budget_summary.volume_drift; digits=3)) m^3/step"
             end
 
             # Optional date-range rollout on the validation split
@@ -403,25 +419,27 @@ function evaluate_and_write(model, dataset, norm_stats, grid, postscale,
     end
 
     return (; val_rollout_duration, val_n_timesteps, spatial_summary, ramp = ramp_summary,
-            river_q_perf)
+            river_q_perf, volume_budget = volume_budget_summary)
 end
 
 """
     write_run_metrics_toml(path, losses, ts, run_meta, spatial_summary, ramp,
-                           river_q_perf) -> path
+                           river_q_perf, volume_budget) -> path
 
 Write a compact scalar summary of a completed run to `path` as TOML: the final
 (and best) values of the per-epoch training history, run metadata (`run_meta`),
 the median of each aggregated spatial-error metric per state variable, the
 overprediction-vs-ramp correlations, the Tier-2 river-discharge performance
 metrics (`river_q_perf` from [`river_q_performance_metrics`](@ref)) and, when
-`losses.loss_type == :huber`, the Tier-1 peak-loss diagnostics from
+available, the system volume-budget diagnostics (`volume_budget` from
+[`volume_budget_diagnostics`](@ref)); and, when `losses.loss_type == :huber`, the Tier-1 peak-loss diagnostics from
 [`peak_epoch_diagnostics`](@ref). Non-finite values are omitted so the file
 stays a valid, parser-friendly TOML of plain numbers — a token-cheap single-file
 entry point for downstream evaluation agents.
 """
 function write_run_metrics_toml(path::AbstractString, losses, ts::TrainSettings,
-                                run_meta, spatial_summary, ramp, river_q_perf = nothing)
+                                run_meta, spatial_summary, ramp,
+                                river_q_perf = nothing, volume_budget = nothing)
     function putf!(d, k, v)
         v === nothing && return
         if v isa Integer
@@ -523,6 +541,15 @@ function write_run_metrics_toml(path::AbstractString, losses, ts::TrainSettings,
         _gauge_metrics!(gauge_t, river_q_perf.gauge)
         rq_t["gauge"] = gauge_t
         root["river_q_performance"] = rq_t
+    end
+
+    if volume_budget !== nothing
+        vb_t = Dict{String, Any}()
+        putf!(vb_t, "outlet_idx", volume_budget.outlet_idx)
+        putf!(vb_t, "volume_pbias", volume_budget.volume_pbias)
+        putf!(vb_t, "volume_drift", volume_budget.volume_drift)
+        putf!(vb_t, "budget_residual_rms", volume_budget.budget_residual_rms)
+        root["volume_budget"] = vb_t
     end
 
     if any(isfinite, get(losses, :peak_c_peak, Float32[]))
@@ -833,7 +860,8 @@ function run_wflow_gnn(ds::DataSettings, ms::ModelSettings, ts::TrainSettings)
                               train_duration_s       = train_duration,
                               val_rollout_duration_s = val_rollout_duration,
                               val_n_timesteps        = val_n_timesteps),
-                           eval_out.spatial_summary, eval_out.ramp, eval_out.river_q_perf)
+                                    eval_out.spatial_summary, eval_out.ramp,
+                                    eval_out.river_q_perf, eval_out.volume_budget)
 
     metrics = (
         final_train_loss           = last(train_rollout),

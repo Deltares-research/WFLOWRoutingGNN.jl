@@ -586,3 +586,109 @@ function rollout_mb_diagnostics(model::WflowGNN, split, static::AbstractMatrix{F
             h_raw       = h_raw,
             mb_verify_h = mb_verify_h)
 end
+
+"""
+    volume_budget_diagnostics(diags; postscale_q, postscale_h, dt,
+                              upstream_area = postscale_q) -> NamedTuple
+
+Compute system-integrated storage and budget series from
+[`rollout_mb_diagnostics`](@ref) output.
+
+Storage is integrated over river nodes using per-node wetted area proxy
+`w*l = postscale_q ./ postscale_h`:
+- `V_pred(t) = sum(pred_h[:,t] .* (w*l))`
+- `V_true(t) = sum(true_h[:,t] .* (w*l))`
+
+Returns both series and headline scalars:
+- `volume_pbias` : `100 * sum(V_pred - V_true) / sum(V_true)`
+- `volume_drift` : least-squares slope of `(V_pred - V_true)` vs timestep
+                   (m^3/step)
+
+Budget series are reported for **both** pred and truth:
+- cumulative lateral inflow `cum_inflow_*`
+- cumulative outlet outflow `cum_outflow_*`
+- storage change `delta_v_*`
+
+The outlet is defined as `argmax(upstream_area)` over finite entries, matching
+the existing downstream-timeseries convention.
+"""
+function volume_budget_diagnostics(diags;
+                                   postscale_q::AbstractVector,
+                                   postscale_h::AbstractVector,
+                                   dt::Real,
+                                   upstream_area::AbstractVector = postscale_q)
+    n_nodes, t_steps = size(diags.pred_h)
+    size(diags.true_h)   == (n_nodes, t_steps) || throw(ArgumentError("true_h shape must match pred_h"))
+    size(diags.pred_q)   == (n_nodes, t_steps) || throw(ArgumentError("pred_q shape must match pred_h"))
+    size(diags.true_q)   == (n_nodes, t_steps) || throw(ArgumentError("true_q shape must match pred_h"))
+    size(diags.inwater)  == (n_nodes, t_steps) || throw(ArgumentError("inwater shape must match pred_h"))
+    size(diags.net_flux) == (n_nodes, t_steps) || throw(ArgumentError("net_flux shape must match pred_h"))
+    length(postscale_q) == n_nodes || throw(ArgumentError("postscale_q length must equal node count"))
+    length(postscale_h) == n_nodes || throw(ArgumentError("postscale_h length must equal node count"))
+    length(upstream_area) == n_nodes || throw(ArgumentError("upstream_area length must equal node count"))
+
+    wl = Float32.(postscale_q) ./ Float32.(postscale_h)
+    wl_col = reshape(wl, :, 1)
+
+    v_pred = vec(sum(diags.pred_h .* wl_col; dims = 1))
+    v_true = vec(sum(diags.true_h .* wl_col; dims = 1))
+
+    delta_v_pred = v_pred .- v_pred[1]
+    delta_v_true = v_true .- v_true[1]
+
+    dt32 = Float32(dt)
+    lateral_inflow = vec(sum(diags.inwater; dims = 1))
+    cum_inflow_pred = cumsum(lateral_inflow .* dt32)
+    cum_inflow_true = cumsum(lateral_inflow .* dt32)
+
+    outlet_idx = argmax(i -> isfinite(upstream_area[i]) ? upstream_area[i] : -Inf,
+                        eachindex(upstream_area))
+    q_out_pred = vec(diags.pred_q[outlet_idx, :])
+    q_out_true = vec(diags.true_q[outlet_idx, :])
+    cum_outflow_pred = cumsum(q_out_pred .* dt32)
+    cum_outflow_true = cumsum(q_out_true .* dt32)
+
+    cum_net_flux_pred = cumsum(vec(sum(diags.net_flux; dims = 1)) .* dt32)
+    budget_residual_pred = delta_v_pred .- cum_net_flux_pred
+
+    mask_v = isfinite.(v_pred) .& isfinite.(v_true)
+    if any(mask_v)
+        dv = v_pred[mask_v] .- v_true[mask_v]
+        vt = v_true[mask_v]
+        denom = sum(vt)
+        volume_pbias = abs(denom) > eps(Float32) ? Float32(100f0 * sum(dv) / denom) : NaN32
+
+        x = Float32.(findall(mask_v))
+        y = Float32.(dv)
+        if length(x) >= 2
+            xm = mean(x)
+            ym = mean(y)
+            denom_slope = sum((x .- xm) .^ 2)
+            volume_drift = denom_slope > eps(Float32) ?
+                Float32(sum((x .- xm) .* (y .- ym)) / denom_slope) : NaN32
+        else
+            volume_drift = NaN32
+        end
+    else
+        volume_pbias = NaN32
+        volume_drift = NaN32
+    end
+
+    budget_residual_rms = any(isfinite, budget_residual_pred) ?
+        Float32(sqrt(mean(abs2, filter(isfinite, budget_residual_pred)))) : NaN32
+
+    return (v_pred = Float32.(v_pred),
+            v_true = Float32.(v_true),
+            delta_v_pred = Float32.(delta_v_pred),
+            delta_v_true = Float32.(delta_v_true),
+            cum_inflow_pred = Float32.(cum_inflow_pred),
+            cum_inflow_true = Float32.(cum_inflow_true),
+            cum_outflow_pred = Float32.(cum_outflow_pred),
+            cum_outflow_true = Float32.(cum_outflow_true),
+            budget_residual_pred = Float32.(budget_residual_pred),
+            volume_pbias = volume_pbias,
+            volume_drift = volume_drift,
+            budget_residual_rms = budget_residual_rms,
+            outlet_idx = Int(outlet_idx),
+            dt = dt32)
+end

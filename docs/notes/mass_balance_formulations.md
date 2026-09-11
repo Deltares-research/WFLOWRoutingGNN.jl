@@ -113,6 +113,38 @@ separates the three options below, and it is used verbatim in each §_.3. Let
 
 $$D_q=\frac{\partial(\text{decoder out})}{\partial q},\quad D_h=\frac{\partial(\text{decoder out})}{\partial h},\quad \kappa=\frac{\Delta t}{wl},\quad \text{stiffness }\ \kappa(A^\top-I)\ \big(=-21.95\text{ in norm. units at }\theta=1\big).$$
 
+### 0.2 Open downstream boundary (common to all three)
+
+The river system is **open**: water leaves at the downstream-most cell(s). This
+is already encoded in $A$ — a **sink** is a cell with *no downstream neighbour*,
+so its outflow appears in no $(A^\top Q)_i$ and is precisely the
+$\sum_{\text{sinks}} Q_\text{out}$ export term in (C′). No special case is
+needed; the open outlet is the automatic consequence of the sink having no
+out-edge. All three formulations are compatible, with three points to note:
+
+- **Nilpotency ⇔ open DAG.** $(I-C_1A^\top)^{-1}$ (B) and $(I-A^\top)^{-1}$ (C)
+  are finite, precomputable Neumann series **because $A^\top$ is nilpotent**, and
+  $A^\top$ is nilpotent *precisely because the network is an open, acyclic DAG
+  terminating at sinks*. The open boundary is therefore not merely tolerated by
+  B and C — it is the **structural precondition** that makes their precomputed
+  inverse well-posed. In C the accumulation naturally *terminates* at the outlet:
+  the sink's readout is the whole-basin sum of $(I_\text{lat}-\mathrm{d}S/\mathrm{d}t)$,
+  i.e. total basin outflow.
+- **The outlet is disciplined only from upstream → needs loss supervision.**
+  Interior cells' $q$ is doubly constrained (upstream inflow *and* being someone's
+  upstream inflow); the sink's outflow is constrained only from upstream, so
+  topology cannot catch outlet error — the **loss** must, which is convenient
+  since the outlet is typically the gauged point. In C the sink concentrates the
+  undamped linear-spatial accumulation error (§6), so the outlet is where a
+  storage-rate bias shows up most; the **B/C hybrid mitigates this** ($C_3<1$
+  backbone damps storage error before read-out).
+- **Multi-sink caveat.** A clipped sub-basin has *several* boundary-exit cells
+  (any cell whose true downstream neighbour was clipped). All three treat every
+  no-out-edge cell as a sink identically, but the **outlet set is not a single
+  node** — the same decision already open for the volume-budget outflow term
+  (TODO §2d). B may also choose the sink reach's outlet condition (same $(K,x)$
+  vs a transmissive zero-gradient $\partial Q/\partial x=0$).
+
 ---
 
 ## 1. Option A — **Current implementation**: free $q$, $h$ slaved by θ-balance

@@ -737,6 +737,86 @@ function plot_mb_diagnostics(diags; path=nothing, timestamps=nothing,
     return fig
 end
 
+"""
+    plot_volume_budget(vdiag; path=nothing, timestamps=nothing,
+                       csv=true, csv_path=nothing) -> Figure
+
+Plot system water-volume tracking diagnostics from
+[`volume_budget_diagnostics`](@ref).
+
+Row 1: `V_pred(t)` vs `V_true(t)` [m^3].
+Row 2: cumulative inflow/outflow and storage-change (`delta_v`) series for both
+prediction and truth.
+
+When `csv` is `true`, writes a companion CSV with the plotted series.
+"""
+function plot_volume_budget(vdiag; path=nothing, timestamps=nothing,
+                            csv=true, csv_path=nothing)
+    t_steps = length(vdiag.v_pred)
+    xs = 1:t_steps
+
+    function dticks!(ax)
+        isnothing(timestamps) && return
+        idxs = round.(Int, range(1, t_steps; length = min(6, t_steps)))
+        ax.xticks = (idxs, string.(timestamps[idxs]))
+        ax.xticklabelrotation = pi / 4
+    end
+
+    fig = Figure(size = (1200, 760))
+    Label(fig[0, 1], "System volume / budget diagnostics"; fontsize = 14, font = :bold)
+
+    ax1 = Axis(fig[1, 1];
+               title = "Integrated storage volume V(t)",
+               ylabel = "m^3")
+    el_vp = lines!(ax1, xs, vdiag.v_pred; color = :steelblue)
+    el_vt = lines!(ax1, xs, vdiag.v_true; color = :orangered, linestyle = :dash)
+    hidexdecorations!(ax1; ticks = false)
+    dticks!(ax1)
+    Legend(fig[1, 2], [el_vp, el_vt], ["V_pred", "V_true"];
+           framevisible = false, tellwidth = true)
+
+    ax2 = Axis(fig[2, 1];
+               title = "Cumulative budget terms and storage change",
+               xlabel = "timestep",
+               ylabel = "m^3")
+    el_ip = lines!(ax2, xs, vdiag.cum_inflow_pred; color = :forestgreen)
+    el_op = lines!(ax2, xs, vdiag.cum_outflow_pred; color = :orangered)
+    el_dp = lines!(ax2, xs, vdiag.delta_v_pred; color = :black)
+    el_it = lines!(ax2, xs, vdiag.cum_inflow_true; color = :forestgreen, linestyle = :dash)
+    el_ot = lines!(ax2, xs, vdiag.cum_outflow_true; color = :orangered, linestyle = :dash)
+    el_dt = lines!(ax2, xs, vdiag.delta_v_true; color = :black, linestyle = :dash)
+    dticks!(ax2)
+    Legend(fig[2, 2],
+           [el_ip, el_op, el_dp, el_it, el_ot, el_dt],
+           ["cum inflow (pred)", "cum outflow (pred)", "delta V (pred)",
+            "cum inflow (true)", "cum outflow (true)", "delta V (true)"];
+           framevisible = false, tellwidth = true)
+
+    colsize!(fig.layout, 2, Fixed(190))
+    isnothing(path) || save(path, fig)
+
+    csv_out = isnothing(csv_path) ? _csv_from_path(path) : csv_path
+    if csv && !isnothing(csv_out)
+        header  = String["timestep"]
+        columns = Any[collect(xs)]
+        if !isnothing(timestamps) && length(timestamps) >= t_steps
+            push!(header, "timestamp")
+            push!(columns, string.(timestamps[1:t_steps]))
+        end
+        append!(header, ["v_pred", "v_true", "delta_v_pred", "delta_v_true",
+                         "cum_inflow_pred", "cum_inflow_true",
+                         "cum_outflow_pred", "cum_outflow_true",
+                         "budget_residual_pred"])
+        push!(columns, vdiag.v_pred, vdiag.v_true, vdiag.delta_v_pred, vdiag.delta_v_true,
+                       vdiag.cum_inflow_pred, vdiag.cum_inflow_true,
+                       vdiag.cum_outflow_pred, vdiag.cum_outflow_true,
+                       vdiag.budget_residual_pred)
+        _write_plot_csv(csv_out, header, columns)
+    end
+
+    return fig
+end
+
 # Largest colour-range width that stays representable in Float32. CairoMakie
 # scales each pixel as (x - lo)/(hi - lo) in Float32; if (hi - lo) overflows to
 # Inf the scaling yields NaN and the colormap lookup errors. Keeping the width
