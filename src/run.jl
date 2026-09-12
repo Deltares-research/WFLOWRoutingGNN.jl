@@ -309,6 +309,9 @@ function evaluate_and_write(model, dataset, norm_stats, grid, postscale,
                        joinpath(output_dir, "$(split_name)_true.nc"); schema)
 
         if split_name == "val"
+            g_inset = split_data[1][1]
+            edge_sources, edge_targets = edge_index(g_inset)
+
             plot_validation_movie(p_grids, t_grids, ms.domain;
                                   path       = joinpath(plots_dir, "validation.mp4"),
                                   framerate  = 10,
@@ -318,6 +321,8 @@ function evaluate_and_write(model, dataset, norm_stats, grid, postscale,
                                        postscale["river_q"];  # upstream area per node
                                        path       = joinpath(plots_dir, "downstream_timeseries.png"),
                                        upstream_points = ts.upstream_points,
+                                       edge_sources = edge_sources,
+                                       edge_targets = edge_targets,
                                        timestamps = split_times,
                                        csv_path   = joinpath(metrics_dir, "downstream_timeseries.csv"))
 
@@ -418,6 +423,8 @@ function evaluate_and_write(model, dataset, norm_stats, grid, postscale,
                                                postscale["river_q"];
                                                path       = joinpath(plots_dir, "downstream_timeseries_daterange.png"),
                                                upstream_points = ts.upstream_points,
+                                               edge_sources = edge_sources,
+                                               edge_targets = edge_targets,
                                                timestamps = dr_pred_times,
                                                csv_path   = joinpath(metrics_dir, "downstream_timeseries_daterange.csv"))
                 end

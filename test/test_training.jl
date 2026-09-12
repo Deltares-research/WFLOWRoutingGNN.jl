@@ -185,6 +185,23 @@ end
     @test idxs_nan == [2, 3, 5]
 end
 
+@testset "inset network edge segments" begin
+    rows = [3, 3, 2, 1]
+    cols = [1, 2, 2, 2]
+    src  = [1, 3, 4, 8]  # last edge is out of bounds and should be skipped
+    tgt  = [2, 2, 3, 1]
+
+    x1, y1, x2, y2 = WflowRoutingGNN._inset_edge_segments(rows, cols, src, tgt)
+    @test length(x1) == 3
+    @test length(y1) == 3
+    @test length(x2) == 3
+    @test length(y2) == 3
+    @test x1 == Float32[1, 2, 2]
+    @test y1 == Float32[3, 2, 1]
+    @test x2 == Float32[2, 2, 2]
+    @test y2 == Float32[3, 3, 2]
+end
+
 # ---------------------------------------------------------------------------
 # Fixed-horizon validation eval
 # ---------------------------------------------------------------------------

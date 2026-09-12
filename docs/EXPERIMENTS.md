@@ -4,60 +4,200 @@ Experiment configs live under `experiments/`. Newest at the top.
 
 ---
 
-# PROPOSED — not yet run
+# COMPLETED
 
-*Post-E3 disentangling run. E1, E2 and E3 are **done** (see COMPLETED). E3's
-peak-weighted-Huber sweep collapsed discharge to ~zero, but confounded three
-changes at once (loss, LR, and an MSE-tuned LR applied to a Huber run) — E4
-isolates the loss change at a known-stable LR. Full rationale in
-[TODO.md](TODO.md) and [notes/peak_accuracy_todo.md](notes/peak_accuracy_todo.md).*
-
-> **⚠ Cross-cutting finding from E1 + E2 + E3 (read before any peak-accuracy
-> run).** No configuration tested so far produces a *faithful* stable 30-step
-> free rollout. The failure is **regime-dependent on loss + LR**:
+> **⚠ Cross-cutting finding from E1 + E2 + E3 + E4 (read before any
+> peak-accuracy run).** No configuration tested so far produces a *faithful*
+> stable 30-step free rollout. The rollout **attractor** depends on the LR, and
+> the **loss function (MSE vs Huber) is not the lever**:
 > - **E1/E2 (MSE, lr ≈ 1.3e-4):** rollout **over-predicts and diverges to +Inf**
 >   from every anchor, regardless of start-flow percentile (E1) and `grad_clip`
 >   (E2).
-> - **E3 (Huber δ0.5, autotuned lr = 0.012):** rollout **under-predicts and
+> - **E4 (Huber δ0.5 λ2, lr = 1.3e-4):** stiff fixed-horizon anchors **diverge
+>   upward like E1/E2 MSE** (`frac_gt2 = 1.0` from **epoch 2**, peak_ratio ~1e13),
+>   **but the benign daterange is far worse than MSE** — outlet 286× (35,012 vs
+>   122) vs MSE's 1.9×. So holding LR fixed, MSE→Huber keeps the stiff-anchor
+>   failure but **additionally destabilises the benign rollout** (δ-tail effect).
+> - **E3 (Huber δ0.5, autotuned lr = 0.012, ~90×):** rollout **under-predicts and
 >   collapses to ~0** (even negative flows) — "bounded" anchors, but degenerate.
 >
-> So loss/LR can move the rollout **attractor** (from +∞ to 0) but neither MSE
-> nor Huber yields a *faithful* stable rollout. **Always cross-check a "bounded"
+> **Disentangling conclusion (E4).** E3's collapse-to-zero was **LR-driven** (the
+> ~90× jump), **not Huber-driven**: at the stable LR, Huber's *stiff fixed-horizon
+> anchors* diverge upward like MSE. **But the loss is not irrelevant** — on the
+> benign daterange trajectory, Huber (δ0.5) is ~150× worse than MSE at the same LR
+> (outlet 286× vs 1.9×), most likely from Huber's **δ linear tail** under-
+> penalising large errors (NOT the peak-weight λ, which is per-node-relative and
+> nearly dormant). So: **LR sets the attractor (+∞ ↔ 0); loss doesn't fix the
+> stiff-anchor instability but Huber actively worsens the benign rollout; prefer
+> MSE.** Neither loss yields a faithful rollout. **Always cross-check a "bounded"
 > fixed-horizon RMSE against the daterange pred-vs-true magnitude and pooled
-> PBIAS/peak_ratio** — a collapse-to-zero is trivially bounded too. The
-> rollout-path discrepancy is *resolved* (2026-09-07, not a code bug): the
-> fixed-horizon metric is a faithful measure; it's the model that's unstable.
-> The standing priority remains an **inference-stability mechanism**
-> (`mb_theta < 1`, noise injection, detached rollout), not the loss function.
+> PBIAS/peak_ratio** — both a collapse-to-zero and an explosive over-prediction
+> can look "finished". The rollout-path discrepancy is *resolved* (2026-09-07, not
+> a code bug): the fixed-horizon metric is faithful; it's the model that's
+> unstable. The standing priority is a **training-time error-correction mechanism**
+> (rollout **noise injection**, detached/pushforward rollout, longer curriculum) —
+> **NOT** `mb_theta < 1` (already swept: θ=1 is the most stable, lower θ diverges)
+> and **not** loss retuning.
 
-## E4 — single Huber baseline at a sane LR — `sava_small_v081_e4_huber_baseline` (PROPOSED)
+## E4 — single Huber baseline at a sane LR — `sava_small_v081_e4_huber_baseline`
 
-**Status:** config staged at
-[experiments/sava_small_v081_e4_huber_baseline/config.toml](../experiments/sava_small_v081_e4_huber_baseline/config.toml);
-not yet run. Single train run (`scripts/train.jl`, no autotune).
+**NAME:** `sava_small_v081_e4_huber_baseline` (single train run, no autotune;
+peak-weighted Huber `loss_type = "huber"`, `peak_delta = 0.5`, `peak_lambda = 2`,
+`peak_w_max = 4`, full `[1,2,5,8,10]` curriculum, 8×64 / mlp 2, 75,009 params,
+250 epochs). **LR hand-set to the known-stable E1/E2 value `lr_start = 1.3457e-4`**
+(NOT autotuned) so the *only* change vs E1 is MSE→Huber. Config:
+[experiments/sava_small_v081_e4_huber_baseline/config.toml](../experiments/sava_small_v081_e4_huber_baseline/config.toml).
 
-**Purpose.** Disentangle the E3 collapse confound. E3 changed **three** things vs
-the stable E1/E2 baseline — loss (MSE→Huber), LR (1.3e-4→0.012, ~90×), and the
-0.012 was an **MSE-tuned** recommendation (autotune is loss-blind, see
-[TODO.md](TODO.md)). E4 holds the LR at the **known-stable E1/E2 value** and runs
-peak-weighted Huber with the E3-optimal knobs (`peak_lambda = 2`, `peak_delta =
-0.5`, `peak_w_max = 4`), so the *only* change vs E1 is the loss.
+**SUMMARY.** Teacher-forced 1-step is strong and matches E1 (`val_q_1step`
+0.0140, spatial `river_q` NSE **0.973**, rmse 0.10). But the 30-step free rollout
+is **unstable from epoch 2** (`val_peak_ratio = 1e24`, `Inf` RMSE) and
+`val_peak_ratio_frac_gt2 = 1.0` at **every** epoch — all 32 anchors diverge at all
+epochs. The final-epoch model is fully blown up (fixed `val_rmse = 6.8e12`,
+`peak_ratio = 1.6e13`, every anchor 1e11–1e13 regardless of start-flow
+percentile). `best_epoch = 104` is merely the least-bad diverging epoch
+(`val_rmse = 14,899`, peak_ratio still **37,281**).
 
-**Read-out.** Does Huber at lr ≈ 1.3e-4 **avoid the collapse**? Compare daterange
-`river_q_pred` range (should span ≈[4, 122], not collapse to ~0 / negatives)
-against E1 (MSE) and the E3 λ=2 cell. Then `river_q_performance.pooled.{kge,
-pbias,peak_ratio}`, fixed-horizon anchor **magnitudes** (not just finiteness),
-and `peak_loss.{final_c_peak, final_rmse_high}`.
-- If E4 avoids the collapse → the E3 failure was **LR-driven** (the 90× jump +
-  MSE-tuned LR), and Huber peak-weighting is worth pursuing at a sane LR.
-- If E4 still collapses → the failure is **Huber-driven**, and the loss switch
-  itself destabilises the rollout on this basin.
+**⚠ Direction: explosive over-prediction (opposite of E3).** The best-epoch
+daterange outlet rollout **over-predicts by ~290×**: `river_q_pred` max **35,012**
+/ mean **4,023** vs true max **122** / mean **21.7**. This is the E1/E2 blow-up,
+**not** the E3 collapse. Pooled `river_q_performance`: KGE **−76.4**, PBIAS
+**+2092%**, peak_ratio **163**, r 0.52. Yet median per-cell `river_q` NSE is
+**0.973** — most cells track well; a subset of (high-flow-start) nodes explode and
+dominate the pooled sums. `river_h` broken as before (spatial NSE **−36.9**,
+peak_err 9.6 m). Volume budget diverges (pbias +35,557%, drift 9.2e5 m³/step).
 
-**Results:** _pending._
+**⚠ The instability is spatially localized to the downstream / high-drainage
+nodes.** The divergence is **not** network-wide. Along the upstream-area ladder
+(daterange peak pred/true ratio, outlet→headwater): r1 outlet **286×** (35,012 vs
+122), r2 **0.9**, r3 **1.3**, r4 **1.0**, r5 headwater **0.8** — only the outlet
+explodes; every other rung tracks truth. The per-node `river_q` distribution
+confirms it: **NSE median 0.973 but p10 −74.6, mean −827**; rmse median 0.10 vs
+mean 87.8 (p90 28). So ~the worst 10% of nodes (the highest-drainage/most
+downstream) carry the entire blow-up; the pooled KGE −76 / peak_ratio 163 are
+**outlet-dominated artifacts**, and the "all 32 anchors diverge to 1e11–1e13" is
+consistent with a *single* exploding node (peak_ratio maxes over nodes, so one
+poisoned outlet contaminates every anchor's score). **Mechanism (evidence +
+interpretation):** discharge is spatially cumulative — the routing operator sums
+upstream q into each node ([src/gnn.jl](../src/gnn.jl#L310)), so a per-node
+fractional over-prediction invisible in a headwater accumulates additively
+downstream, and the outlet (largest drainage area, largest `postscale_q`,
+`upstream_q`-dominated `net_flux`) is where the geometric per-step amplification
+(`amp ≈ 11.9`, `mb_gain ≈ 21.9`) manifests first and hardest. Spatial
+accumulation × temporal amplification, both maximal at the outlet.
+
+**IMPROVEMENTS.**
+- **Disentangling achieved (the point of E4).** The E3 vs E4 **direction** flip
+  (collapse→0 vs explode→+∞) is **LR-driven**: same loss, only the LR differs
+  (0.012 vs 1.3e-4). And the **stiff fixed-horizon anchors diverge under both MSE
+  (E1) and Huber (E4)** — that intrinsic instability is loss-independent
+  (`frac_gt2 = 1.0` from epoch 2, all-anchor 1e11–1e13 in E4; 1e23 in E1).
+- **1-step fit fully preserved under Huber** — `val_q_1step` 0.0140 ≈ E1 0.0144;
+  spatial `river_q` NSE median 0.973 = E1. The loss swap does not harm next-step
+  skill, and `amp`/`mb_gain` are identical to E1 (11.9/21.9 vs 11.5/21.9) — the
+  learned 1-step operator is the same; only the multi-step behaviour differs.
+- **Clean run, no instability counters tripped** — `n_nonfinite_skips = 0`,
+  `n_backoffs = 0`, `stopped_early = false`; the divergence is a *model* property,
+  not an optimiser failure.
+
+**⚠ CORRECTION to the initial read: Huber IS worse than MSE on the benign
+daterange (same LR).** The fixed-horizon anchors diverge under both losses, but
+the **daterange free trajectory does NOT** — and here Huber is dramatically worse:
+
+| | E1 (MSE) | E4 (Huber δ0.5 λ2) |
+|---|---|---|
+| daterange outlet pred/true (max) | 228 / 122 = **1.9×** | 35,012 / 122 = **286×** |
+| per-node `river_q` NSE median / p10 / mean | 0.973 / **0.772** / **0.884** | 0.973 / **−74.6** / **−827** |
+| pooled KGE / peak_ratio | 0.577 / 2.29 | −76.4 / 163 |
+
+At the **same LR**, MSE's daterange stays bounded (1.9×, every node fine) while
+Huber's blows up ~150× more at the outlet with a catastrophic downstream tail.
+So the claim "loss is not a stability lever" holds **only for the stiff-anchor
+instability**; for the benign long rollout, **Huber actively hurts**.
+
+**DEGRADED / FAILURE MODES.**
+- **Huber daterange rollout ~150× worse than MSE at the same LR** (286× vs 1.9×
+  outlet; per-node NSE p10 −74.6 vs +0.77). The loss switch destabilises the
+  benign free rollout that MSE keeps bounded.
+- **Rollout unstable from epoch 2, never recovers** — not a late-training
+  degradation; the MB rollout operator is unstable across the whole run
+  (`final_amp = 11.9`, `final_mb_gain = 21.9` — q→h error amplification ~12–22×).
+- **Explosive over-prediction at every anchor** — unlike E3 (bounded/collapsed),
+  E4 diverges from **all** start-flow percentiles (0.02–0.98), so at this LR the
+  fixed-horizon instability is **not** conditional on high-flow starts.
+- **`river_h` still decoupled** (spatial NSE −36.9) — the q→h coupling amplifies
+  rather than damps, consistent with fully-implicit `mb_theta = 1`.
+
+**HYPOTHESES.**
+- **E3 collapse was LR-driven, not Huber-driven (evidence, high confidence).**
+  The only difference between E4 (diverge → +∞) and E3 (collapse → 0) at the same
+  loss is the LR (1.3e-4 vs 0.012, ~90×). Therefore the ~90× LR pushed E3 into the
+  zero attractor; Huber itself does not cause collapse. This retires the
+  "Huber-driven collapse" branch of the E3 read-out.
+- **Loss is not a lever for the STIFF-anchor instability, but IS for the benign
+  daterange (evidence).** Fixed-horizon anchors diverge under both MSE and Huber
+  (loss-independent intrinsic instability). But MSE keeps the benign daterange
+  bounded (1.9×) where Huber explodes (286×) — so the loss shape does matter for
+  the trained multi-step dynamics even though the 1-step operator is identical.
+- **Likely culprit is the Huber δ linear tail, NOT the peak-weight λ
+  (interpretation, testable).** `δ = 0.5` in normalized space (σ≈1) puts all
+  high-flow residuals in Huber's **linear** regime → Huber ≈ MAE there → a much
+  **weaker restoring gradient on large errors** than MSE's quadratic tail. In a
+  free rollout the outlet over-prediction is under-corrected and drifts; with
+  spatial accumulation (routing sums upstream q) the under-correction is worst
+  exactly where errors are largest (the outlet) → 286×. The peak-weight λ is
+  **not** the driver: thresholds are **per-node relative** (each node's own
+  98th-pct/IQR, [src/preprocess.jl](../src/preprocess.jl#L489)) in normalized
+  (area-scaled) space, so downstream is not systematically up-weighted, and the
+  weighting is nearly dormant (`w_mean = 1.0005`, `w_max = 2.72`,
+  `c_peak = 0.038`). This rebuts the "downstream is higher → up-weighted"
+  mechanism specifically, while confirming the broader "Huber params matter".
+- **Instability is intrinsic to the rollout operator (evidence + speculation).**
+  `amp ≈ 12`, `mb_gain ≈ 22`, fully-implicit `mb_theta = 1`, divergence from
+  epoch 2 → the MB kinematic-wave update magnifies q→h errors geometrically over
+  the horizon (the amplification metrics are evidence; the exact route is
+  speculation).
+- **The single benign daterange trajectory hides it (evidence).** Median per-cell
+  NSE 0.973 vs pooled KGE −76 / peak_ratio 163 — exactly the "don't trust one
+  benign trajectory" caution: most nodes track, a few (high-drainage) explode and
+  dominate.
+
+**RECOMMENDATIONS.**
+1. **Prefer MSE over Huber until the rollout is stable** — at the same LR, MSE
+   keeps the benign daterange bounded (1.9×) while Huber explodes (286×). Do not
+   pursue peak-weighted Huber for peak accuracy until stability is solved; if
+   Huber is revisited, it is the **δ**, not λ, that needs attention.
+2. **(Optional, cheap) δ-vs-λ disentangling sweep** — if the Huber daterange
+   regression matters, a 4-cell run at lr = 1.3e-4 isolates the cause:
+   `λ=0` (peak-weight OFF) × `δ ∈ {0.5, 2, 5}`, plus one `λ=2, δ=0.5`.
+   Prediction (mine): `λ=0, δ=0.5` still worse than MSE and large δ → recovers
+   toward MSE (confirms **δ linear tail**); if instead `λ=2` ≫ `λ=0`, the
+   **peak-weight** mechanism is vindicated. Read-out = daterange outlet ratio +
+   per-node NSE p10, not pooled scalars.
+3. **Do NOT lower `mb_theta` — already swept, θ=1 is the most stable.** The
+   archived `sava_small_v081_theta_sweep` (θ ∈ {1, 0.95, 0.75, 0.5, 0.25, 0.05,
+   0}) shows outlet daterange ratio degrades monotonically as θ drops: θ=1 **1.69**
+   (best), θ=0.5 6.9, θ=0.25 **6.5e11** (blowup), θ=0.05 5.1e4, θ=0 67. This
+   matches [notes/mass_balance_stability_notes.md](notes/mass_balance_stability_notes.md)
+   §4 — the fully-implicit term *is* the rollout governor; lowering θ reintroduces
+   a one-step feedback delay (CFL-like growth). So θ=1 is correct; the amplification
+   `amp ≈ 12` is not fixable by θ.
+4. **Prioritise a training-time error-correction mechanism (top lever)** — the
+   remaining, un-swept inference-stability levers target autoregressive **exposure
+   bias** (the model never sees its own compounding errors during teacher-forced
+   1-step training): (a) **rollout noise injection** (`strategy.noise_scale > 0`,
+   currently 0) to teach self-correction; (b) **detached / pushforward rollout
+   gradient** (TODO §3); (c) **longer curriculum horizons / more rollout epochs**.
+   Read-out: does the outlet/high-area ladder ratio stay O(1) over the full
+   daterange, not just the pooled scalar?
+5. **Pair with the `q ≥ 0` floor on the propagating state** ([TODO.md](TODO.md)) —
+   prevents the E3-style negative-flow degenerate branch under other LRs.
+6. **Report a downstream/area-weighted stability metric, not pooled sums** — E4's
+   pooled KGE −76 / peak_ratio 163 are dominated by the single outlet while median
+   node NSE is 0.973. Track the per-node distribution (median + p10) and an
+   outlet/high-area-node rollout score; a high median NSE alone must never be read
+   as rollout success.
 
 ---
-
-# COMPLETED
 
 ## E3 — peak-weighted Huber λ-sweep — `sava_small_v081_e3_huber_lambda`
 
@@ -130,13 +270,16 @@ fixed-horizon RMSE against pred-vs-true magnitude + pooled PBIAS/peak_ratio.
 1. **Do NOT promote any λ setting to the full basin** — λ=2 wins a collapsed
    regime; the result is an artifact.
 2. **Run E4 (loss-vs-LR disentangling)** — single Huber run at lr ≈ 1.3e-4.
-   Decides whether the collapse is LR- or Huber-driven.
+   Decides whether the collapse is LR- or Huber-driven. **→ DONE (see E4):
+   LR-driven.** At lr 1.3e-4 Huber diverges upward like E1/E2; the E3 collapse
+   was the ~90× autotuned LR, not the loss.
 3. **Fix autotune loss-blindness** (forward `loss_type`/`peak_delta` to the range
    test) and **enforce `q ≥ 0`** at the decoder (negative flow is unphysical) —
    both in [TODO.md](TODO.md).
 4. **Inference-stability remains the top lever** — loss/LR moved the attractor
-   (+∞ → 0) but neither gives a faithful rollout; prioritise `mb_theta < 1` /
-   noise / detached rollout.
+   (+∞ → 0) but neither gives a faithful rollout; prioritise noise / detached
+   rollout. *(Correction 2026-09-12: `mb_theta < 1` is NOT a lever — the archived
+   `theta_sweep` shows θ=1 is the most stable, lower θ diverges. See E4 rec #3.)*
 
 ## E1 — diagnostic baseline — `sava_small_v081_e1_diag`
 
@@ -200,7 +343,10 @@ overshoot 1.9×). `river_h` remains broken (spatial NSE −9.9).
 2. **Prioritise an inference-stability lever over peak accuracy (now the top
    open item)** — no config yet yields a stable free rollout; `mb_theta < 1`
    (damps the confirmed `val_amp ≈ 11.5` q→h amplification), noise injection, or
-   the detached-rollout trick (TODO item 3).
+   the detached-rollout trick (TODO item 3). *(Correction 2026-09-12: the
+   `mb_theta < 1` suggestion is superseded — the archived `theta_sweep` shows θ=1
+   is the MOST stable and lowering θ worsens the rollout, θ=0.25 catastrophically.
+   Pursue noise / detached rollout, not θ. See E4 rec #3.)*
 3. **E3 still worth running** for the peak signal, but expect its fixed-horizon
    numbers to diverge for every λ cell (so they can't discriminate); select on
    teacher-forced peak diagnostics and update its `peak_delta` from `1.0` to
@@ -459,6 +605,24 @@ inference time.** Basis for the hard-constraint decision.
 Explores the implicit/explicit/trapezoidal (θ) discretisation; `θ* = σ_h/(dt·σ_q)`
 cancels the q↔h gradient stiffness. Default shipped: `mb_theta = 1.0` (fully
 implicit). See [notes/mass_balance_stability_notes.md](notes/mass_balance_stability_notes.md).
+
+**RESULT (backfilled 2026-09-12) — θ=1 is the most stable; lower θ diverges.**
+7-cell box sweep `model.mb_theta ∈ {1.0, 0.95, 0.75, 0.5, 0.25, 0.05, 0.0}`
+(hps1…hps7), MSE, lr 1.3e-4, otherwise the standard 8×64 curriculum. Outlet
+daterange over-prediction ratio (pred max / true max 122.4) vs θ:
+
+| θ | 1.0 | 0.95 | 0.75 | 0.5 | 0.25 | 0.05 | 0.0 |
+|---|---|---|---|---|---|---|---|
+| outlet ratio | **1.69** | 2.45 | 2.04 | 6.92 | **6.5e11** | 5.1e4 | 67 |
+
+Monotone-ish degradation as θ drops (θ=0.25 blows up catastrophically). This
+**confirms the design-note prediction**
+([notes/mass_balance_stability_notes.md](notes/mass_balance_stability_notes.md)
+§4): the fully-implicit term *is* the rollout governor; lowering θ reintroduces a
+one-step feedback delay → CFL-like growth. **Conclusion: keep `mb_theta = 1`;
+`mb_theta < 1` is NOT an inference-stability lever** (it is the opposite). The
+`amp ≈ 12` q→h amplification is intrinsic and must be addressed by training-time
+error correction (noise injection / detached rollout), not θ.
 
 ## h_loss_scale variants — `sava_small_v081_increment`, `*_mb_prior_increment`, `*_mb_no_prior_absolute`, `*_mb_exp_prior`
 

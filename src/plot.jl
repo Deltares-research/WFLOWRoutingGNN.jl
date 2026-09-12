@@ -39,6 +39,23 @@ function _upstream_percentile_nodes(upstream_area::AbstractVector{<:Real}, k::In
     return chosen
 end
 
+# Build line-segment endpoints in grid coordinates for inset network rendering.
+function _inset_edge_segments(rows::AbstractVector, cols::AbstractVector,
+                              sources::AbstractVector{<:Integer},
+                              targets::AbstractVector{<:Integer})
+    n = min(length(sources), length(targets))
+    x1 = Float32[]; y1 = Float32[]; x2 = Float32[]; y2 = Float32[]
+    sizehint!(x1, n); sizehint!(y1, n); sizehint!(x2, n); sizehint!(y2, n)
+    for i in 1:n
+        s = Int(sources[i]); t = Int(targets[i])
+        if 1 <= s <= length(rows) && 1 <= t <= length(rows)
+            push!(x1, Float32(cols[s])); push!(y1, Float32(rows[s]))
+            push!(x2, Float32(cols[t])); push!(y2, Float32(rows[t]))
+        end
+    end
+    return x1, y1, x2, y2
+end
+
 # Write named columns to a CSV file (no external dependency; mirrors the manual
 # CSV writers in `hparsearch.jl` / `lr_range_test.jl`). `header` is a Vector of
 # column names; `columns` is a Vector of equal-length column vectors.
@@ -543,11 +560,18 @@ function plot_timeseries(
                             halign = 0.98,
                             valign = 0.98,
                             alignmode = Inside(),
-                            title = "node map")
-            scatter!(inset_ax, active_cols, active_rows;
-                     color = (:gray40, 0.25), markersize = 3)
+                            title = "river network")
+            if haskey(inset, :edge_sources) && haskey(inset, :edge_targets)
+                ex1, ey1, ex2, ey2 = _inset_edge_segments(
+                    inset.rows, inset.cols, inset.edge_sources, inset.edge_targets)
+                linesegments!(inset_ax, ex1, ey1, ex2, ey2;
+                              color = (:gray30, 0.35), linewidth = 1.0)
+            else
+                scatter!(inset_ax, active_cols, active_rows;
+                         color = (:gray40, 0.25), markersize = 3)
+            end
             scatter!(inset_ax, [col], [row];
-                     color = :orangered, markersize = 10)
+                     color = :orangered, markersize = 11)
             xlims!(inset_ax, 0.5, inset.ncols + 0.5)
             ylims!(inset_ax, inset.nrows + 0.5, 0.5)
             hidedecorations!(inset_ax)
@@ -636,6 +660,9 @@ Arguments:
                     (length = number of graph nodes), e.g. from `meta_upstream_area`
                     in staticmaps. NaN values are ignored.
 - `path`          : optional output file path.
+- `edge_sources`, `edge_targets` : optional directed edge list over node indices
+                    (source drains to target). When provided, the inset shows
+                    network connectivity instead of only active-node points.
 - `csv`           : when `true` (default) and a `path` (or `csv_path`) is
                     available, the plotted timeseries are written to CSV
                     (forwarded to `plot_timeseries`).
@@ -651,13 +678,20 @@ function plot_downstream_timeseries(
         upstream_area :: AbstractVector{<:Real};
         path          = nothing,
         upstream_points::Int = 1,
+        edge_sources  = nothing,
+        edge_targets  = nothing,
         timestamps    = nothing,
         csv           = true,
         csv_path      = nothing)
     upstream_points > 0 || throw(ArgumentError("upstream_points must be positive"))
     node_idxs = _upstream_percentile_nodes(upstream_area, upstream_points)
 
-    inset_spec = (rows = grid.rows, cols = grid.cols, nrows = grid.nrows, ncols = grid.ncols)
+    inset_spec = if !isnothing(edge_sources) && !isnothing(edge_targets)
+        (rows = grid.rows, cols = grid.cols, nrows = grid.nrows, ncols = grid.ncols,
+         edge_sources = edge_sources, edge_targets = edge_targets)
+    else
+        (rows = grid.rows, cols = grid.cols, nrows = grid.nrows, ncols = grid.ncols)
+    end
     fig = nothing
     for (rank, node_idx) in enumerate(node_idxs)
         row = grid.rows[node_idx]

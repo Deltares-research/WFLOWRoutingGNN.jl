@@ -76,6 +76,32 @@ Remaining:
 
 ---
 
+# Diagnostics & plotting
+
+## 3b. Network-graph inset on the river_q / river_h timeseries plots
+
+The `river_q` / `river_h` timeseries panels already carry a small inset, but it
+currently draws only a faint **scatter of active-node positions** ("node map")
+with the selected cell highlighted ([src/plot.jl](../src/plot.jl#L537)). Upgrade
+it to show the actual **river network graph** so it is obvious where in the
+catchment the plotted cell sits.
+
+- [x] Draw the LDD/river-network connectivity (edges between each node and its
+      downstream neighbour) in the inset, not just a point cloud — reuse the
+      network-drawing logic from [scripts/plot_ldd.jl](../scripts/plot_ldd.jl).
+- [x] Keep the current **marker** for the plotted cell (orangered), sized/z-ordered
+      so it reads clearly on top of the network.
+- [x] Thread the edge/connectivity info through to `plot_timeseries` via the
+      existing `inset` named tuple (extend it with the edge list / downstream
+      index) so `plot_downstream_timeseries` populates it from the graph.
+- [x] Apply to both `river_q` and `river_h` panels (loops over `state_vars`, so
+      one change covers both).
+- Touch: `src/plot.jl` (`plot_timeseries` inset block, `plot_downstream_timeseries`
+      `inset_spec`), optionally factor shared network-drawing out of
+      `scripts/plot_ldd.jl`.
+
+---
+
 # Computational performance
 
 Distilled from the 02-09-2026 benchmark log in
