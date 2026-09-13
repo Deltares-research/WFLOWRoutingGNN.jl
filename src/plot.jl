@@ -44,16 +44,16 @@ function _inset_edge_segments(rows::AbstractVector, cols::AbstractVector,
                               sources::AbstractVector{<:Integer},
                               targets::AbstractVector{<:Integer})
     n = min(length(sources), length(targets))
-    x1 = Float32[]; y1 = Float32[]; x2 = Float32[]; y2 = Float32[]
-    sizehint!(x1, n); sizehint!(y1, n); sizehint!(x2, n); sizehint!(y2, n)
+    pts = Point2f[]
+    sizehint!(pts, 2n)
     for i in 1:n
         s = Int(sources[i]); t = Int(targets[i])
         if 1 <= s <= length(rows) && 1 <= t <= length(rows)
-            push!(x1, Float32(cols[s])); push!(y1, Float32(rows[s]))
-            push!(x2, Float32(cols[t])); push!(y2, Float32(rows[t]))
+            push!(pts, Point2f(Float32(cols[s]), Float32(rows[s])))
+            push!(pts, Point2f(Float32(cols[t]), Float32(rows[t])))
         end
     end
-    return x1, y1, x2, y2
+    return pts
 end
 
 # Write named columns to a CSV file (no external dependency; mirrors the manual
@@ -562,9 +562,9 @@ function plot_timeseries(
                             alignmode = Inside(),
                             title = "river network")
             if haskey(inset, :edge_sources) && haskey(inset, :edge_targets)
-                ex1, ey1, ex2, ey2 = _inset_edge_segments(
+                                edge_pts = _inset_edge_segments(
                     inset.rows, inset.cols, inset.edge_sources, inset.edge_targets)
-                linesegments!(inset_ax, ex1, ey1, ex2, ey2;
+                                linesegments!(inset_ax, edge_pts;
                               color = (:gray30, 0.35), linewidth = 1.0)
             else
                 scatter!(inset_ax, active_cols, active_rows;

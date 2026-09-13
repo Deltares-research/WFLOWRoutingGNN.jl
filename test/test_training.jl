@@ -191,15 +191,14 @@ end
     src  = [1, 3, 4, 8]  # last edge is out of bounds and should be skipped
     tgt  = [2, 2, 3, 1]
 
-    x1, y1, x2, y2 = WflowRoutingGNN._inset_edge_segments(rows, cols, src, tgt)
-    @test length(x1) == 3
-    @test length(y1) == 3
-    @test length(x2) == 3
-    @test length(y2) == 3
-    @test x1 == Float32[1, 2, 2]
-    @test y1 == Float32[3, 2, 1]
-    @test x2 == Float32[2, 2, 2]
-    @test y2 == Float32[3, 3, 2]
+    pts = WflowRoutingGNN._inset_edge_segments(rows, cols, src, tgt)
+    @test length(pts) == 6
+    @test Tuple(pts[1]) == (1f0, 3f0)
+    @test Tuple(pts[2]) == (2f0, 3f0)
+    @test Tuple(pts[3]) == (2f0, 2f0)
+    @test Tuple(pts[4]) == (2f0, 3f0)
+    @test Tuple(pts[5]) == (2f0, 1f0)
+    @test Tuple(pts[6]) == (2f0, 2f0)
 end
 
 # ---------------------------------------------------------------------------
