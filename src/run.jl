@@ -124,6 +124,7 @@ function settings_from_config(d::AbstractDict, toml_dir::AbstractString)
         grad_clip        = get(td, "grad_clip", 1.0),
         h_loss_scale     = Symbol(get(td, "h_loss_scale", "absolute")),
         phase_backoff_factor = get(td, "phase_backoff_factor", 0.5),
+        rollout_grad     = Symbol(get(td, "rollout_grad", "full_bptt")),
         eval_horizon     = get(td, "eval_horizon", 30),
         eval_anchors     = get(td, "eval_anchors", 32),
         upstream_points  = get(ed, "upstream_points", get(td, "upstream_points", 5)),

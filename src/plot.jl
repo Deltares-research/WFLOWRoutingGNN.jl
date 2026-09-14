@@ -549,7 +549,7 @@ function plot_timeseries(
         lines!(ax_ts, ts, truth; label = "truth",      color = :steelblue)
         lines!(ax_ts, ts, pred;  label = "prediction", color = :orangered,
                linestyle = :dash)
-        axislegend(ax_ts; position = :rt)
+         axislegend(ax_ts; position = :rt)
 
         if inset !== nothing
             active_rows = inset.rows
@@ -557,7 +557,7 @@ function plot_timeseries(
             inset_ax = Axis(fig[vi, 1];
                             width = Relative(0.24),
                             height = Relative(0.35),
-                            halign = 0.98,
+                            halign = 0.02,
                             valign = 0.98,
                             alignmode = Inside(),
                             title = "river network")

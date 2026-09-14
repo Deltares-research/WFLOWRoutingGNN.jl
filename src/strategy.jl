@@ -396,11 +396,14 @@ function loss_function(model      ::WflowGNN,
                        batch      ::Vector{<:GNNGraph},
                        strategy   ::TrainingStrategy,
                        static     ::AbstractMatrix;
-                       peak_stats = nothing)
+                       peak_stats = nothing,
+                       rollout_grad::Symbol = :full_bptt)
     nsteps      = strategy.current_steps
     noise_scale = strategy.noise_scale
     length(batch) >= nsteps + 1 ||
         throw(ArgumentError("batch length ($(length(batch))) must be >= current_steps+1 ($(nsteps+1))"))
+    rollout_grad in (:full_bptt, :pushforward, :detached) ||
+        throw(ArgumentError("rollout_grad must be :full_bptt, :pushforward, or :detached"))
 
     g_topo, state, forcings, forcings_next, targets = Flux.ignore_derivatives() do
         g    = batch[1]
@@ -411,23 +414,16 @@ function loss_function(model      ::WflowGNN,
         g, st, fs, fsn, tgts
     end
 
-    use_ckpt = nsteps > 1
+    use_ckpt = nsteps > 1 && rollout_grad == :full_bptt
 
-    loss = 0f0
-    for t in 1:nsteps
-        forcing      = forcings[t]
-        forcing_next = forcings_next[t]
-        if noise_scale > 0f0
-            state   = state   .+ noise_scale .* randn(Float32, size(state))
-            forcing = forcing .+ noise_scale .* randn(Float32, size(forcing))
-        end
-        pred_state = use_ckpt ?
-            Flux.Zygote.checkpointed(model, g_topo, state, forcing, static, forcing_next) :
-            model(g_topo, state, forcing, static, forcing_next)
+    detach_state(x) = Flux.ignore_derivatives() do
+        copy(x)
+    end
 
+    function step_loss(pred_state, target)
         if strategy.loss_type == :huber
-            q_target = targets[t][1:1, :]
-            h_target = targets[t][2:2, :]
+            q_target = target[1:1, :]
+            h_target = target[2:2, :]
             q_pred = pred_state[1:1, :]
             h_pred = pred_state[2:2, :]
             q_u, q_s, h_u, h_s = Flux.ignore_derivatives() do
@@ -443,14 +439,69 @@ function loss_function(model      ::WflowGNN,
                                                                        lambda = strategy.peak_lambda,
                                                                        gamma = strategy.peak_gamma,
                                                                        w_max = strategy.peak_w_max)
-            loss += q_loss + h_loss
+            return q_loss + h_loss
         else
-            loss += Flux.mse(pred_state[1:1, :], targets[t][1:1, :]) +
-                    strategy.h_loss_weight * Flux.mse(pred_state[2:2, :], targets[t][2:2, :])
+            return Flux.mse(pred_state[1:1, :], target[1:1, :]) +
+                   strategy.h_loss_weight * Flux.mse(pred_state[2:2, :], target[2:2, :])
         end
-        state = pred_state
     end
-    return loss / nsteps
+
+    loss = 0f0
+    if rollout_grad == :full_bptt
+        for t in 1:nsteps
+            forcing      = forcings[t]
+            forcing_next = forcings_next[t]
+            if noise_scale > 0f0
+                state   = state   .+ noise_scale .* randn(Float32, size(state))
+                forcing = forcing .+ noise_scale .* randn(Float32, size(forcing))
+            end
+            pred_state = use_ckpt ?
+                Flux.Zygote.checkpointed(model, g_topo, state, forcing, static, forcing_next) :
+                model(g_topo, state, forcing, static, forcing_next)
+
+            loss += step_loss(pred_state, targets[t])
+            state = pred_state
+        end
+        return loss / nsteps
+    elseif rollout_grad == :detached
+        for t in 1:nsteps
+            forcing      = forcings[t]
+            forcing_next = forcings_next[t]
+            state_in = detach_state(state)
+            if noise_scale > 0f0
+                state_in = state_in .+ noise_scale .* randn(Float32, size(state_in))
+                forcing  = forcing  .+ noise_scale .* randn(Float32, size(forcing))
+            end
+            pred_state = model(g_topo, state_in, forcing, static, forcing_next)
+            loss += step_loss(pred_state, targets[t])
+            state = detach_state(pred_state)
+        end
+        return loss / nsteps
+    else
+        # Pushforward: detach self-rolled states for the first nsteps-1 unroll
+        # steps, then supervise only the final endpoint step.
+        for t in 1:max(nsteps - 1, 0)
+            forcing      = forcings[t]
+            forcing_next = forcings_next[t]
+            state_in = detach_state(state)
+            if noise_scale > 0f0
+                state_in = state_in .+ noise_scale .* randn(Float32, size(state_in))
+                forcing  = forcing  .+ noise_scale .* randn(Float32, size(forcing))
+            end
+            pred_state = model(g_topo, state_in, forcing, static, forcing_next)
+            state = detach_state(pred_state)
+        end
+
+        forcing      = forcings[nsteps]
+        forcing_next = forcings_next[nsteps]
+        state_in = state
+        if noise_scale > 0f0
+            state_in = state_in .+ noise_scale .* randn(Float32, size(state_in))
+            forcing  = forcing  .+ noise_scale .* randn(Float32, size(forcing))
+        end
+        pred_state = model(g_topo, state_in, forcing, static, forcing_next)
+        return step_loss(pred_state, targets[nsteps])
+    end
 end
 
 """

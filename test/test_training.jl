@@ -86,6 +86,13 @@ const VALID_TS_KWARGS = (
         @test TrainSettings(; VALID_TS_KWARGS..., phase_backoff_factor = 1.0) isa TrainSettings
     end
 
+    @testset "invalid rollout_grad throws" begin
+        @test_throws ArgumentError TrainSettings(; VALID_TS_KWARGS..., rollout_grad = :bad_mode)
+        @test TrainSettings(; VALID_TS_KWARGS..., rollout_grad = :full_bptt) isa TrainSettings
+        @test TrainSettings(; VALID_TS_KWARGS..., rollout_grad = :pushforward) isa TrainSettings
+        @test TrainSettings(; VALID_TS_KWARGS..., rollout_grad = :detached) isa TrainSettings
+    end
+
 end
 
 # ---------------------------------------------------------------------------
@@ -111,6 +118,7 @@ end
     @test s2.device               == s.device
     @test s2.h_loss_scale         == s.h_loss_scale
     @test s2.phase_backoff_factor == s.phase_backoff_factor
+    @test s2.rollout_grad         == s.rollout_grad
 
     # Non-default scale survives the round-trip too.
     si   = TrainSettings(; VALID_TS_KWARGS..., h_loss_scale = :increment)
@@ -126,6 +134,13 @@ end
     rm(path)
     @test sb2.phase_backoff_factor ≈ 0.25f0
 
+    # Non-default rollout-grad mode survives too.
+    spf  = TrainSettings(; VALID_TS_KWARGS..., rollout_grad = :pushforward)
+    save_train_settings(path, spf)
+    spf2 = load_train_settings(path)
+    rm(path)
+    @test spf2.rollout_grad == :pushforward
+
 end
 
 # ---------------------------------------------------------------------------
@@ -138,6 +153,7 @@ end
     @test s.eval_horizon            == 30
     @test s.eval_anchors            == 32
     @test s.upstream_points         == 5
+    @test s.rollout_grad            == :full_bptt
     @test s.early_stopping          == false
     @test s.early_stopping_patience == 20
     @test s.checkpoint_every        == 0
@@ -170,6 +186,19 @@ end
         @test sc2.checkpoint_full_eval    == true
     end
 
+end
+
+@testset "train_model! rollout_grad modes" begin
+    for mode in (:full_bptt, :pushforward, :detached)
+        ts = TrainSettings(; VALID_TS_KWARGS..., epochs = 2, lr_steps = 2,
+                           strategy = TrainingStrategy([2], [2]),
+                           rollout_grad = mode)
+        model = deepcopy(TR_MODEL)
+        losses = train_model!(model, TR_TRAIN_LOADER, TR_VAL_LOADER, ts, TR_STATIC)
+        @test length(losses.train_rollout) == 2
+        @test all(isfinite, losses.train_rollout)
+        @test all(>(0), losses.train_rollout)
+    end
 end
 
 # ---------------------------------------------------------------------------

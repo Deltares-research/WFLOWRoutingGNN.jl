@@ -66,8 +66,24 @@ Remaining:
 
 ## 3. Pushforward / detached-rollout trick (toggle)
 
-- [ ] `rollout_grad = :full_bptt | :pushforward | :detached`, default full-BPTT.
-- [ ] Detached (truncation-length-1) variant preferred: per-step loss, backprop
+- **Definitions (both cut the BPTT tape to O(1) via stop-gradient — this is the
+  `Flux.ignore_derivatives` primitive already used in `src/strategy.jl`, NOT a
+  forward-mode/JVP linearisation of `f_θ`):**
+  - **`:pushforward` (Brandstetter et al. 2022).** Unroll `k` steps with the
+    *actual* nonlinear `f_θ` but under stop-gradient, then take **one**
+    gradient-carrying step from that self-generated state and score **only that
+    final step**: `x_{t+k-1} = detach(f_θ∘…∘f_θ(x_t))`, loss on
+    `f_θ(x_{t+k-1})` vs `y_{t+k}`. The differentiated step sees a
+    distribution-shifted (self-rolled) input → teaches robustness to the model's
+    own rollout error. Supervises the endpoint only.
+  - **`:detached` (truncation-length-1).** Detach the incoming state at **every**
+    step, take one differentiable `f_θ` application, score **that** step, then
+    detach its output before the next: `x̂_{t+1} = f_θ(detach(x_t))`, loss each
+    step. Keeps per-step hydrograph supervision (matters for the dense daily q/h
+    targets + peak-weighted loss) with O(1) tape depth. `k` is fixed at 1 — there
+    is no configurable TBPTT window in this design.
+- [x] `rollout_grad = :full_bptt | :pushforward | :detached`, default full-BPTT.
+- [x] Detached (truncation-length-1) variant preferred: per-step loss, backprop
       one step, O(1) tape depth — should make gradient checkpointing unnecessary.
 - [ ] Benchmark step time & peak memory vs. full-BPTT at `steps=10`.
 - **Note:** fixes rollout-depth instability & training time, *not* the epoch-2

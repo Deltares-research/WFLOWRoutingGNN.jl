@@ -46,6 +46,11 @@ Fields:
                      LR is multiplied by this factor for the remaining epochs of
                      the phase, then reset at the next boundary. Must be in
                      `(0, 1]`; `1.0` disables the backoff.
+- `rollout_grad`  : rollout-gradient mode for multi-step loss.
+                     `:full_bptt` backpropagates through the full unroll;
+                     `:pushforward` detaches self-generated rollout states and
+                     supervises only the final step; `:detached` detaches the
+                     incoming state at every step and supervises every step.
 - `strategy`       : training curriculum (rollout steps and noise schedule).
 - `device`         : compute device; `:cpu` or `:gpu`. If `:gpu` is requested but
                      CUDA is unavailable, falls back to `:cpu` with a warning.
@@ -90,6 +95,7 @@ struct TrainSettings
     grad_clip        :: Float32
     h_loss_scale     :: Symbol
     phase_backoff_factor :: Float32
+    rollout_grad     :: Symbol
     strategy         :: TrainingStrategy
     device           :: Symbol
     val_daterange    :: Union{Nothing, Tuple{Dates.DateTime, Dates.DateTime}}
@@ -120,6 +126,7 @@ function TrainSettings(;
         grad_clip        :: Real = 1.0,
         h_loss_scale     :: Symbol = :absolute,
         phase_backoff_factor :: Real = 0.5,
+        rollout_grad     :: Symbol = :full_bptt,
         device           :: Symbol = :cpu,
         val_daterange    :: Union{Nothing, Tuple{Dates.DateTime, Dates.DateTime}} = nothing,
         eval_horizon     :: Int = 30,
@@ -143,6 +150,8 @@ function TrainSettings(;
         throw(ArgumentError("h_loss_scale must be :absolute or :increment"))
     0 < phase_backoff_factor <= 1 ||
         throw(ArgumentError("phase_backoff_factor must be in (0, 1] (1 disables backoff)"))
+    rollout_grad in (:full_bptt, :pushforward, :detached) ||
+        throw(ArgumentError("rollout_grad must be :full_bptt, :pushforward, or :detached"))
     device in (:cpu, :gpu) || throw(ArgumentError("device must be :cpu or :gpu"))
     eval_horizon >= 0 || throw(ArgumentError("eval_horizon must be non-negative (0 disables the fixed-horizon eval)"))
     eval_horizon == 0 || eval_anchors > 0 ||
@@ -170,7 +179,8 @@ function TrainSettings(;
     TrainSettings(epochs, batch_size,
                   Float32(lr_start), Float32(lr_final),
                   lr_steps, lr_warmup_epochs, Float32(lr_peak_decay), Float32(grad_clip),
-                  h_loss_scale, Float32(phase_backoff_factor), strategy, device, val_daterange,
+                  h_loss_scale, Float32(phase_backoff_factor), rollout_grad,
+                  strategy, device, val_daterange,
                   eval_horizon, eval_anchors, upstream_points,
                   early_stopping, early_stopping_patience,
                   checkpoint_every, checkpoint_full_eval)
@@ -188,6 +198,7 @@ function Base.show(io::IO, s::TrainSettings)
     println(io, "  grad_clip        : ", s.grad_clip)
     println(io, "  h_loss_scale     : ", s.h_loss_scale)
     println(io, "  phase_backoff_factor : ", s.phase_backoff_factor)
+    println(io, "  rollout_grad     : ", s.rollout_grad)
     println(io, "  device           : ", s.device)
     println(io, "  val_daterange : ", isnothing(s.val_daterange) ? "nothing" :
                                      string(s.val_daterange[1], " – ", s.val_daterange[2]))
@@ -219,6 +230,7 @@ function save_train_settings(path::String, s::TrainSettings)
         "grad_clip"        => Float64(s.grad_clip),
         "h_loss_scale"     => String(s.h_loss_scale),
         "phase_backoff_factor" => Float64(s.phase_backoff_factor),
+        "rollout_grad"     => String(s.rollout_grad),
         "device"     => String(s.device),
         "eval_horizon"     => s.eval_horizon,
         "eval_anchors"     => s.eval_anchors,
@@ -275,6 +287,7 @@ function load_train_settings(path::String)
         grad_clip        = Float32(get(d, "grad_clip", 1.0)),
         h_loss_scale     = Symbol(get(d, "h_loss_scale", "absolute")),
         phase_backoff_factor = Float32(get(d, "phase_backoff_factor", 0.5)),
+        rollout_grad     = Symbol(get(d, "rollout_grad", "full_bptt")),
         eval_horizon     = get(d, "eval_horizon", 30),
         eval_anchors     = get(d, "eval_anchors", 32),
         upstream_points  = get(d, "upstream_points", 5),
@@ -713,7 +726,9 @@ function train_model!(model,
         last_train_batch = nothing
 
         for batch in train_loader_d
-            train_loss, grads = Flux.withgradient(m -> loss_function(m, batch, strategy, static_d; peak_stats = peak_stats_d), model)
+            train_loss, grads = Flux.withgradient(m -> loss_function(m, batch, strategy, static_d;
+                                                                     peak_stats = peak_stats_d,
+                                                                     rollout_grad = ts.rollout_grad), model)
             gn = _grad_l2norm(grads[1])
             # Skip updates from a non-finite loss/gradient (e.g. a curriculum-phase
             # restart spike) so a single bad step cannot poison the weights.
@@ -778,7 +793,9 @@ function train_model!(model,
         val_amp_sum    = 0f0
         n_val          = 0
         for b in val_loader_d
-            ep_val_rollout += loss_function(model, b, strategy, static_d; peak_stats = peak_stats_d)
+            ep_val_rollout += loss_function(model, b, strategy, static_d;
+                                            peak_stats = peak_stats_d,
+                                            rollout_grad = ts.rollout_grad)
             ep_val_1step   += one_step_loss(model, b, static_d, strategy.h_loss_weight)
             if has_components
                 qc, hc      = loss_components(model, b, static_d)
