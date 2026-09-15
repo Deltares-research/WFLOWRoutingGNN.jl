@@ -22,7 +22,7 @@ export WflowGNN, MassBalanceLayer, mb_diagnostics, ModelSettings, save_model_set
 include("strategy.jl")
 export TrainingStrategy, save_training_strategy, load_training_strategy,
        update_steps!, peak_quantile_stats, estimate_peak_loss_parameters,
-       peak_loss_summary, peak_weighted_huber_loss, peak_weight_matrix,
+    peak_loss_summary, peak_weighted_loss, peak_weighted_huber_loss, peak_weight_matrix,
        loss_function, one_step_loss
 
 include("training.jl")

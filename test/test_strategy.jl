@@ -135,22 +135,27 @@ end
 # Huber loss helper
 # ---------------------------------------------------------------------------
 
-@testset "peak_weighted_huber_loss" begin
+@testset "peak_weighted_loss" begin
     pred = Float32[1.0 2.0 3.0; 1.5 2.5 3.5]
     target = Float32[1.1 2.2 2.4; 1.6 2.3 4.5]
     u = Float32[2.0, 3.0]
     s = Float32[1.0, 1.5]
 
-    loss = WflowRoutingGNN.peak_weighted_huber_loss(pred, target, u, s; delta = 1.0f0,
-                                                  lambda = 2.0f0,
-                                                  gamma = 1.0f0, w_max = 4.0f0)
+    loss = WflowRoutingGNN.peak_weighted_loss(pred, target, u, s;
+                                              loss_type = :huber,
+                                              delta = 1.0f0,
+                                              lambda = 2.0f0,
+                                              gamma = 1.0f0,
+                                              w_max = 4.0f0)
     @test loss isa Float32
     @test isfinite(loss)
     @test loss >= 0f0
 
-    loss_mse = WflowRoutingGNN.peak_weighted_huber_loss(pred, target, u, s; delta = 0.0f0,
-                                                      lambda = 0.0f0,
-                                                      gamma = 1.0f0, w_max = 1.0f0)
+    loss_mse = WflowRoutingGNN.peak_weighted_loss(pred, target, u, s;
+                                                  loss_type = :mse,
+                                                  lambda = 0.0f0,
+                                                  gamma = 1.0f0,
+                                                  w_max = 1.0f0)
     @test isfinite(loss_mse)
     @test loss_mse >= 0f0
 
@@ -159,9 +164,12 @@ end
         # value must give exactly the same loss as the plain-vector call.
         u_mat = repeat(u, 1, size(pred, 2))
         s_mat = repeat(s, 1, size(pred, 2))
-        loss_mat = WflowRoutingGNN.peak_weighted_huber_loss(pred, target, u_mat, s_mat;
-                                                          delta = 1.0f0, lambda = 2.0f0,
-                                                          gamma = 1.0f0, w_max = 4.0f0)
+        loss_mat = WflowRoutingGNN.peak_weighted_loss(pred, target, u_mat, s_mat;
+                                  loss_type = :huber,
+                                  delta = 1.0f0,
+                                  lambda = 2.0f0,
+                                  gamma = 1.0f0,
+                                  w_max = 4.0f0)
         @test loss_mat ≈ loss
     end
 
@@ -170,11 +178,30 @@ end
         # uniform (per-channel scalar) threshold.
         u_mat = Float32[1.0 2.0 5.0; 1.0 2.0 5.0]
         s_mat = repeat(s, 1, size(pred, 2))
-        loss_mat = WflowRoutingGNN.peak_weighted_huber_loss(pred, target, u_mat, s_mat;
-                                                          delta = 1.0f0, lambda = 2.0f0,
-                                                          gamma = 1.0f0, w_max = 4.0f0)
+        loss_mat = WflowRoutingGNN.peak_weighted_loss(pred, target, u_mat, s_mat;
+                                                      loss_type = :huber,
+                                                      delta = 1.0f0,
+                                                      lambda = 2.0f0,
+                                                      gamma = 1.0f0,
+                                                      w_max = 4.0f0)
         @test isfinite(loss_mat)
         @test loss_mat != loss
+    end
+
+    @testset "lambda=0 reduces exactly to plain mean losses" begin
+        l_mse_weighted = WflowRoutingGNN.peak_weighted_loss(pred, target, u, s;
+                                                            loss_type = :mse,
+                                                            lambda = 0f0)
+        @test l_mse_weighted ≈ Float32(mean((pred .- target) .^ 2))
+
+        l_huber_weighted = WflowRoutingGNN.peak_weighted_loss(pred, target, u, s;
+                                                              loss_type = :huber,
+                                                              delta = 1f0,
+                                                              lambda = 0f0)
+        l_huber_plain = Float32(mean(WflowRoutingGNN._element_loss.(pred .- target,
+                                                                     Ref(Val(:huber)),
+                                                                     1f0)))
+        @test l_huber_weighted ≈ l_huber_plain
     end
 end
 
@@ -204,17 +231,18 @@ end
 end
 
 if CUDA.functional()
-    @testset "peak_weighted_huber_loss CUDA regression" begin
+    @testset "peak_weighted_loss CUDA regression" begin
         pred = CUDA.rand(Float32, 2, 4)
         target = CUDA.rand(Float32, 2, 4)
         u = CUDA.rand(Float32, 2)
         s = CUDA.rand(Float32, 2)
         s = max.(s, eps(Float32))
-        loss = WflowRoutingGNN.peak_weighted_huber_loss(pred, target, u, s;
-                                                        delta = 1.0f0,
-                                                        lambda = 2.0f0,
-                                                        gamma = 1.0f0,
-                                                        w_max = 4.0f0)
+        loss = WflowRoutingGNN.peak_weighted_loss(pred, target, u, s;
+                                                  loss_type = :huber,
+                                                  delta = 1.0f0,
+                                                  lambda = 2.0f0,
+                                                  gamma = 1.0f0,
+                                                  w_max = 4.0f0)
         @test loss isa Float32
         @test isfinite(loss)
         @test loss >= 0f0
@@ -248,19 +276,23 @@ end
         @test all(w -> 1f0 <= w <= 4.0f0, weights)
     end
 
-    @testset "matches peak_weighted_huber_loss's internal weighting" begin
+    @testset "matches peak_weighted_loss's internal weighting" begin
         # Reconstruct the (weight-normalised) loss from the forward-only
         # weights/mask and compare against the differentiable loss function's
-        # own computation (peak_weighted_huber_loss normalises row_weights to
-        # sum to 1 when lambda > 0).
+        # own computation.
         weights, _ = WflowRoutingGNN.peak_weight_matrix(target, u, s; lambda = 2.0f0,
                                                        gamma = 1.0f0, w_max = 4.0f0)
         delta = 1.0f0
-        elementwise = WflowRoutingGNN._huber_element.(pred .- target, delta) .* weights
+        elementwise = WflowRoutingGNN._element_loss.(pred .- target,
+                                                     Ref(Val(:huber)),
+                                                     delta) .* weights
         reconstructed = sum(elementwise) / sum(weights)
-        loss = WflowRoutingGNN.peak_weighted_huber_loss(pred, target, u, s; delta,
-                                                       lambda = 2.0f0, gamma = 1.0f0,
-                                                       w_max = 4.0f0)
+        loss = WflowRoutingGNN.peak_weighted_loss(pred, target, u, s;
+                                                  loss_type = :huber,
+                                                  delta,
+                                                  lambda = 2.0f0,
+                                                  gamma = 1.0f0,
+                                                  w_max = 4.0f0)
         @test reconstructed ≈ loss
     end
 

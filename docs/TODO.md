@@ -144,20 +144,20 @@ the weight itself is already loss-agnostic — `_peak_weight_and_score`
 w_max`; only `_huber_element` is the swappable kernel. This is a factoring, not a
 rewrite.
 
-- [ ] Factor the per-element kernel out of the weighting
+- [x] Factor the per-element kernel out of the weighting
       (`_element_loss(r, Val(loss_type), delta)` for `:mse` / `:huber`, extensible
       to `:mae`/`:logcosh` later); rename `peak_weighted_huber_loss` →
       `peak_weighted_loss` taking `loss_type` (+ `delta`, Huber-only).
-- [ ] Collapse the `step_loss` `:huber`/`else` fork into one weighted path for
+- [x] Collapse the `step_loss` `:huber`/`else` fork into one weighted path for
       both q and h, so `loss_type` and the peak params (`λ, γ, w_max`) become two
       **orthogonal** axes.
-- [ ] **Fix the latent reduction-scale bug while here:** today `λ=0` reduces with
+- [x] **Fix the latent reduction-scale bug while here:** today `λ=0` reduces with
       `sum` but `λ>0` normalises weights to sum 1 (weighted **mean**) — so enabling
       peak-weighting silently rescales the loss by ~1/N. **Always normalise**
       (weighted mean, weights sum to 1) so `λ=0` reduces *exactly* to plain
       mean-MSE/mean-Huber (LR & `h_loss_weight` transfer unchanged) and `λ` is a
       pure shape knob. May also explain the E5 `c_peak`/`w_mean` split at δ=1.
-- [ ] No breaking config change: `loss_type` stays; `peak_lambda/gamma/w_max`
+- [x] No breaking config change: `loss_type` stays; `peak_lambda/gamma/w_max`
       become applicable to any `loss_type`; document `peak_delta` as Huber-only.
       Existing `λ=0` / `mse` configs reproduce current behaviour after the
       normalise fix.

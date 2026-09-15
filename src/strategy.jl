@@ -167,12 +167,16 @@ end
 # Loss
 # ---------------------------------------------------------------------------
 
-function _huber_element(residual::Real, delta::Real)
+function _element_loss(residual::Real, ::Val{:mse}, delta::Real)
+    return residual * residual
+end
+
+function _element_loss(residual::Real, ::Val{:huber}, delta::Real)
     abs_r = abs(residual)
     return abs_r <= delta ? 0.5f0 * abs_r * abs_r : delta * (abs_r - 0.5f0 * delta)
 end
 
-# Broadcast helper for `peak_weighted_huber_loss`'s node-varying threshold/scale.
+# Broadcast helper for `peak_weighted_loss`'s node-varying threshold/scale.
 # `u`/`s` given as a plain `AbstractVector` (length `nvar`, one scalar per
 # channel) is reshaped to a `(nvar, 1)` column so it broadcasts across all
 # `nnode` nodes; given as an `AbstractMatrix` of shape `(nvar, nnode)`, it
@@ -242,31 +246,69 @@ function _resolve_peak_thresholds(peak_stats, q_target::AbstractMatrix, h_target
 end
 
 """
-    peak_weighted_huber_loss(pred, target, u, s; delta = 1.0, lambda = 0.0,
-                             gamma = 1.0, w_max = 4.0) -> Float32
+    peak_weighted_loss(pred, target, u, s; loss_type = :huber, delta = 1.0,
+                       lambda = 0.0, gamma = 1.0, w_max = 4.0) -> Float32
 
-Peak-weighted Huber loss. `u`/`s` may be given either as:
+Peak-weighted elementwise loss with selectable kernel (`:mse` or `:huber`).
+`u`/`s` may be given either as:
 - a plain `AbstractVector` of length `nvar` — one scalar peak threshold /
   scale per channel, applied uniformly across all nodes; or
 - an `AbstractMatrix` of shape `(nvar, nnode)` — a distinct per-**node**
   threshold / scale for each channel (the `u_i`/`s_i` of the design notes),
   e.g. precomputed by [`peak_node_stats`](@ref) on the training split.
+
+Weighting is always normalised as a weighted mean (weights sum to 1), including
+`lambda = 0` where this reduces exactly to plain mean MSE / mean Huber.
 """
-function peak_weighted_huber_loss(pred::AbstractMatrix, target::AbstractMatrix,
-                                 u::Union{AbstractVector,AbstractMatrix},
-                                 s::Union{AbstractVector,AbstractMatrix};
-                                 delta::Real = 1.0f0, lambda::Real = 0.0f0,
-                                 gamma::Real = 1.0f0, w_max::Real = 4.0f0)
+function peak_weighted_loss(pred::AbstractMatrix, target::AbstractMatrix,
+                            u::Union{AbstractVector,AbstractMatrix},
+                            s::Union{AbstractVector,AbstractMatrix};
+                            loss_type::Symbol = :huber,
+                            delta::Real = 1.0f0,
+                            lambda::Real = 0.0f0,
+                            gamma::Real = 1.0f0,
+                            w_max::Real = 4.0f0)
     size(pred) == size(target) || throw(ArgumentError("pred and target must have the same shape"))
+    loss_type in (:mse, :huber) ||
+        throw(ArgumentError("loss_type must be :mse or :huber"))
     residual = pred .- target
+
     if lambda > 0f0
         row_weights, _ = _peak_weight_and_score(target, u, s, lambda, gamma, w_max)
-        total_w = sum(row_weights)
-        row_weights = total_w > 0f0 ? row_weights ./ total_w : row_weights
     else
         row_weights = _same_device_fill(pred, 1f0, size(pred); T = Float32)
     end
-    return Float32(sum(_huber_element.(residual, delta) .* row_weights))
+    total_w = sum(row_weights)
+    row_weights = total_w > 0f0 ? row_weights ./ total_w : row_weights
+
+    elementwise = if loss_type == :huber
+        _element_loss.(residual, Ref(Val(:huber)), delta)
+    else
+        _element_loss.(residual, Ref(Val(:mse)), delta)
+    end
+    return Float32(sum(elementwise .* row_weights))
+end
+
+"""
+    peak_weighted_huber_loss(pred, target, u, s; delta = 1.0, lambda = 0.0,
+                             gamma = 1.0, w_max = 4.0) -> Float32
+
+Backward-compatible wrapper around [`peak_weighted_loss`](@ref) with
+`loss_type = :huber`.
+"""
+function peak_weighted_huber_loss(pred::AbstractMatrix, target::AbstractMatrix,
+                                  u::Union{AbstractVector,AbstractMatrix},
+                                  s::Union{AbstractVector,AbstractMatrix};
+                                  delta::Real = 1.0f0,
+                                  lambda::Real = 0.0f0,
+                                  gamma::Real = 1.0f0,
+                                  w_max::Real = 4.0f0)
+    peak_weighted_loss(pred, target, u, s;
+                       loss_type = :huber,
+                       delta = delta,
+                       lambda = lambda,
+                       gamma = gamma,
+                       w_max = w_max)
 end
 
 """
@@ -315,18 +357,19 @@ function estimate_peak_loss_parameters(target::AbstractMatrix;
 end
 
 """
-    peak_loss_summary(pred, target, u, s; delta = 1.0, lambda = 0.0,
-                      gamma = 1.0, w_max = 4.0) -> NamedTuple
+    peak_loss_summary(pred, target, u, s; loss_type = :huber, delta = 1.0,
+                      lambda = 0.0, gamma = 1.0, w_max = 4.0) -> NamedTuple
 
 Tier-1 diagnostic summary for peak-focused loss tuning. Returns the weighted
-Huber loss together with mean and max peak weights, which helps the operator
+loss together with mean and max peak weights, which helps the operator
 judge whether the loss is disproportionately emphasising the high-end tail.
 `u`/`s` accept the same per-channel-vector or per-node-matrix shapes as
-[`peak_weighted_huber_loss`](@ref).
+[`peak_weighted_loss`](@ref).
 """
 function peak_loss_summary(pred::AbstractMatrix, target::AbstractMatrix,
                           u::Union{AbstractVector,AbstractMatrix},
                           s::Union{AbstractVector,AbstractMatrix};
+                          loss_type::Symbol = :huber,
                           delta::Real = 1.0f0, lambda::Real = 0.0f0,
                           gamma::Real = 1.0f0, w_max::Real = 4.0f0)
     size(pred) == size(target) || throw(ArgumentError("pred and target must have the same shape"))
@@ -335,23 +378,26 @@ function peak_loss_summary(pred::AbstractMatrix, target::AbstractMatrix,
     else
         weights = _same_device_fill(pred, 1f0, size(pred); T = Float32)
     end
-    loss = peak_weighted_huber_loss(pred, target, u, s;
-                                   delta = delta, lambda = lambda,
-                                   gamma = gamma, w_max = w_max)
+    loss = peak_weighted_loss(pred, target, u, s;
+                              loss_type = loss_type,
+                              delta = delta,
+                              lambda = lambda,
+                              gamma = gamma,
+                              w_max = w_max)
     return (; loss = Float32(loss), w_mean = Float32(mean(weights)),
             w_max = Float32(maximum(weights)), w_min = Float32(minimum(weights)))
 end
 
 """
-    peak_weight_matrix(target, u, s; delta = 1.0, lambda = 0.0, gamma = 1.0,
+    peak_weight_matrix(target, u, s; lambda = 0.0, gamma = 1.0,
                        w_max = 4.0) -> (weights::Matrix{Float32}, mask::BitMatrix)
 
 Forward-only (non-differentiable) computation of the per-element peak weights
-`w_i,t` used by [`peak_weighted_huber_loss`](@ref), plus a `BitMatrix` marking
+`w_i,t` used by [`peak_weighted_loss`](@ref), plus a `BitMatrix` marking
 which elements are "peak" cells (`target` strictly above the `u`/`s` threshold,
 i.e. `peak_score > 0`). `u`/`s` accept the same per-channel `AbstractVector` or
 per-node `AbstractMatrix` (`(nvar, nnode)`) shapes as
-[`peak_weighted_huber_loss`](@ref).
+[`peak_weighted_loss`](@ref).
 
 Intended for Tier-1 loss-tuning diagnostics (`C_peak`, weight summary stats,
 `RMSE_high`/`MAE_high`) where a separate, mutation-free computation of the
@@ -380,11 +426,17 @@ Multi-step rollout loss on a collated batch (`Vector{GNNGraph}` of length
 At each step `t`:
 1. Optionally add Gaussian noise (std `strategy.noise_scale`) to state/forcing.
 2. Forward the model to get `pred_state`.
-3. Accumulate MSE (or, when `strategy.loss_type == :huber`, the peak-weighted
-   Huber loss) against `batch[t+1].ndata.state`.
+3. Accumulate the peak-weighted loss against `batch[t+1].ndata.state`, with
+    elementwise kernel selected by `strategy.loss_type` (`:mse` or `:huber`).
 4. Carry `pred_state` forward; ground-truth forcing from `batch[t+1]` is used next.
 
-`peak_stats`, used only when `strategy.loss_type == :huber`, supplies the
+`peak_stats` supplies the per-node peak threshold/scale (`u_i`/`s_i`) used by
+the peak-weighting path.
+
+When `strategy.loss_type == :huber`, `strategy.peak_delta` is the Huber
+transition point. For `:mse`, `peak_delta` is ignored.
+
+`peak_stats`, when supplied, provides
 per-node peak threshold/scale (`u_i`/`s_i`) precomputed on the training split
 by [`peak_node_stats`](@ref): a `NamedTuple` `(q = (u, s), h = (u, s))` with
 each `u`/`s` an `AbstractVector{Float32}` of length `n_nodes` (the node count
@@ -394,9 +446,8 @@ the per-node vector is tiled across the batch dimension to match the
 block-diagonal node concatenation order used by `GNNGraphs.batch`. When
 `nothing` (the default), a coarse per-batch fallback threshold
 (`maximum(abs, target)`, shared by every node) is used instead — this keeps
-the `:huber` path usable without precomputed stats, but the per-node stats are
-what the design notes call `u_i`/`s_i` and should be supplied for real
-training runs.
+the path usable without precomputed stats, but the per-node stats are what the
+design notes call `u_i`/`s_i` and should be supplied for real training runs.
 
 Returns mean loss across all steps.
 """
@@ -430,29 +481,26 @@ function loss_function(model      ::WflowGNN,
     end
 
     function step_loss(pred_state, target)
-        if strategy.loss_type == :huber
-            q_target = target[1:1, :]
-            h_target = target[2:2, :]
-            q_pred = pred_state[1:1, :]
-            h_pred = pred_state[2:2, :]
-            q_u, q_s, h_u, h_s = Flux.ignore_derivatives() do
-                _resolve_peak_thresholds(peak_stats, q_target, h_target)
-            end
-            q_loss = peak_weighted_huber_loss(q_pred, q_target, q_u, q_s;
-                                              delta = strategy.peak_delta,
-                                              lambda = strategy.peak_lambda,
-                                              gamma = strategy.peak_gamma,
-                                              w_max = strategy.peak_w_max)
-            h_loss = strategy.h_loss_weight * peak_weighted_huber_loss(h_pred, h_target, h_u, h_s;
-                                                                       delta = strategy.peak_delta,
-                                                                       lambda = strategy.peak_lambda,
-                                                                       gamma = strategy.peak_gamma,
-                                                                       w_max = strategy.peak_w_max)
-            return q_loss + h_loss
-        else
-            return Flux.mse(pred_state[1:1, :], target[1:1, :]) +
-                   strategy.h_loss_weight * Flux.mse(pred_state[2:2, :], target[2:2, :])
+        q_target = target[1:1, :]
+        h_target = target[2:2, :]
+        q_pred = pred_state[1:1, :]
+        h_pred = pred_state[2:2, :]
+        q_u, q_s, h_u, h_s = Flux.ignore_derivatives() do
+            _resolve_peak_thresholds(peak_stats, q_target, h_target)
         end
+        q_loss = peak_weighted_loss(q_pred, q_target, q_u, q_s;
+                                    loss_type = strategy.loss_type,
+                                    delta = strategy.peak_delta,
+                                    lambda = strategy.peak_lambda,
+                                    gamma = strategy.peak_gamma,
+                                    w_max = strategy.peak_w_max)
+        h_loss = strategy.h_loss_weight * peak_weighted_loss(h_pred, h_target, h_u, h_s;
+                                                              loss_type = strategy.loss_type,
+                                                              delta = strategy.peak_delta,
+                                                              lambda = strategy.peak_lambda,
+                                                              gamma = strategy.peak_gamma,
+                                                              w_max = strategy.peak_w_max)
+        return q_loss + h_loss
     end
 
     loss = 0f0

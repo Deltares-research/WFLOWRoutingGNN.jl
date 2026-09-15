@@ -452,8 +452,8 @@ function peak_epoch_diagnostics(model::WflowGNN, batch::Vector{<:GNNGraph},
             qw, qmask = peak_weight_matrix(q_target, q_u, q_s; lambda, gamma, w_max = wmax)
             hw, hmask = peak_weight_matrix(h_target, h_u, h_s; lambda, gamma, w_max = wmax)
 
-            q_elem = _huber_element.(q_pred0 .- q_target, delta) .* qw
-            h_elem = _huber_element.(h_pred0 .- h_target, delta) .* hw
+            q_elem = _element_loss.(q_pred0 .- q_target, Ref(Val(:huber)), delta) .* qw
+            h_elem = _element_loss.(h_pred0 .- h_target, Ref(Val(:huber)), delta) .* hw
 
             total_mass = sum(q_elem) + strategy.h_loss_weight * sum(h_elem)
             peak_mass  = sum(q_elem[qmask]) + strategy.h_loss_weight * sum(h_elem[hmask])
@@ -511,8 +511,8 @@ function peak_epoch_diagnostics(model::WflowGNN, batch::Vector{<:GNNGraph},
             pred   = m(g, state, forcing, static, forcing_next)
             q_pred = pred[1:1, :]
             h_pred = pred[2:2, :]
-            q_res  = _huber_element.(q_pred .- q_target, delta) .* q_w
-            h_res  = _huber_element.(h_pred .- h_target, delta) .* h_w
+            q_res  = _element_loss.(q_pred .- q_target, Ref(Val(:huber)), delta) .* q_w
+            h_res  = _element_loss.(h_pred .- h_target, Ref(Val(:huber)), delta) .* h_w
             qm = any(q_mask) ? sum(q_res[q_mask]) : 0f0
             hm = any(h_mask) ? sum(h_res[h_mask]) : 0f0
             qm + strategy.h_loss_weight * hm
