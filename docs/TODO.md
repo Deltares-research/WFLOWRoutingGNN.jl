@@ -38,6 +38,19 @@ River discharge cannot be negative.
 
 ## 1. Distribution- & physics-aware feature scaling
 
+**Scope note (2026-09-15, from E4/E5 downstream pattern).** Poorer downstream
+skill has two causes: (a) **physical flux accumulation** — the MB layer routes in
+physical m³/s ([src/gnn.jl](../src/gnn.jl#L281)), so the outlet's `net_flux` is a
+small residual on a huge accumulated through-flow, and the per-step amplification
+(`amp≈12`, `mb_gain≈22`) is δ- and loss-invariant (E5). (b) **heavy-tailed statics**
+under plain z-score make the outlet a feature-space outlier. These items fix **(b)
+only** (better-conditioned downstream nodes → tighter bounded/1-step fit + NSE p10
+tail); they do **NOT** touch (a) — q/h stay linear-z-score so `amp` is unchanged
+and the **outlet rollout explosion is out of scope here** (that's E6 / q≥0 floor).
+Rescaling q/h to attack `amp` (per-node σ, or θ*=σ_h/(dt·σ_q), see
+[notes/mass_balance_stability_notes.md](notes/mass_balance_stability_notes.md) §4)
+is a separate, MB-invasive item — not below.
+
 - [ ] Keep physics channels (`q`, `h`, `inwater`) on **linear z-score** (nonlinear
       transforms would need inverting inside the MB layer).
 - [ ] Area-normalise `river_inwater` like `river_q` (fold into `σ/μ_inwater`).
@@ -89,6 +102,74 @@ Remaining:
 - **Note:** fixes rollout-depth instability & training time, *not* the epoch-2
   single-step blow-up (that is items 1 & 2). Pair it with them.
 - Touch: `src/strategy.jl`, `src/training.jl`, config.
+
+## 3c. Hybrid pushforward + teacher-forced 1-step loss
+
+**Motivation (E6).** Pure `pushforward` is the first lever to lower `amp`
+(11.0→6.4) and give a finite fixed-horizon rollout, but it supervises **only the
+detached endpoint**, so in deep curriculum phases the 1-step map and `river_h` are
+never directly trained — E6 regressed `val_q_1step` 0.0144→0.165 and `river_h`
+spatial NSE −7.9→−96. Decouple long-horizon self-correction from 1-step/h
+supervision with a convex combination:
+`L = α·L_pushforward + (1−α)·L_1step`.
+
+- [ ] Add the **teacher-forced** 1-step term: for `t in 1:k`, forward from the
+      **ground-truth** state `batch[t].ndata.state` (NOT the rolled/detached
+      state — that is the `:detached` signal, which E6 showed is a net negative,
+      `amp`↑12.7) and score `step_loss` vs `targets[t]`. O(1) tape, no BPTT; reuse
+      the existing `one_step_loss` machinery ([src/strategy.jl](../src/strategy.jl#L516)).
+- [ ] Only active when `rollout_grad = :pushforward`; keep `step_loss` shared so
+      `loss_type` / `h_loss_weight` / peak params apply consistently to both terms.
+- [ ] Config knob `pushforward_tf_weight = (1−α)`, **default 0.0** (= today's pure
+      pushforward exactly; no behaviour change for existing configs). Prefer a
+      weight over a new enum value so `α=1` continuously recovers pure pushforward.
+- [ ] Validate with an **α sweep** on the E6-pushforward base
+      (`pushforward_tf_weight ∈ {0.0, 0.25, 0.5, 0.75}`). Win condition: recover
+      `val_q_1step`/`river_h` toward full_bptt **while** `amp` stays ~6.4 and the
+      fixed-horizon RMSE stays finite (i.e. break the E6 trade-off).
+- **Prerequisite** for the deeper curriculum schedule (extending `steps` toward
+  `eval_horizon`): decoupled 1-step/h supervision is what lets the deep phases be
+  front-loaded without starving h.
+- Touch: `src/strategy.jl` (`loss_function` pushforward branch), `src/training.jl`
+  / `TrainingStrategy` (the weight field), config.
+
+## 3d. Make peak-weighting applicable to any loss type
+
+Currently the peak weight is entangled with Huber: `step_loss`
+([src/strategy.jl](../src/strategy.jl#L423)) forks `:huber` → peak-weighted vs
+`else` → **plain unweighted `Flux.mse`**, so peak-weighting can only be tested
+*through* Huber (confounded by the δ-tail effect that E4/E5 showed dominates). But
+the weight itself is already loss-agnostic — `_peak_weight_and_score`
+([src/strategy.jl](../src/strategy.jl#L197)) depends only on `target, u, s, λ, γ,
+w_max`; only `_huber_element` is the swappable kernel. This is a factoring, not a
+rewrite.
+
+- [ ] Factor the per-element kernel out of the weighting
+      (`_element_loss(r, Val(loss_type), delta)` for `:mse` / `:huber`, extensible
+      to `:mae`/`:logcosh` later); rename `peak_weighted_huber_loss` →
+      `peak_weighted_loss` taking `loss_type` (+ `delta`, Huber-only).
+- [ ] Collapse the `step_loss` `:huber`/`else` fork into one weighted path for
+      both q and h, so `loss_type` and the peak params (`λ, γ, w_max`) become two
+      **orthogonal** axes.
+- [ ] **Fix the latent reduction-scale bug while here:** today `λ=0` reduces with
+      `sum` but `λ>0` normalises weights to sum 1 (weighted **mean**) — so enabling
+      peak-weighting silently rescales the loss by ~1/N. **Always normalise**
+      (weighted mean, weights sum to 1) so `λ=0` reduces *exactly* to plain
+      mean-MSE/mean-Huber (LR & `h_loss_weight` transfer unchanged) and `λ` is a
+      pure shape knob. May also explain the E5 `c_peak`/`w_mean` split at δ=1.
+- [ ] No breaking config change: `loss_type` stays; `peak_lambda/gamma/w_max`
+      become applicable to any `loss_type`; document `peak_delta` as Huber-only.
+      Existing `λ=0` / `mse` configs reproduce current behaviour after the
+      normalise fix.
+- **Caveat (evidence):** peak-weighting is a **weak** lever (E5 `w_mean≈1.0005`;
+  loss-shape is orthogonal to the rollout instability). Value here is
+  **cleanliness + unblocking a clean peak-weight test on MSE** (free of the Huber
+  δ-tail confound) and three independent axes (`loss_type × peak-weight ×
+  rollout_grad`), NOT a stability fix. Do not expect peak-weighted MSE to move
+  stability.
+- Touch: `src/strategy.jl` (`_huber_element` → `_element_loss`,
+  `peak_weighted_huber_loss` → `peak_weighted_loss`, `step_loss`), any callers /
+  tests referencing `peak_weighted_huber_loss`.
 
 ---
 

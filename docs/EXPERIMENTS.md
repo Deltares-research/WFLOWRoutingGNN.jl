@@ -27,17 +27,259 @@ Experiment configs live under `experiments/`. Newest at the top.
 > benign daterange trajectory, Huber (δ0.5) is ~150× worse than MSE at the same LR
 > (outlet 286× vs 1.9×), most likely from Huber's **δ linear tail** under-
 > penalising large errors (NOT the peak-weight λ, which is per-node-relative and
-> nearly dormant). So: **LR sets the attractor (+∞ ↔ 0); loss doesn't fix the
-> stiff-anchor instability but Huber actively worsens the benign rollout; prefer
+> nearly dormant).
+>
+> **δ-sweep conclusion (E5) — loss-retuning workstream CLOSED.** Sweeping the
+> Huber knee `δ ∈ {0.25…5}` confirms **both** halves: the benign-path
+> over-prediction shrinks **monotonically** as δ→5 and asymptotes to MSE (δ-tail
+> mechanism real), **but** the rollout instability is untouched — all 32
+> fixed-horizon anchors diverge at every δ, and the amplification is **δ-invariant**
+> (`amp ≈ 11.2–12.0`, `mb_gain = 21.9` in all cells, = E1). The loss moves *where*
+> the benign trajectory sits, not *whether* the rollout is stable. **The loss knob
+> is exhausted; use MSE and attack the rollout operator directly.** So: **LR sets
+> the attractor (+∞ ↔ 0); loss shapes the benign-path magnitude only; prefer
 > MSE.** Neither loss yields a faithful rollout. **Always cross-check a "bounded"
 > fixed-horizon RMSE against the daterange pred-vs-true magnitude and pooled
 > PBIAS/peak_ratio** — both a collapse-to-zero and an explosive over-prediction
-> can look "finished". The rollout-path discrepancy is *resolved* (2026-09-07, not
-> a code bug): the fixed-horizon metric is faithful; it's the model that's
-> unstable. The standing priority is a **training-time error-correction mechanism**
-> (rollout **noise injection**, detached/pushforward rollout, longer curriculum) —
-> **NOT** `mb_theta < 1` (already swept: θ=1 is the most stable, lower θ diverges)
-> and **not** loss retuning.
+> can look "finished" (and divergent magnitudes are chaotic: E4 & E5 same config
+> gave outlet 286× vs 23,557× — trust trends, not single ratios). The rollout-path
+> discrepancy is *resolved* (2026-09-07, not a code bug): the fixed-horizon metric
+> is faithful; it's the model that's unstable. The standing priority is a
+> **training-time error-correction mechanism** (rollout-gradient mode —
+> detached/pushforward, **E6**; **noise injection**; longer curriculum) — **NOT**
+> `mb_theta < 1` (already swept: θ=1 is the most stable, lower θ diverges) and
+> **not** loss retuning (exhausted by E5).
+>
+> **E6 — the mechanism IS attackable (the positive result).** The rollout-gradient
+> mode is the first lever to move the learnable q→h amplification: `pushforward`
+> lowers `amp` 11.03→**6.37** (invariant to loss/δ/θ before this), is the **only**
+> mode with a **finite** fixed-horizon RMSE (61,092 vs full_bptt 9.4e18), and wins
+> every benign-rollout metric (pooled KGE 0.876, per-node NSE p10 0.85) at 2.4×
+> lower cost. Confirms the instability is **autoregressive exposure bias**, fixable
+> in *what state the model trains on*, not the objective. Caveats: it only **damps**
+> (frac_gt2 still 1.0), and it **regresses the 1-step fit + `river_h`** (endpoint-
+> only supervision). `detached` is a net negative; drop it. Next: fix the
+> pushforward h/1-step regression (hybrid loss) and stack **pushforward × noise ×
+> q≥0 floor**.
+
+## E6 — rollout-gradient strategy comparison — `sava_small_v081_e6_rollout_grad`
+
+**NAME:** `sava_small_v081_e6_rollout_grad` (box search, 3 cells, one knob:
+`train.rollout_grad ∈ {full_bptt, detached, pushforward}`; everything else held
+at the stable E1 **MSE** baseline — `lr_start = 1.3457e-4`, `mb_theta = 1.0`,
+`noise_scale = 0`, full `[1,2,5,8,10]` curriculum, 8×64 / mlp 2, 75,009 params,
+250 epochs). First head-to-head of the training-time error-correction lever that
+E4/E5 identified as the real priority (loss/θ are NOT stability levers). Config:
+[experiments/sava_small_v081_e6_rollout_grad/config.toml](../experiments/sava_small_v081_e6_rollout_grad/config.toml).
+
+**SUMMARY — the first lever that moves the mechanism.** `pushforward` is the
+**first intervention in the entire E-series to lower `amp`** (11.03 → **6.37**,
+−42%) — a quantity that was invariant to loss (E5), δ (E5), and, by design, θ=1.
+It is also the **only** cell with a **finite** final fixed-horizon RMSE (61,092 vs
+full_bptt 9.4e18, detached 1.26e21) and the best fixed-horizon selection score
+(`best_val_rmse` **1,196** — ~100× better than full_bptt's 120,903, ~1000× better
+than detached's 1.18e6). On the benign daterange rollout it is the best by every
+pooled and per-node measure (pooled KGE **0.876**, peak_ratio **1.086**, per-node
+`river_q` NSE median **0.980** / p10 **0.85** / mean **0.95**, outlet 0.93×), and
+it trains **2.4× faster** (2.03 h vs 4.98 h) thanks to O(1) tape depth. **This
+confirms the E4/E5→E6 thesis: the rollout instability is autoregressive exposure
+bias, attackable via the rollout gradient / state exposure — NOT via the
+objective.** Caveats: (1) it only **damps** the stiff-anchor divergence (~13
+orders: final peak_ratio 1.7e5 vs 9.4e18), it does **not cure** it —
+`frac_gt2 = 1.0` still holds for all three modes; (2) it badly **regresses the
+teacher-forced 1-step fit and `river_h`** (classic pushforward trade-off, below).
+`detached` is a **net negative**; `full_bptt` validates as the E1 control.
+
+**The three modes (best-epoch, daterange outlet = node1_r1, true max 122.4):**
+
+| mode | q_1step | outlet ratio | pooled KGE | pooled peak_ratio | per-node NSE med / p10 / mean | **final_amp** | best_val_rmse | final fixed RMSE | final peak_ratio | train |
+|---|---|---|---|---|---|---|---|---|---|---|
+| full_bptt *(=E1 control)* | 0.0144 | 1.29× | 0.681 | 1.43 | 0.976 / 0.77 / 0.91 | 11.03 | 120,903 | **Inf** (9.4e18) | 9.4e18 | 4.98 h |
+| detached | 0.0182 | 1.32× | −0.054 | 2.84 | 0.968 / 0.64 / 0.60 | **12.71** | 1.18e6 | **Inf** (1.26e21) | 1.26e21 | 4.67 h |
+| **pushforward** | **0.165** | 0.93× | **0.876** | **1.086** | **0.980 / 0.85 / 0.95** | **6.37** | **1,196** | **61,092** | **1.67e5** | **2.03 h** |
+| *E1 (MSE ref)* | *0.0144* | *1.9×* | *0.577* | *2.29* | *0.973 / 0.772 / 0.884* | *11.5* | *—* | *Inf (1e23)* | *—* | *—* |
+
+**IMPROVEMENTS.**
+- **Rollout gradient IS a lever on `amp` (evidence — the key result).**
+  Pushforward `final_amp` 6.37 vs full_bptt 11.03 and the E1–E5 invariant ~11–12.
+  `mb_gain` is still pinned at 21.946 (that term is geometry, not learnable), but
+  the learnable q→h amplification finally responds — to *state exposure*, exactly
+  where E5 predicted the mechanism lives.
+- **Pushforward: first finite fixed-horizon rollout (evidence).** Final
+  `val_rmse` 61,092 (finite) and final peak_ratio 1.7e5 vs full_bptt's Inf /
+  9.4e18 — the stiff anchors are damped ~13 orders of magnitude. `best_val_rmse`
+  1,196 makes it the first model whose selection metric is O(10³), not O(10⁵–10⁶).
+- **Best benign-rollout skill and cheapest (evidence).** Pooled KGE 0.876 /
+  peak_ratio 1.086, per-node NSE p10 0.85 (all best), and 2.4× faster wall-clock
+  (no gradient checkpointing — `use_ckpt` is full_bptt-only). A rare
+  accuracy-and-speed win.
+- **Control validates the harness (evidence).** full_bptt reproduces E1: `amp`
+  11.03 ≈ 11.5, `val_q_1step` 0.0144 = 0.0144, pooled KGE 0.681 (E1 0.577),
+  outlet 1.29× (E1 1.9×, within the chaotic band per E5). Harness unchanged.
+
+**DEGRADED / FAILURE MODES.**
+- **Pushforward wrecks the teacher-forced 1-step fit and `river_h` (the
+  trade-off).** `val_q_1step` 0.165 (11× worse than full_bptt's 0.0144),
+  `val_h_1step` 8.58 (10× worse), spatial `river_h` NSE median **−96.3** (vs
+  full_bptt −7.9). It supervises only the endpoint after a detached k-1 roll, so
+  in deep curriculum phases it never directly constrains the 1-step map — q-rollout
+  robustness is bought at the cost of the 1-step operator and h everywhere.
+  **Note the 1-step q metric is a *poor proxy*:** pushforward has the worst
+  `val_q_1step` yet the *best* q rollout — select on rollout/spatial, not 1-step.
+- **Still not truly stable.** `frac_gt2 = 1.0` for all three — every mode still has
+  anchors that exceed 2× at some point. Pushforward damps but does not eliminate
+  the stiff-anchor divergence.
+- **`detached` is a net negative (evidence).** Worse 1-step (0.0182), worse pooled
+  KGE (−0.054), worst spatial mean (0.60), and `amp` actually *rises* to 12.71 —
+  the myopic truncation-length-1 gradient exposes the model to its own drifted
+  state but gives no multi-step credit assignment, so it never learns to correct
+  the compounding amplification. Barely faster than full_bptt. Drop it.
+- **`river_h` remains broken in all modes** (spatial NSE −7.9 / −38.6 / −96.3);
+  the q-side gains do not transfer to h, and pushforward makes h worse.
+
+**HYPOTHESES.**
+- **The instability is autoregressive exposure bias — CONFIRMED as attackable
+  (evidence).** E5 closed the loss (amp δ-invariant); E6 opens the rollout gradient
+  (amp mode-dependent, pushforward −42%). The lever that moves the mechanism is
+  *what state the model is trained on*, not *how errors are penalised*. This is the
+  central positive result of the E-series.
+- **Endpoint-only supervision under-constrains the 1-step map and h (evidence +
+  interpretation).** Pushforward's finite-rollout gain and its 1-step/h regression
+  are two faces of the same mechanism (supervise the drifted endpoint, not the
+  step). Suggests a **hybrid**: pushforward endpoint term + a teacher-forced 1-step
+  term to recover the 1-step operator and h. Speculation until tested.
+- **Damped-not-cured ⇒ pushforward is necessary but not sufficient (interpretation).**
+  `frac_gt2` still 1.0 implies a residual instability that a single lever won't
+  close; pair pushforward with noise injection and the q≥0 floor.
+
+**RECOMMENDATIONS.**
+1. **Adopt `pushforward` as the base rollout-gradient mode.** First lever to move
+   `amp` and the first finite fixed-horizon rollout; best benign-rollout skill and
+   2.4× cheaper. Make it the new baseline for the stability workstream.
+2. **Fix the pushforward 1-step/`river_h` regression** — highest-priority follow-up.
+   Try a **hybrid loss** (pushforward endpoint term + teacher-forced 1-step term),
+   or restrict pushforward to the deeper curriculum phases only (keep steps=1–2
+   teacher-forced). Goal: keep `amp`↓ and finite rollout while recovering
+   `val_q_1step` and h.
+3. **Drop `detached`** — a dead end (myopic gradient, `amp` rises, worse across the
+   board).
+4. **Stack the remaining levers on the pushforward base** now that it works:
+   (a) rollout **noise injection** (`noise_scale > 0`), (b) **q ≥ 0** propagating-
+   state floor, (c) the distribution/scaling conditioning fixes (TODO §1) for the
+   downstream nodes. Natural next experiment: **pushforward × noise_scale**.
+5. **Selection-metric caveat:** `val_q_1step` is a poor proxy under pushforward
+   (worst 1-step, best rollout) — select and report on rollout/spatial/fixed-horizon
+   metrics, not the teacher-forced 1-step.
+
+## E5 — peak-Huber δ (knee) sweep — `sava_small_v081_e5_delta_sweep`
+
+**NAME:** `sava_small_v081_e5_delta_sweep` (box search, 5 cells, one knob:
+`train.strategy.peak_delta ∈ {0.25, 0.5, 1.0, 2.0, 5.0}`; everything else held at
+the stable E1/E4 baseline — `loss_type = "huber"`, `peak_lambda = 2`,
+`peak_w_max = 4`, hand-set `lr_start = 1.3457e-4`, `mb_theta = 1.0`,
+`noise_scale = 0`, full `[1,2,5,8,10]` curriculum, 8×64 / mlp 2, 75,009 params,
+250 epochs). Tests the **E4 δ-tail hypothesis**: with residuals in normalized
+σ≈1 space, `δ = 0.5` puts the extreme-cell errors in Huber's *linear* regime,
+giving a weaker restoring gradient than MSE's quadratic; raising δ should push
+Huber back toward MSE. Config:
+[experiments/sava_small_v081_e5_delta_sweep/config.toml](../experiments/sava_small_v081_e5_delta_sweep/config.toml).
+
+**SUMMARY.** **Both halves of the hypothesis confirmed, and the workstream is now
+closed.** (1) On the benign daterange rollout the outlet over-prediction shrinks
+**monotonically as δ grows**, converging toward MSE at `δ = 5` — the δ-tail
+mechanism is real, so E4's `δ = 0.5` really was too soft on the tail. (2) But δ
+**does not fix the instability**: every cell's 32 fixed-horizon anchors still
+diverge (`frac_gt2 = 1.0`, final RMSE 1e12–1e25), and the intrinsic amplification
+is **δ-invariant** (`final_amp ≈ 11.2–12.0`, `final_mb_gain = 21.946` to 4 s.f.
+in *all* five cells, identical to E1). The best the loss knob can do (δ=5 ≈ MSE)
+merely reproduces E1, which was already unstable. **This decisively closes the
+loss-retuning workstream** (the "if even large δ still diverges" branch of the
+E5 plan): the loss shapes the benign-path over-prediction but is orthogonal to
+the rollout-instability mechanism. Teacher-forced 1-step is strong and
+δ-invariant throughout (`val_q_1step` 0.0136–0.0150, spatial `river_q` NSE
+median 0.93–0.97).
+
+**The δ ladder (daterange outlet = node1_r1, true max 122.4):**
+
+| δ | outlet pred/true | pooled peak_ratio | pooled PBIAS | pooled KGE | per-node NSE median / p10 / mean | final_amp | fixed-horizon |
+|---|---|---|---|---|---|---|---|
+| 0.25 | **32.9×** | 25.3 | +116% | −5.06 | 0.962 / −1.19 / −5.5 | 11.52 | all diverge (1e16) |
+| 0.5 (=E4) | **23,557×** | 23,693 | +39,189% | −4,751 | 0.965 / −2,755 / −3.0e6 | 11.17 | all diverge (1e13) |
+| 1.0 | **862×** | 11,417 | +9,763% | −1,634 | 0.971 / −2.17 / −3.6e5 | 11.71 | all diverge (1e16) |
+| 2.0 | **92.7×** | 160 | +243% | −16.0 | 0.929 / −3.16 / −44.8 | 11.97 | all diverge (1e25) |
+| 5.0 | **2.72×** | 3.48 | +93% | **−0.90** | 0.964 / **−0.62** / **+0.04** | 11.76 | all diverge (1e16) |
+| *E1 (MSE ref)* | *1.9×* | *2.29* | *+46%* | *0.577* | *0.973 / 0.772 / 0.884* | *11.5* | *all diverge (1e23)* |
+
+From `δ = 0.5` upward the trend is cleanly monotone (23,557 → 862 → 92.7 → 2.72),
+asymptoting to — but never quite reaching — the E1 MSE quality (δ=5 outlet 2.72×
+& KGE −0.90 vs MSE 1.9× & KGE 0.577). `δ = 5` also has the best per-node tail
+(p10 −0.62, mean +0.04, closest to E1), and its `amp`/`mb_gain` (11.76 / 21.9)
+match E1 exactly, confirming `δ = 5 ≈ MSE`.
+
+**IMPROVEMENTS.**
+- **δ-tail mechanism CONFIRMED (evidence).** The monotone δ=0.5→5 collapse of the
+  outlet over-prediction (23,557× → 2.72×) and pooled peak_ratio (23,693 → 3.48)
+  is exactly the E4 prediction: larger δ ⇒ more of the residual range is
+  quadratic ⇒ stronger restoring gradient on large errors ⇒ less benign-path
+  over-shoot. The `δ ≥ 1` sub-trend (862 → 92.7 → 2.72) is the cleanest evidence
+  because peak-weighting is inert there (see caveat), isolating pure δ.
+- **1-step fit preserved and δ-invariant** — `val_q_1step` 0.0136–0.0150 across
+  the whole ladder; the loss reshaping never harms next-step skill.
+
+**DEGRADED / FAILURE MODES.**
+- **δ does NOT stabilise the rollout (the decisive negative result).** All 5
+  cells: `frac_gt2 = 1.0` (every anchor diverges every epoch), final fixed-horizon
+  RMSE 1e12–1e25, final peak_ratio 1e13–1e25. No δ keeps the stiff anchors
+  bounded. Even the MSE-like `δ = 5` only *matches* E1, which is itself unstable.
+- **Amplification is completely δ-invariant** — `final_amp` 11.2–12.0 and
+  `final_mb_gain = 21.946` (identical to 4 s.f.) in all cells. The actual q→h
+  amplification that drives the blow-up does not respond to the loss knob at all.
+  This is the single most decisive datum: **the loss cannot touch the mechanism.**
+- **δ = 0.5 produces negative outlet flow** (daterange `river_q_pred` min −1,061
+  m³/s) — the same unphysical-flow pathology as E3, reinforcing the un-floored
+  propagating-state gap (TODO physics-floor item).
+
+**HYPOTHESES.**
+- **Loss-retuning is orthogonal to rollout stability — WORKSTREAM CLOSED
+  (evidence).** Two independent signals: (a) the δ-invariant `amp`/`mb_gain`, and
+  (b) uniform anchor divergence across the whole ladder. The loss moves *where the
+  benign trajectory sits* (over-prediction magnitude) but not *whether the rollout
+  is stable*. Consistent with DECISIONS.md (stability lives in the rollout
+  operator, not the objective) and with E4's disentangling conclusion.
+- **Divergent-magnitude is chaotic / not reproducible (evidence, caveat).** E4 and
+  E5-hps2 are the **same config** (Huber δ0.5, same LR) yet the outlet ratio is
+  286× (E4) vs 23,557× (E5) — an ~80× spread between identical configs. The
+  absolute magnitude at the unstable end is seed/chaos-sensitive; **only the
+  qualitative δ trend is trustworthy**, not the precise ratios. (This also
+  retro-cautions the E4 "286×" number.)
+- **Peak-weighting went inert for δ ≥ 1 (anomaly, needs an engineering check —
+  speculation).** `final_c_peak`/`final_w_mean`/`final_w_max` = 0.57/1.03/4.0 for
+  δ∈{0.25,0.5} but **0/1/1** for δ∈{1,2,5}, splitting exactly at δ=1 even though
+  `peak_lambda`/`peak_w_max` are fixed across all cells and the peak weight is
+  δ-independent by construction ([src/preprocess.jl](../src/preprocess.jl#L468),
+  [src/strategy.jl](../src/strategy.jl#L199)). This is a *diagnostic-reporting*
+  split at worst (final-batch had no peak content) or a δ/peak-weight coupling at
+  worst; it does not change the conclusion (the δ≥1 sub-trend is monotone with
+  peak-weighting uniformly off), but it warrants a look before any future
+  peak-weighted run. Flag for engineering.
+
+**RECOMMENDATIONS.**
+1. **Close the loss-retuning workstream.** δ (and, from E4, λ) cannot stabilise
+   the rollout; `amp`/`mb_gain` are loss-invariant. Do not run a full λ/γ/w_max
+   peak sweep until the rollout is stable. If a loss must be picked now, **use MSE**
+   (δ=5 only asymptotes toward it and stays slightly worse).
+2. **The priority is training-time error correction against exposure bias** — this
+   is exactly what **E6** (`rollout_grad ∈ {full_bptt, detached, pushforward}`,
+   already prepped) tests. E5 is the negative control that makes E6 the clear next
+   step: the mechanism (`amp`) is untouched by the loss, so it must be attacked in
+   the rollout gradient / state exposure, not the objective.
+3. **Enforce `q ≥ 0` on the propagating state** — δ=0.5's −1,061 m³/s outlet flow
+   re-confirms the un-floored decoder/state-q gap (TODO physics-floor item).
+4. **Engineering: check the δ≥1 peak-weight-inert anomaly** (c_peak→0, w_max→1 at
+   δ=1) before the next peak-weighted run.
+5. **Report metric caveat:** at the unstable end, absolute over-prediction ratios
+   are chaotic (E4 286× vs E5 23,557× same config). Trust trends and the
+   δ-invariant `amp`/`mb_gain`, not single divergent magnitudes.
 
 ## E4 — single Huber baseline at a sane LR — `sava_small_v081_e4_huber_baseline`
 
