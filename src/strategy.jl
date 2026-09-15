@@ -25,6 +25,7 @@ mutable struct TrainingStrategy
     durations      :: Vector{Int}
     noise_scale    :: Float32
     h_loss_weight  :: Float32
+    pushforward_tf_weight :: Float32
     loss_type      :: Symbol
     peak_delta     :: Float32
     peak_lambda    :: Float32
@@ -40,6 +41,7 @@ Construct a `TrainingStrategy`. `current_steps` is initialised to `steps[1]`.
 """
 function TrainingStrategy(steps, durations, noise_scale = 0;
                           h_loss_weight = 1f0,
+                          pushforward_tf_weight = 0f0,
                           loss_type = :mse,
                           peak_delta = 1f0,
                           peak_lambda = 0f0,
@@ -65,11 +67,14 @@ function TrainingStrategy(steps, durations, noise_scale = 0;
         throw(ArgumentError("peak_gamma must be positive"))
     peak_w_max >= 1 ||
         throw(ArgumentError("peak_w_max must be >= 1"))
+    0 <= pushforward_tf_weight <= 1 ||
+        throw(ArgumentError("pushforward_tf_weight must be in [0, 1]"))
     steps_v = convert(Vector{Int}, steps)
     TrainingStrategy(steps_v,
                      convert(Vector{Int}, durations),
                      Float32(noise_scale),
                      Float32(h_loss_weight),
+                     Float32(pushforward_tf_weight),
                      loss_type,
                      Float32(peak_delta),
                      Float32(peak_lambda),
@@ -84,6 +89,7 @@ function Base.show(io::IO, s::TrainingStrategy)
     println(io, "  durations      : ", s.durations)
     println(io, "  noise_scale    : ", s.noise_scale)
     println(io, "  h_loss_weight  : ", s.h_loss_weight)
+    println(io, "  pushforward_tf_weight : ", s.pushforward_tf_weight)
     println(io, "  loss_type      : ", s.loss_type)
     println(io, "  peak_delta     : ", s.peak_delta)
     println(io, "  peak_lambda    : ", s.peak_lambda)
@@ -103,6 +109,7 @@ function save_training_strategy(path::String, s::TrainingStrategy)
         "steps"       => s.steps,
         "durations"   => s.durations,
         "noise_scale" => Float64(s.noise_scale),
+        "pushforward_tf_weight" => Float64(s.pushforward_tf_weight),
         "loss_type"   => String(s.loss_type),
         "peak_delta"  => Float64(s.peak_delta),
         "peak_lambda" => Float64(s.peak_lambda),
@@ -125,6 +132,7 @@ function load_training_strategy(path::String)
         convert(Vector{Int}, d["steps"]),
         convert(Vector{Int}, d["durations"]),
         Float32(get(d, "noise_scale", 0.0));
+        pushforward_tf_weight = Float32(get(d, "pushforward_tf_weight", 0.0)),
         loss_type = Symbol(get(d, "loss_type", "mse")),
         peak_delta = Float32(get(d, "peak_delta", 1.0)),
         peak_lambda = Float32(get(d, "peak_lambda", 0.0)),
@@ -405,13 +413,14 @@ function loss_function(model      ::WflowGNN,
     rollout_grad in (:full_bptt, :pushforward, :detached) ||
         throw(ArgumentError("rollout_grad must be :full_bptt, :pushforward, or :detached"))
 
-    g_topo, state, forcings, forcings_next, targets = Flux.ignore_derivatives() do
+    g_topo, state, tf_states, forcings, forcings_next, targets = Flux.ignore_derivatives() do
         g    = batch[1]
         st   = g.ndata.state
+        tfs  = [batch[t].ndata.state       for t in 1:nsteps]
         fs   = [batch[t].ndata.forcing     for t in 1:nsteps]
         fsn  = [batch[t + 1].ndata.forcing for t in 1:nsteps]
         tgts = [batch[t + 1].ndata.state   for t in 1:nsteps]
-        g, st, fs, fsn, tgts
+        g, st, tfs, fs, fsn, tgts
     end
 
     use_ckpt = nsteps > 1 && rollout_grad == :full_bptt
@@ -479,7 +488,8 @@ function loss_function(model      ::WflowGNN,
         return loss / nsteps
     else
         # Pushforward: detach self-rolled states for the first nsteps-1 unroll
-        # steps, then supervise only the final endpoint step.
+        # steps, then supervise the final endpoint step. Optionally blend with
+        # a teacher-forced one-step term from ground-truth states.
         for t in 1:max(nsteps - 1, 0)
             forcing      = forcings[t]
             forcing_next = forcings_next[t]
@@ -500,7 +510,27 @@ function loss_function(model      ::WflowGNN,
             forcing  = forcing  .+ noise_scale .* randn(Float32, size(forcing))
         end
         pred_state = model(g_topo, state_in, forcing, static, forcing_next)
-        return step_loss(pred_state, targets[nsteps])
+        pf_loss = step_loss(pred_state, targets[nsteps])
+
+        tf_w = strategy.pushforward_tf_weight
+        if tf_w > 0f0
+            tf_loss = 0f0
+            for t in 1:nsteps
+                forcing      = forcings[t]
+                forcing_next = forcings_next[t]
+                state_tf = tf_states[t]
+                if noise_scale > 0f0
+                    state_tf = state_tf .+ noise_scale .* randn(Float32, size(state_tf))
+                    forcing  = forcing  .+ noise_scale .* randn(Float32, size(forcing))
+                end
+                pred_tf = model(g_topo, state_tf, forcing, static, forcing_next)
+                tf_loss += step_loss(pred_tf, targets[t])
+            end
+            tf_loss /= nsteps
+            return (1f0 - tf_w) * pf_loss + tf_w * tf_loss
+        end
+
+        return pf_loss
     end
 end
 

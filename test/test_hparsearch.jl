@@ -31,6 +31,7 @@ using WflowRoutingGNN
                     "steps" => [1, 2],
                     "durations" => [2, 2],
                     "noise_scale" => 0.0,
+                    "pushforward_tf_weight" => 0.25,
                     "loss_type" => "huber",
                     "peak_delta" => 0.7,
                     "peak_lambda" => 0.0,
@@ -69,6 +70,8 @@ using WflowRoutingGNN
         @test ts_a.strategy.peak_delta ≈ 0.7f0
         @test ts_a.strategy.peak_gamma ≈ 1.5f0
         @test ts_a.strategy.peak_w_max ≈ 3.0f0
+        @test ts_a.strategy.pushforward_tf_weight ≈ 0.25f0
+        @test ts_b.strategy.pushforward_tf_weight ≈ 0.25f0
         @test ts_a.upstream_points == 6
         @test ts_b.upstream_points == 6
         @test ts_a.rollout_grad == :detached

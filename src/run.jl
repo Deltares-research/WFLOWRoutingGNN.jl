@@ -107,6 +107,7 @@ function settings_from_config(d::AbstractDict, toml_dir::AbstractString)
         get(sd, "steps",       [1]),
         get(sd, "durations",   [td["epochs"]]),
         get(sd, "noise_scale", 0.0);
+        pushforward_tf_weight = get(sd, "pushforward_tf_weight", 0.0),
         loss_type = Symbol(get(sd, "loss_type", "mse")),
         peak_delta = get(sd, "peak_delta", 1.0),
         peak_lambda = get(sd, "peak_lambda", 0.0),

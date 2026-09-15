@@ -103,6 +103,7 @@ checkpoint_full_eval = false
 steps       = [1, 2, 4]
 durations   = [15, 15, 20]
 noise_scale = 0.0
+pushforward_tf_weight = 0.0
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -136,6 +137,12 @@ search_type = "box"
 
 # Learning rate
 "train.lr_start" = [1e-3, 5e-4]
+
+# Rollout-gradient mode and optional pushforward teacher-forced blend.
+# `train.strategy.pushforward_tf_weight` is only used when mode is pushforward.
+# Keep 0.0 for other modes.
+"train.rollout_grad" = ["full_bptt", "pushforward", "detached"]
+"train.strategy.pushforward_tf_weight" = [0.0, 0.25, 0.5, 0.75]
 
 # Training strategy — vary the entire schedule as an array of dicts so that
 # steps and durations are always kept consistent with each other.

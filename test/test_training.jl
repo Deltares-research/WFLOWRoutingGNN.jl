@@ -115,6 +115,7 @@ end
     @test s2.strategy.steps       == s.strategy.steps
     @test s2.strategy.durations   == s.strategy.durations
     @test s2.strategy.noise_scale == s.strategy.noise_scale
+    @test s2.strategy.pushforward_tf_weight == s.strategy.pushforward_tf_weight
     @test s2.device               == s.device
     @test s2.h_loss_scale         == s.h_loss_scale
     @test s2.phase_backoff_factor == s.phase_backoff_factor

@@ -243,6 +243,7 @@ function save_train_settings(path::String, s::TrainSettings)
             "steps"       => s.strategy.steps,
             "durations"   => s.strategy.durations,
             "noise_scale" => Float64(s.strategy.noise_scale),
+            "pushforward_tf_weight" => Float64(s.strategy.pushforward_tf_weight),
             "loss_type"   => String(s.strategy.loss_type),
             "peak_delta"  => Float64(s.strategy.peak_delta),
             "peak_lambda" => Float64(s.strategy.peak_lambda),
@@ -270,6 +271,7 @@ function load_train_settings(path::String)
         convert(Vector{Int}, sd["steps"]),
         convert(Vector{Int}, sd["durations"]),
         Float32(get(sd, "noise_scale", 0.0));
+        pushforward_tf_weight = Float32(get(sd, "pushforward_tf_weight", 0.0)),
         loss_type = Symbol(get(sd, "loss_type", "mse")),
         peak_delta = Float32(get(sd, "peak_delta", 1.0)),
         peak_lambda = Float32(get(sd, "peak_lambda", 0.0)),

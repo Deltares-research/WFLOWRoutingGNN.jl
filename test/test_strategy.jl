@@ -57,6 +57,13 @@ const ST_MODEL  = WflowGNN(ModelSettings(domain = "river", hidden_dim = 8, nlaye
         @test_throws ArgumentError TrainingStrategy([1], [3], -0.1)
     end
 
+    @testset "invalid pushforward_tf_weight throws" begin
+        @test_throws ArgumentError TrainingStrategy([1], [3]; pushforward_tf_weight = -0.1)
+        @test_throws ArgumentError TrainingStrategy([1], [3]; pushforward_tf_weight = 1.1)
+        @test TrainingStrategy([1], [3]; pushforward_tf_weight = 0.0) isa TrainingStrategy
+        @test TrainingStrategy([1], [3]; pushforward_tf_weight = 1.0) isa TrainingStrategy
+    end
+
     @testset "current_steps initialised to steps[1]" begin
         s = TrainingStrategy([2, 5], [10, 10])
         @test s.current_steps == 2
@@ -79,6 +86,7 @@ end
     @test s2.steps       == s.steps
     @test s2.durations   == s.durations
     @test s2.noise_scale == s.noise_scale
+    @test s2.pushforward_tf_weight == s.pushforward_tf_weight
     # current_steps is re-initialised to steps[1] on load
     @test s2.current_steps == s.steps[1]
 
@@ -389,6 +397,28 @@ end
         strat_3.current_steps = 2
         short_batch = [make_st_graph(), make_st_graph()]   # length 2, need >= 3
         @test_throws ArgumentError loss_function(ST_MODEL, short_batch, strat_3, ST_STATIC)
+    end
+
+    @testset "pushforward teacher-forced blend is active only in :pushforward" begin
+        strat_pf0 = TrainingStrategy([2], [10]; pushforward_tf_weight = 0.0)
+        strat_pf1 = TrainingStrategy([2], [10]; pushforward_tf_weight = 1.0)
+        strat_det0 = TrainingStrategy([2], [10]; pushforward_tf_weight = 0.0)
+        strat_det1 = TrainingStrategy([2], [10]; pushforward_tf_weight = 1.0)
+        for s in (strat_pf0, strat_pf1, strat_det0, strat_det1)
+            s.current_steps = 2
+        end
+
+        l_pf0 = loss_function(ST_MODEL, ST_BATCH, strat_pf0, ST_STATIC; rollout_grad = :pushforward)
+        l_pf1 = loss_function(ST_MODEL, ST_BATCH, strat_pf1, ST_STATIC; rollout_grad = :pushforward)
+        l_det0 = loss_function(ST_MODEL, ST_BATCH, strat_det0, ST_STATIC; rollout_grad = :detached)
+        l_det1 = loss_function(ST_MODEL, ST_BATCH, strat_det1, ST_STATIC; rollout_grad = :detached)
+
+        @test l_pf0 isa Float32
+        @test l_pf1 isa Float32
+        @test l_det0 isa Float32
+        @test l_det1 isa Float32
+        @test l_pf0 != l_pf1
+        @test l_det0 == l_det1
     end
 
 end

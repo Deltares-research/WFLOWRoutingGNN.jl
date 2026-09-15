@@ -113,14 +113,14 @@ spatial NSE −7.9→−96. Decouple long-horizon self-correction from 1-step/h
 supervision with a convex combination:
 `L = α·L_pushforward + (1−α)·L_1step`.
 
-- [ ] Add the **teacher-forced** 1-step term: for `t in 1:k`, forward from the
+- [x] Add the **teacher-forced** 1-step term: for `t in 1:k`, forward from the
       **ground-truth** state `batch[t].ndata.state` (NOT the rolled/detached
       state — that is the `:detached` signal, which E6 showed is a net negative,
       `amp`↑12.7) and score `step_loss` vs `targets[t]`. O(1) tape, no BPTT; reuse
       the existing `one_step_loss` machinery ([src/strategy.jl](../src/strategy.jl#L516)).
-- [ ] Only active when `rollout_grad = :pushforward`; keep `step_loss` shared so
+- [x] Only active when `rollout_grad = :pushforward`; keep `step_loss` shared so
       `loss_type` / `h_loss_weight` / peak params apply consistently to both terms.
-- [ ] Config knob `pushforward_tf_weight = (1−α)`, **default 0.0** (= today's pure
+- [x] Config knob `pushforward_tf_weight = (1−α)`, **default 0.0** (= today's pure
       pushforward exactly; no behaviour change for existing configs). Prefer a
       weight over a new enum value so `α=1` continuously recovers pure pushforward.
 - [ ] Validate with an **α sweep** on the E6-pushforward base

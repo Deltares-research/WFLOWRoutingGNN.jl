@@ -131,6 +131,12 @@ h_loss_scale = "absolute"
 # rollout that an offline (untrained) range test cannot foresee.
 phase_backoff_factor = 0.5
 
+# Rollout gradient mode:
+# - "full_bptt"   : backprop through the full rollout chain.
+# - "pushforward" : detach the self-rolled prefix and supervise endpoint.
+# - "detached"    : detach every incoming state and supervise each step.
+rollout_grad = "full_bptt"
+
 # Compute device: "cpu" or "gpu"
 device = "cpu"
 
@@ -174,3 +180,10 @@ durations   = [15, 15, 20]
 # Standard deviation of Gaussian noise injected into state/forcing inputs
 # during rollout steps (0.0 to disable)
 noise_scale = 0.0
+
+# Hybrid pushforward + teacher-forced blend weight.
+# Only used when rollout_grad = "pushforward":
+# L = (1 - w) * L_pushforward + w * L_teacher_forced_1step
+# where teacher-forced uses ground-truth input states at each step.
+# Default 0.0 keeps today's pure pushforward behavior exactly.
+pushforward_tf_weight = 0.0
