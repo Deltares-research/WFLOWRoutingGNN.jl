@@ -158,6 +158,20 @@ end
         @test all(isfinite, out)
     end
 
+    @testset "mass-balance forward floors propagated q to non-negative" begin
+        m_floor = deepcopy(m_base)
+        m_floor.decoder.weight .= 0f0
+        m_floor.decoder.bias   .= -100f0  # force large negative Δq at every node
+
+        state_in = copy(g.ndata.state)
+        state_in[1:1, :] .= 0.1f0
+        out = m_floor(g, state_in, g.ndata.forcing, static, g.ndata.forcing)
+
+        # With pq=2, μq=0, σq=1 in this fixture, physical floor at 0 maps to q_norm=0.
+        @test all(out[1:1, :] .>= 0f0)
+        @test maximum(abs, out[1:1, :]) <= 1f-6
+    end
+
     @testset "gradient flows through the augmented decoder" begin
         gs = gradient(m_aug) do model
             sum(model(g, g.ndata.state, g.ndata.forcing, static, g.ndata.forcing))

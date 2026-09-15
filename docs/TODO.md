@@ -22,12 +22,12 @@ River discharge cannot be negative.
   `fixed_horizon_metrics` reconstructs its reported q directly from `q_norm`
   **without** a floor ([src/rollout.jl](../src/rollout.jl#L483)) — hence E3's
   negative anchor/daterange q.
-- [ ] Floor the **propagating** predicted `river_q` (the decoder/state q, not
+- [x] Floor the **propagating** predicted `river_q` (the decoder/state q, not
       just the internal h-path copy) so negative flow cannot feed the next step —
       e.g. `softplus`/`relu`/`max(·,0)` on the reconstructed absolute flow, chosen
       so it does not break the MB water-balance derivation of `river_h` or its
       gradients.
-- [ ] Floor the reported q in `fixed_horizon_metrics`
+- [x] Floor the reported q in `fixed_horizon_metrics`
       ([src/rollout.jl](../src/rollout.jl#L483)) consistently with the state floor.
 - [ ] Verify it does not mask instability (a floored-but-still-collapsing model
       should still be detectable via PBIAS / peak_ratio, not hidden by clamping).

@@ -481,6 +481,7 @@ function fixed_horizon_metrics(model::WflowGNN, fh::FixedHorizonEval; device::Sy
     # (N·B, H) block order → (N, B, H) → (N, H, B)
     pred_q_norm = permutedims(reshape(q_norm, fh.N, fh.B, H), (1, 3, 2))
     pred_q_phys = (pred_q_norm .* fh.q_sigma .+ fh.q_mu) .* reshape(fh.q_postscale, fh.N, 1, 1)
+    pred_q_phys = max.(0f0, pred_q_phys)
 
     err = pred_q_phys .- fh.true_q_phys
     rmse_q = sqrt(mean(abs2, err))

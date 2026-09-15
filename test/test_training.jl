@@ -298,6 +298,33 @@ end
         @test maximum(abs, q_phys .- pred_states[1, :, :]) < 1f-3
     end
 
+    @testset "fixed_horizon_metrics reports floored physical q" begin
+        fh1 = build_fixed_horizon_eval(TR_DATASET.val, TR_STATIC, TR_STATS, "river",
+                                       TR_POSTSCALE; horizon = 2, n_anchors = 2)
+        @test fh1.B >= 1
+
+        model_neg = deepcopy(TR_MODEL)
+        model_neg.decoder.weight[1, :] .= 0f0
+        model_neg.decoder.bias[1] = -100f0
+
+        state = copy(fh1.states0)
+        q_pred = Matrix{Float32}(undef, TR_N_NODES * fh1.B, fh1.horizon)
+        for k in 1:fh1.horizon
+            f_t    = fh1.forcing[:, :, k]
+            f_next = fh1.forcing[:, :, min(k + 1, fh1.horizon)]
+            state  = model_neg(fh1.gB, state, f_t, fh1.static, f_next)
+            q_pred[:, k] = state[fh1.qi, :]
+        end
+        pred_q_norm = permutedims(reshape(q_pred, TR_N_NODES, fh1.B, fh1.horizon), (1, 3, 2))
+        q_phys_raw = (pred_q_norm .* fh1.q_sigma .+ fh1.q_mu) .* reshape(fh1.q_postscale, TR_N_NODES, 1, 1)
+        @test minimum(q_phys_raw) < 0f0
+        q_phys_floor = max.(0f0, q_phys_raw)
+        rmse_expected = Float32(sqrt(mean(abs2, q_phys_floor .- fh1.true_q_phys)))
+
+        m1 = fixed_horizon_metrics(model_neg, fh1; device = :cpu)
+        @test m1.rmse_q ≈ rmse_expected atol = 1f-5
+    end
+
 end
 
 # ---------------------------------------------------------------------------

@@ -330,6 +330,24 @@ function (l::MassBalanceLayer)(g            ::GNNGraph,
     return (h_phys_new ./ ph .- l.μ_h) ./ l.σ_h
 end
 
+# Floor predicted discharge in physical space and map back to normalized q.
+# This keeps river_q physically non-negative in the propagated model state.
+function _floor_q_norm_nonnegative(l::MassBalanceLayer,
+                                   g::GNNGraph,
+                                   q_norm::AbstractMatrix)
+    n     = g.num_nodes
+    n_per = length(l.postscale_q)
+    n_rep = n ÷ n_per
+    pq = if n_rep == 1
+        reshape(l.postscale_q, 1, n)
+    else
+        reshape(repeat(l.postscale_q, n_rep), 1, n)
+    end
+    q_phys = pq .* (q_norm .* l.σ_q .+ l.μ_q)
+    q_phys = max.(0f0, q_phys)
+    return (q_phys ./ pq .- l.μ_q) ./ l.σ_q
+end
+
 # Number of physics-derived features appended to the decoder input when
 # `mb_augment_decoder` is enabled (see `mb_decoder_features`).
 const MB_DECODER_FEATURES = 2
@@ -904,7 +922,7 @@ function (m::WflowGNN)(g::GNNGraph,
         else
             Δ = m.decoder(h)
         end
-        q_new = state[1:1, :] .+ Δ
+        q_new = _floor_q_norm_nonnegative(m.mass_balance, g, state[1:1, :] .+ Δ)
         h_new = m.mass_balance(g, state, forcing, forcing_next, q_new)
         return vcat(q_new, h_new)
     end
