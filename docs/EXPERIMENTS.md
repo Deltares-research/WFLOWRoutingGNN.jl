@@ -4,6 +4,138 @@ Experiment configs live under `experiments/`. Newest at the top.
 
 ---
 
+# PROPOSED
+
+> **E7–E10 — the pushforward follow-up series (post-E6).** Four independent
+> one-knob sweeps, each a clean single-variable delta from the **E6 winner**
+> (`rollout_grad = pushforward`, MSE, `mb_theta = 1.0`, stable E1
+> `lr_start = 1.3457e-4`, full `[1,2,5,8,10]×50` curriculum, 8×64 / mlp 2, 250
+> epochs). Purpose: exploit the levers E6 opened — pushforward damped `amp`
+> 11.03→6.37 and gave the first finite fixed-horizon RMSE, but (a) still has
+> `frac_gt2 = 1.0` and (b) regresses the 1-step fit + `river_h`. These four attack
+> those two residual failures on separate axes. **Configs are written and
+> validated (parse + box-expand); not yet run.**
+>
+> **Run/parallelism note.** Within a config the box cells run **sequentially** on
+> one GPU job; the four configs are fully independent → submit as **4 separate
+> Slurm jobs** to run in parallel. Rough cost (anchored to E6 pushforward =
+> 2.03 h/cell): E7 ~10 h (5 cells), E8 ~11 h (3 cells, deep windows dominate),
+> E9 ~8 h (4 cells), E10 ~8 h (4 cells); ~37 GPU-h total, ~11 h wall-clock if all
+> parallel. **Suggested order: E9 first** — its winning `pushforward_tf_weight` is
+> the base you'd want under E7 (noise) and E8 (deep schedule), both of which
+> otherwise starve `river_h`.
+
+## E9 (proposed) — hybrid-loss (`pushforward_tf_weight`) sweep — `sava_small_v081_e9_hybrid_sweep`
+
+**NAME:** box search, 4 cells, one knob
+`train.strategy.pushforward_tf_weight ∈ {0.0, 0.25, 0.5, 0.75}` (= `1−α`).
+Config:
+[experiments/sava_small_v081_e9_hybrid_sweep/config.toml](../experiments/sava_small_v081_e9_hybrid_sweep/config.toml).
+
+**PURPOSE — break the E6 trade-off (the keystone experiment).** Pushforward won
+on stability but **wrecked** the teacher-forced 1-step fit and `river_h`
+(`val_q_1step` 0.0144→0.165; `river_h` NSE −7.94→−96.3) because it supervises
+**only** the rolled endpoint. The hybrid loss adds the missing term back:
+`L = α·L_pushforward(endpoint) + (1−α)·L_1step(ground-truth)`, where the config
+knob is `pushforward_tf_weight = (1−α)` (used only when `rollout_grad =
+pushforward`). The 1-step term is teacher-forced (ground-truth state), so it
+re-anchors the per-step / `river_h` fit **without** re-introducing BPTT depth.
+
+**WIN CONDITION.** Some `0 < (1−α) < 1` recovers `val_q_1step` and `river_h`
+toward the full_bptt level **while** `amp` stays ~6.4 and the fixed-horizon RMSE
+stays finite. That cell's `pushforward_tf_weight` becomes the base for E7/E8.
+
+**READ-OUT.** `val_q_1step` / `val_h_1step` / `river_h` NSE (recover?);
+`final_amp` (must NOT climb back toward 11); `fixed_horizon.{final_val_rmse
+finite, final_peak_ratio_frac_gt2}`; pooled KGE / peak_ratio + per-node NSE p10.
+Ideal = the **largest** `(1−α)` that keeps `amp ≈ 6.4` and RMSE finite.
+
+## E7 (proposed) — training-noise (input-perturbation) sweep — `sava_small_v081_e7_noise_sweep`
+
+**NAME:** box search, 5 cells, one knob
+`train.strategy.noise_scale ∈ {0.0, 0.01, 0.03, 0.1, 0.3}` (normalized, z-scored
+state units; `hps1 = 0` is the E6-pushforward control). Config:
+[experiments/sava_small_v081_e7_noise_sweep/config.toml](../experiments/sava_small_v081_e7_noise_sweep/config.toml).
+
+**PURPOSE — the most credible lever to move `frac_gt2` off 1.0.** Noise perturbs
+the supervised-endpoint input (and the detached prefix states) in normalized
+σ≈1 space, pushing the model toward a **contractive / lower-gain** fixed point.
+It **complements** pushforward on a different axis: pushforward gives narrow,
+**on**-trajectory coverage (the model's own rolled state); noise gives broad,
+**off**-trajectory coverage (random neighbourhoods of the truth). Together they
+should cover more of the state space the free rollout actually visits.
+
+**READ-OUT.** `final_amp` (below 6.37?); `fixed_horizon.{final_val_rmse finite,
+final_peak_ratio_frac_gt2}` — **the prize: does any level pull `frac_gt2` < 1.0?**;
+pooled KGE / pbias / peak_ratio + per-node NSE p10. **Expected cost:** noise
+blurs the sharp teacher-forced target, so `val_q_1step` / `river_h` likely
+**degrade** — that regression is E9's job, not noise's. 0.3 is a deliberate
+high-end bracket (likely swamps the signal).
+
+## E8 (proposed) — curriculum-schedule (rollout-depth) sweep — `sava_small_v081_e8_schedule_sweep`
+
+**NAME:** box search, 3 cells; whole `[train.strategy]` table replaced per cell
+(steps + durations kept mutually consistent, each dict sums to 250 epochs,
+pushforward + MSE + `tf_weight = 0` pinned). Deepest horizon 10 → 20 → 30
+(`nhz` 11 / 21 / 31). Config:
+[experiments/sava_small_v081_e8_schedule_sweep/config.toml](../experiments/sava_small_v081_e8_schedule_sweep/config.toml).
+
+**PURPOSE — exploit pushforward's cheap depth to close the train/eval horizon
+gap.** Pushforward differentiates only the endpoint, so its tape is O(1) in
+rollout depth — training to longer horizons costs ~linearly (forward only), with
+no BPTT memory blow-up. E6 trained to horizon 10 but **evaluates at 30**
+(`eval_horizon = 30`); `frac_gt2 = 1.0` is partly a **3× extrapolation** beyond
+the deepest training window. This sweep pushes the deepest phase up to the eval
+horizon.
+
+**READ-OUT.** `fixed_horizon.{final_val_rmse, final_peak_ratio,
+final_peak_ratio_frac_gt2}` — does training to horizon 30 cut the horizon-30
+over-shoot?; `final_amp` (deeper supervision may contract it further); pooled +
+per-node NSE p10. **Expected cost:** deep phases give the 1-step / `river_h`
+target less weight, so `river_h` may degrade — a natural **E8×E9 follow-up**
+(deep schedule + `pushforward_tf_weight > 0`) should protect it; here `tf_weight`
+is held at 0 so schedule is the only variable. **Caveat:** the horizon-30 cell's
+windows are ~3× longer → more GPU memory; may OOM at `batch_size = 8` and need a
+smaller batch (which would lengthen it further).
+
+## E10 (proposed) — peak-weight parameter sweep — `sava_small_v081_e10_peakweight_sweep`
+
+**NAME:** box search, 4 cells, one knob
+`train.strategy.peak_lambda ∈ {0.0, 1.0, 2.0, 4.0}` (`peak_gamma = 1`,
+`peak_w_max = 4` held). Config:
+[experiments/sava_small_v081_e10_peakweight_sweep/config.toml](../experiments/sava_small_v081_e10_peakweight_sweep/config.toml).
+
+**PURPOSE — a clean, orthogonal-axis test of the generic per-node peak-weighting
+lever**, now that it is decoupled from the loss kernel (`peak_weighted_loss` +
+`_element_loss` support both `:mse` and `:huber`). Per-node weight
+`w_i = min(1 + λ·peak_scoreᵢ^γ, w_max)`,
+`peak_scoreᵢ = max(0, (target − uᵢ)/sᵢ)`. Asks: with a clean quadratic kernel
+(no Huber δ-tail confound, which E5 showed dominates and destabilises), does
+up-weighting high-flow residuals improve peak metrics **without** harming the
+rollout?
+
+**⚠ WIRING CAVEAT.** Per-node peak stats (`uᵢ`/`sᵢ`) are computed **only** when
+`loss_type == :huber` ([src/run.jl](../src/run.jl) ~L674); under `mse` the loss
+silently falls back to a coarse per-batch threshold (not a valid per-node test).
+So E10 uses `loss_type = "huber"` with `peak_delta = 1000` — numerically
+**identical to MSE** across the O(1) normalized-residual range, while the
+`== :huber` gate still activates the per-node stats path. **Recommended fix
+(drops the workaround):** gate `peak_stats` on `loss_type == :huber ||
+peak_lambda > 0`.
+
+**EXPECTATION (managed).** E5 found peak-weighting is a **weak** lever
+(`w_mean ≈ 1.0005`; loss shape is largely orthogonal to the rollout
+instability). Framed as a clean orthogonal-axis exploration, **not** a stability
+fix. If `w_mean` stays ~1 here too, that **confirms** the lever is inert and
+closes it.
+
+**READ-OUT.** `peak_loss.{final_w_mean, final_w_max, final_c_peak,
+final_rmse_high}` (does the weight bite?); pooled / gauge peak_ratio, spatial
+FHV; `final_amp` + fixed-horizon finiteness (must NOT regress — any `amp` climb
+is a red flag); `val_q_1step` + per-node NSE p10.
+
+---
+
 # COMPLETED
 
 > **⚠ Cross-cutting finding from E1 + E2 + E3 + E4 (read before any

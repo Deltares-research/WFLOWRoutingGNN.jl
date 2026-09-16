@@ -480,6 +480,12 @@ function loss_function(model      ::WflowGNN,
         copy(x)
     end
 
+    noise_like(x) = Flux.ignore_derivatives() do
+        n = similar(x, Float32, size(x)...)
+        randn!(n)
+        n
+    end
+
     function step_loss(pred_state, target)
         q_target = target[1:1, :]
         h_target = target[2:2, :]
@@ -509,8 +515,8 @@ function loss_function(model      ::WflowGNN,
             forcing      = forcings[t]
             forcing_next = forcings_next[t]
             if noise_scale > 0f0
-                state   = state   .+ noise_scale .* randn(Float32, size(state))
-                forcing = forcing .+ noise_scale .* randn(Float32, size(forcing))
+                state   = state   .+ noise_scale .* noise_like(state)
+                forcing = forcing .+ noise_scale .* noise_like(forcing)
             end
             pred_state = use_ckpt ?
                 Flux.Zygote.checkpointed(model, g_topo, state, forcing, static, forcing_next) :
@@ -526,8 +532,8 @@ function loss_function(model      ::WflowGNN,
             forcing_next = forcings_next[t]
             state_in = detach_state(state)
             if noise_scale > 0f0
-                state_in = state_in .+ noise_scale .* randn(Float32, size(state_in))
-                forcing  = forcing  .+ noise_scale .* randn(Float32, size(forcing))
+                state_in = state_in .+ noise_scale .* noise_like(state_in)
+                forcing  = forcing  .+ noise_scale .* noise_like(forcing)
             end
             pred_state = model(g_topo, state_in, forcing, static, forcing_next)
             loss += step_loss(pred_state, targets[t])
@@ -543,8 +549,8 @@ function loss_function(model      ::WflowGNN,
             forcing_next = forcings_next[t]
             state_in = detach_state(state)
             if noise_scale > 0f0
-                state_in = state_in .+ noise_scale .* randn(Float32, size(state_in))
-                forcing  = forcing  .+ noise_scale .* randn(Float32, size(forcing))
+                state_in = state_in .+ noise_scale .* noise_like(state_in)
+                forcing  = forcing  .+ noise_scale .* noise_like(forcing)
             end
             pred_state = model(g_topo, state_in, forcing, static, forcing_next)
             state = detach_state(pred_state)
@@ -554,8 +560,8 @@ function loss_function(model      ::WflowGNN,
         forcing_next = forcings_next[nsteps]
         state_in = state
         if noise_scale > 0f0
-            state_in = state_in .+ noise_scale .* randn(Float32, size(state_in))
-            forcing  = forcing  .+ noise_scale .* randn(Float32, size(forcing))
+            state_in = state_in .+ noise_scale .* noise_like(state_in)
+            forcing  = forcing  .+ noise_scale .* noise_like(forcing)
         end
         pred_state = model(g_topo, state_in, forcing, static, forcing_next)
         pf_loss = step_loss(pred_state, targets[nsteps])
@@ -568,8 +574,8 @@ function loss_function(model      ::WflowGNN,
                 forcing_next = forcings_next[t]
                 state_tf = tf_states[t]
                 if noise_scale > 0f0
-                    state_tf = state_tf .+ noise_scale .* randn(Float32, size(state_tf))
-                    forcing  = forcing  .+ noise_scale .* randn(Float32, size(forcing))
+                    state_tf = state_tf .+ noise_scale .* noise_like(state_tf)
+                    forcing  = forcing  .+ noise_scale .* noise_like(forcing)
                 end
                 pred_tf = model(g_topo, state_tf, forcing, static, forcing_next)
                 tf_loss += step_loss(pred_tf, targets[t])
