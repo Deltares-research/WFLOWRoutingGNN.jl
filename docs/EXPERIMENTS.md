@@ -6,133 +6,30 @@ Experiment configs live under `experiments/`. Newest at the top.
 
 # PROPOSED
 
-> **E7–E10 — the pushforward follow-up series (post-E6).** Four independent
-> one-knob sweeps, each a clean single-variable delta from the **E6 winner**
-> (`rollout_grad = pushforward`, MSE, `mb_theta = 1.0`, stable E1
-> `lr_start = 1.3457e-4`, full `[1,2,5,8,10]×50` curriculum, 8×64 / mlp 2, 250
-> epochs). Purpose: exploit the levers E6 opened — pushforward damped `amp`
-> 11.03→6.37 and gave the first finite fixed-horizon RMSE, but (a) still has
-> `frac_gt2 = 1.0` and (b) regresses the 1-step fit + `river_h`. These four attack
-> those two residual failures on separate axes. **Configs are written and
-> validated (parse + box-expand); not yet run.**
+> **The planned post-E6 pushforward follow-up series (E7–E10) is COMPLETE.** No
+> single-knob sweep is queued. What the series settled: the boundedness win was the
+> always-on **q≥0 floor** (E7; noise was a weak/chaotic lever); deepening the
+> curriculum on pure pushforward was a **net negative** (E8, but confounded with
+> epoch budget); the hybrid loss recovered only the **teacher-forced** 1-step metric
+> and did NOT help the free rollout at acceptable cost (E9, tf=0.25 NOT adopted); and
+> per-node **peak-weighting is a closed lever** — even when the weight genuinely bit
+> (E10, λ=2 `w_mean` 1.37), it gave no reliable peak or rollout benefit and mildly
+> **worsened** the deployed rollout. **Working base stays pure pushforward
+> (`rollout_grad = pushforward`, `tf_weight = 0`, MSE, q≥0 floor, `mb_theta = 1`).**
 >
-> **Run/parallelism note.** Within a config the box cells run **sequentially** on
-> one GPU job; the four configs are fully independent → submit as **4 separate
-> Slurm jobs** to run in parallel. Rough cost (anchored to E6 pushforward =
-> 2.03 h/cell): E7 ~10 h (5 cells), E8 ~11 h (3 cells, deep windows dominate),
-> E9 ~8 h (4 cells), E10 ~8 h (4 cells); ~37 GPU-h total, ~11 h wall-clock if all
-> parallel. **Suggested order: E9 first** — its winning `pushforward_tf_weight` is
-> the base you'd want under E7 (noise) and E8 (deep schedule), both of which
-> otherwise starve `river_h`.
-
-## E9 (proposed) — hybrid-loss (`pushforward_tf_weight`) sweep — `sava_small_v081_e9_hybrid_sweep`
-
-**NAME:** box search, 4 cells, one knob
-`train.strategy.pushforward_tf_weight ∈ {0.0, 0.25, 0.5, 0.75}` (= `1−α`).
-Config:
-[experiments/sava_small_v081_e9_hybrid_sweep/config.toml](../experiments/sava_small_v081_e9_hybrid_sweep/config.toml).
-
-**PURPOSE — break the E6 trade-off (the keystone experiment).** Pushforward won
-on stability but **wrecked** the teacher-forced 1-step fit and `river_h`
-(`val_q_1step` 0.0144→0.165; `river_h` NSE −7.94→−96.3) because it supervises
-**only** the rolled endpoint. The hybrid loss adds the missing term back:
-`L = α·L_pushforward(endpoint) + (1−α)·L_1step(ground-truth)`, where the config
-knob is `pushforward_tf_weight = (1−α)` (used only when `rollout_grad =
-pushforward`). The 1-step term is teacher-forced (ground-truth state), so it
-re-anchors the per-step / `river_h` fit **without** re-introducing BPTT depth.
-
-**WIN CONDITION.** Some `0 < (1−α) < 1` recovers `val_q_1step` and `river_h`
-toward the full_bptt level **while** `amp` stays ~6.4 and the fixed-horizon RMSE
-stays finite. That cell's `pushforward_tf_weight` becomes the base for E7/E8.
-
-**READ-OUT.** `val_q_1step` / `val_h_1step` / `river_h` NSE (recover?);
-`final_amp` (must NOT climb back toward 11); `fixed_horizon.{final_val_rmse
-finite, final_peak_ratio_frac_gt2}`; pooled KGE / peak_ratio + per-node NSE p10.
-Ideal = the **largest** `(1−α)` that keeps `amp ≈ 6.4` and RMSE finite.
-
-## E7 (proposed) — training-noise (input-perturbation) sweep — `sava_small_v081_e7_noise_sweep`
-
-**NAME:** box search, 5 cells, one knob
-`train.strategy.noise_scale ∈ {0.0, 0.01, 0.03, 0.1, 0.3}` (normalized, z-scored
-state units; `hps1 = 0` is the E6-pushforward control). Config:
-[experiments/sava_small_v081_e7_noise_sweep/config.toml](../experiments/sava_small_v081_e7_noise_sweep/config.toml).
-
-**PURPOSE — the most credible lever to move `frac_gt2` off 1.0.** Noise perturbs
-the supervised-endpoint input (and the detached prefix states) in normalized
-σ≈1 space, pushing the model toward a **contractive / lower-gain** fixed point.
-It **complements** pushforward on a different axis: pushforward gives narrow,
-**on**-trajectory coverage (the model's own rolled state); noise gives broad,
-**off**-trajectory coverage (random neighbourhoods of the truth). Together they
-should cover more of the state space the free rollout actually visits.
-
-**READ-OUT.** `final_amp` (below 6.37?); `fixed_horizon.{final_val_rmse finite,
-final_peak_ratio_frac_gt2}` — **the prize: does any level pull `frac_gt2` < 1.0?**;
-pooled KGE / pbias / peak_ratio + per-node NSE p10. **Expected cost:** noise
-blurs the sharp teacher-forced target, so `val_q_1step` / `river_h` likely
-**degrade** — that regression is E9's job, not noise's. 0.3 is a deliberate
-high-end bracket (likely swamps the signal).
-
-## E8 (proposed) — curriculum-schedule (rollout-depth) sweep — `sava_small_v081_e8_schedule_sweep`
-
-**NAME:** box search, 3 cells; whole `[train.strategy]` table replaced per cell
-(steps + durations kept mutually consistent, each dict sums to 250 epochs,
-pushforward + MSE + `tf_weight = 0` pinned). Deepest horizon 10 → 20 → 30
-(`nhz` 11 / 21 / 31). Config:
-[experiments/sava_small_v081_e8_schedule_sweep/config.toml](../experiments/sava_small_v081_e8_schedule_sweep/config.toml).
-
-**PURPOSE — exploit pushforward's cheap depth to close the train/eval horizon
-gap.** Pushforward differentiates only the endpoint, so its tape is O(1) in
-rollout depth — training to longer horizons costs ~linearly (forward only), with
-no BPTT memory blow-up. E6 trained to horizon 10 but **evaluates at 30**
-(`eval_horizon = 30`); `frac_gt2 = 1.0` is partly a **3× extrapolation** beyond
-the deepest training window. This sweep pushes the deepest phase up to the eval
-horizon.
-
-**READ-OUT.** `fixed_horizon.{final_val_rmse, final_peak_ratio,
-final_peak_ratio_frac_gt2}` — does training to horizon 30 cut the horizon-30
-over-shoot?; `final_amp` (deeper supervision may contract it further); pooled +
-per-node NSE p10. **Expected cost:** deep phases give the 1-step / `river_h`
-target less weight, so `river_h` may degrade — a natural **E8×E9 follow-up**
-(deep schedule + `pushforward_tf_weight > 0`) should protect it; here `tf_weight`
-is held at 0 so schedule is the only variable. **Caveat:** the horizon-30 cell's
-windows are ~3× longer → more GPU memory; may OOM at `batch_size = 8` and need a
-smaller batch (which would lengthen it further).
-
-## E10 (proposed) — peak-weight parameter sweep — `sava_small_v081_e10_peakweight_sweep`
-
-**NAME:** box search, 4 cells, one knob
-`train.strategy.peak_lambda ∈ {0.0, 1.0, 2.0, 4.0}` (`peak_gamma = 1`,
-`peak_w_max = 4` held). Config:
-[experiments/sava_small_v081_e10_peakweight_sweep/config.toml](../experiments/sava_small_v081_e10_peakweight_sweep/config.toml).
-
-**PURPOSE — a clean, orthogonal-axis test of the generic per-node peak-weighting
-lever**, now that it is decoupled from the loss kernel (`peak_weighted_loss` +
-`_element_loss` support both `:mse` and `:huber`). Per-node weight
-`w_i = min(1 + λ·peak_scoreᵢ^γ, w_max)`,
-`peak_scoreᵢ = max(0, (target − uᵢ)/sᵢ)`. Asks: with a clean quadratic kernel
-(no Huber δ-tail confound, which E5 showed dominates and destabilises), does
-up-weighting high-flow residuals improve peak metrics **without** harming the
-rollout?
-
-**⚠ WIRING CAVEAT.** Per-node peak stats (`uᵢ`/`sᵢ`) are computed **only** when
-`loss_type == :huber` ([src/run.jl](../src/run.jl) ~L674); under `mse` the loss
-silently falls back to a coarse per-batch threshold (not a valid per-node test).
-So E10 uses `loss_type = "huber"` with `peak_delta = 1000` — numerically
-**identical to MSE** across the O(1) normalized-residual range, while the
-`== :huber` gate still activates the per-node stats path. **Recommended fix
-(drops the workaround):** gate `peak_stats` on `loss_type == :huber ||
-peak_lambda > 0`.
-
-**EXPECTATION (managed).** E5 found peak-weighting is a **weak** lever
-(`w_mean ≈ 1.0005`; loss shape is largely orthogonal to the rollout
-instability). Framed as a clean orthogonal-axis exploration, **not** a stability
-fix. If `w_mean` stays ~1 here too, that **confirms** the lever is inert and
-closes it.
-
-**READ-OUT.** `peak_loss.{final_w_mean, final_w_max, final_c_peak,
-final_rmse_high}` (does the weight bite?); pooled / gauge peak_ratio, spatial
-FHV; `final_amp` + fixed-horizon finiteness (must NOT regress — any `amp` climb
-is a red flag); `val_q_1step` + per-node NSE p10.
+> **Still OWED (not yet configured) — the real open work:**
+> 1. **Distribution/scaling fixes (TODO §1)** for downstream conditioning — the
+>    prime suspect for the persistent `river_h` failure (spatial NSE stuck ~−120)
+>    and the outlet-dominated rollout error. This is now the priority, not more
+>    loss/curriculum knobs.
+> 2. **Clean budget-controlled schedule study** (E8 follow-up): isolate fragmentation
+>    (horizon 10 in many short phases) vs depth (add deep phases holding ~50 epochs
+>    at steps=1), maybe a longer total budget.
+> 3. **Multi-seed confirmation** (≥3 seeds) of the levers currently within the seed
+>    band before relying on any of them — fixed-horizon RMSE for the pure-pf base is
+>    now replicated 4× at {9.3, 30.7, 95, 1558}, i.e. hopelessly seed-dominated.
+> 4. **Engineering:** gate `peak_stats` on `loss_type == :huber || peak_lambda > 0`
+>    (drops the E10 `peak_delta = 1000` workaround) if peak-weighting is ever revisited.
 
 ---
 
@@ -193,6 +90,515 @@ is a red flag); `val_q_1step` + per-node NSE p10.
 > only supervision). `detached` is a net negative; drop it. Next: fix the
 > pushforward h/1-step regression (hybrid loss) and stack **pushforward × noise ×
 > q≥0 floor**.
+>
+> **E7 — the q≥0 floor is the real boundedness win; noise is a weak, chaotic
+> lever (partial negative).** Two surprises from the noise sweep on the
+> pushforward base. **(1) The floor, not noise, did the heavy lifting.** `hps1`
+> (noise=0) is the E6-pushforward config unchanged *except* for the now-always-on
+> `_floor_q_norm_nonnegative` (src/gnn.jl); it moved `best_val_rmse` **1196 → 5.60**
+> and final fixed RMSE **61,092 → 95** (finite) — ~200–600×, well beyond E5's ~80×
+> chaotic band, so the floor is the driver (seed-confounded but too large for seed
+> alone). **(2) The hypothesised mechanism — noise lowers `amp` — is REJECTED:**
+> `amp` is flat at 6.8–7.5 across all five cells, uncorrelated with noise. Noise
+> *did* pull `frac_gt2` off 1.0, but only at 0.01 (0.844) and 0.1 (0.875), while
+> 0.03 **diverged** (final RMSE 1e13) and 0.3 stayed at 1.0 — a non-monotone
+> zig-zag = weak signal under seed chaos, not a dose-response. Noise mildly helps
+> benign skill (KGE 0.782→0.908, pbias 11.7→4.7 with dose) and the 1-step/h fit is
+> best at 0.1 (`val_q_1step` 0.109, `val_h_1step` 6.24), but `river_h` NSE stays
+> ~−93 — **noise does NOT fix the pushforward h/1-step regression** (that is E9's
+> job, as predicted). Standing read: adopt a **mild** noise (~0.05–0.1) as a cheap
+> regulariser, credit the **q≥0 floor** as the boundedness win to carry forward,
+> and treat `frac_gt2` gains as fragile until confirmed across seeds. Priority
+> stays **E9 (hybrid loss)** for the unresolved h/1-step regression.
+>
+> **E8 — deepening the curriculum on *pure* pushforward is a NET NEGATIVE.**
+> Pushing the deepest curriculum phase from horizon 10 → 20 → 30 (to close the
+> train/eval-horizon gap) **backfired**: `frac_gt2` got *worse* with depth
+> (0.75 → 0.875 → 1.0), final fixed RMSE degraded (9.3 → 15.7 → **3.6e6**), and the
+> cell trained *all the way to* horizon 30 still diverges at 30 — so the
+> hypothesis (train to eval horizon ⇒ close the gap) is **refuted**. Worse, depth
+> **destabilises pushforward training**: the horizon-30 cell logged **137
+> non-finite skips / 66 back-offs / max grad 1.2e16**, and the final models diverge
+> (val_rollout 416 @20, **3.9e13** @30). And it **starves the 1-step/`river_h`
+> map** even harder (val_h_1step 8.6 → 122 → 161). **⚠ CONFOUND — this sweep does
+> NOT cleanly isolate depth.** With a fixed 250-epoch budget, deeper = more phases
+> = fewer epochs each; the `steps=1` teacher-forced budget was **halved** (50 → 25)
+> to make room, and **all three best checkpoints land in the `steps=1` phase**
+> (epochs 18/10/22 — before any deep rollout training). So (a) the 1-step/`river_h`
+> starvation is at least as much a **shallow-budget** effect as a depth effect, and
+> (b) the apparent "skill improves with depth" is **misattributed** — those
+> checkpoints never saw deep training, so it is shallow-phase/seed variance, not a
+> depth benefit. What IS cleanly depth-driven: the horizon-30 **gradient
+> explosions** (137 skips / 66 back-offs / max grad 1.2e16) and diverging final
+> models. **Conclusion: on pure pushforward, deepening as-designed is a net
+> negative — but a clean depth test (holding the shallow budget fixed) is still
+> owed; run E9 first, then a proper schedule study.** (Seed note: this control got
+> `frac_gt2 = 0.75` vs E7's identical-config 1.0 — reconfirms `frac_gt2` is
+> seed-chaotic.) Priority stays **E9**.
+>
+> **E9 — the hybrid loss fixes the *teacher-forced* 1-step metric, but that does
+> NOT carry to the free rollout (the deflating keystone result).** Sweeping
+> `pushforward_tf_weight = (1−α) ∈ {0,.25,.5,.75}` (adds a teacher-forced 1-step
+> term to the endpoint-only pushforward loss) recovers the **teacher-forced**
+> `val_q_1step` (0.152→0.017 at tf=0.25, ≈ full_bptt) and `val_h_1step` (9.34→1.55)
+> monotonically and strongly. **But those are one-step, ground-truth-fed errors —
+> not deployed skill.** In the actual free-rollout validation timeseries (the thing
+> that gets plotted) the tf=0.25 gain nearly evaporates: outlet `river_q` RMSE
+> 13.30→12.27 (−8%, plausibly within the seed band), MAE −27% and peak ratio
+> 0.71→0.86 are the only clear wins and they are **outlet-only**; upstream gauges
+> are a wash or slightly worse (node152 +39%), and rollout `river_h` is **mixed to
+> worse** (outlet RMSE 3.91→6.40, +64%). So the E6 1-step/`river_h` regression is
+> **not** meaningfully fixed where it matters, and the 3.3× wall-clock cost buys
+> little. The genuine, seed-robust findings survive: (1) the low-amp pushforward
+> solution is **lost the instant any tf is added** — `amp` jumps 7.7→**13.5**;
+> (2) `tf ≥ 0.5` is **catastrophic** — over-prediction (outlet 0.71→1.26, pbias
+> 6.8→20.4) → fixed-horizon RMSE **1e6→1e31**; (3) `amp` **decouples from rollout
+> stability** under hybrid training, undercutting E6's "amp is the mechanism" story.
+> **Revised verdict: tf=0.25 is NOT worth adopting on this single-seed evidence** —
+> the improvement is a teacher-forced-metric artifact plus a modest outlet-only q
+> gain at 3.3× cost and worse outlet h. **Pure pushforward stays the base.** If
+> pursued, tf=0.25 needs a multi-seed run proving the outlet peak/MAE gain is real
+> and not seed noise. Lesson: judge this loss on **free-rollout** timeseries, never
+> on `val_*_1step`.
+>
+> **E10 — peak-weighting is a CLOSED lever (the series-ending null).** Sweeping the
+> per-node `peak_lambda ∈ {0,1,2,4}` on the pushforward base finally made the weight
+> **bite** (λ=2: `w_mean` 1.37, `c_peak` 0.996 — vs E5's inert 1.0005), so this is a
+> real "weighting does not help" result, not a dormant-lever artifact. `amp` is dead
+> flat (7.0–7.3, rollout-neutral) and pooled KGE flat (0.82–0.85), but on the
+> **deployed free-rollout** timeseries every weighted cell is *worse* at the two
+> largest nodes (outlet q RMSE +24–37%, node74 +60–80%) because the weight drives
+> **over-shoot** (node74 peak ratio 0.87→1.4). The pooled `peak_ratio` drifting to
+> 1.0 is over-shoot cancelling under-shoot, not skill; the only clean positive (mild
+> FHV) is offset by the RMSE cost. `river_h` and 1-step are untouched. **Verdict:
+> stop tuning the loss (E4→E10 all confirm loss shape is orthogonal to the rollout
+> operator); the binding failures — `river_h` (NSE ~−120 everywhere) and outlet-
+> dominated rollout error — need the distribution/scaling work (TODO §1), which is
+> now the priority.** (Process note: hps1 λ=0 is a 4th pure-pf replicate; fixed-
+> horizon final RMSE now spans {9.3, 30.7, 95, 1559} — hopelessly seed-dominated.)
+
+## E10 — per-node peak-weight (`peak_lambda`) sweep — `sava_small_v081_e10_peakweight_sweep`
+
+**NAME:** box search, 4 cells, one knob
+`train.strategy.peak_lambda ∈ {0.0, 1.0, 2.0, 4.0}` (`peak_gamma = 1`,
+`peak_w_max = 4` held), on the pure-pushforward base (`rollout_grad = pushforward`,
+`tf_weight = 0`, `lr = 1.3457e-4`, `mb_theta = 1.0`, full `[1,2,5,8,10]` curriculum,
+8×64 / mlp 2, 250 epochs, always-on q≥0 floor). **⚠ Uses `loss_type = "huber"` with
+`peak_delta = 1000`** — numerically identical to MSE across the O(1) normalized
+range, but needed because the per-node peak stats (`uᵢ`/`sᵢ`) are only computed
+under the `== :huber` gate ([src/run.jl](../src/run.jl) ~L674); `hps1` (λ=0) is
+therefore an MSE-equivalent pure-pushforward control. Per-node weight
+`w_i = min(1 + λ·peak_scoreᵢ, w_max)`, `peak_scoreᵢ = max(0, (target − uᵢ)/sᵢ)`.
+Config:
+[experiments/sava_small_v081_e10_peakweight_sweep/config.toml](../experiments/sava_small_v081_e10_peakweight_sweep/config.toml).
+
+**SUMMARY — peak-weighting is a CLOSED lever; this test is stronger than E5 because
+the weight actually bit and still gave no reliable benefit (mild net harm in
+rollout).** Unlike E5 (inert, `w_mean ≈ 1.0005`), at λ=2 the weight genuinely
+activated (`w_mean` 1.37, `c_peak` 0.996). Yet across the sweep: `amp` is **dead
+flat** (7.02–7.32, rollout-neutral as hoped), pooled KGE is **flat within seed
+noise** (0.82–0.85), and 1-step / `river_h` are **untouched** (`val_q_1step`
+0.18–0.20; spatial `river_h` NSE −118 → −154, no help). Re-scored on the **deployed
+free-rollout** timeseries (the E9 lesson), every weighted cell is **worse** in
+`river_q` RMSE at the two largest nodes (outlet +24–37%, node74 +60–80%) because
+the weight drives **over-shoot** (node74 peak ratio 0.87 → 1.16–1.41). The only
+consistent positive is a mild pooled-FHV improvement (0.111 → 0.088/0.101/0.098),
+offset by the RMSE degradation. The weight-activation is also **non-monotonic**
+(λ=2 bites harder than λ=4 — `w_mean` 1.00017 / 1.37 / 1.05), i.e. seed/trajectory-
+driven, not a clean dose. **Conclusion: close the peak-weight lever; the persistent
+failures (`river_h`, outlet-dominated rollout error) need the distribution/scaling
+work, not loss re-weighting.**
+
+**The four cells (best-epoch; outlet = node1_r1, true peak 122.4):**
+
+| cell | λ | `w_mean` / `c_peak` | **final_amp** | pooled KGE | pooled peak_ratio | pooled FHV | pbias | val_q_1step | river_h NSE | final fixed RMSE | frac_gt2 | best_ep | train |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| hps1 (ctrl) | 0.0 | 1.000 / 0.00 | 7.22 | 0.836 | 0.963 | 0.111 | 8.5 | 0.183 | −118 | 1559 | 1.0 | 26 | 2.22 h |
+| hps2 | 1.0 | 1.00017 / 0.02 | 7.20 | **0.852** | 1.197 | **0.088** | 7.1 | **0.140** | −122 | 1.99e5 | 1.0 | 11 | 2.25 h |
+| hps3 | 2.0 | **1.367 / 0.996** | 7.32 | 0.843 | **1.000** | 0.101 | 8.8 | 0.191 | −153 | **8.87** | **0.656** | 28 | 2.28 h |
+| hps4 | 4.0 | 1.050 / 0.651 | 7.02 | 0.824 | 0.983 | 0.098 | 7.7 | 0.202 | −128 | 25.3 | 1.0 | 20 | 2.27 h |
+
+**Deployed free-rollout `river_q` RMSE per gauge (control λ=0 → λ=4):**
+
+| gauge | λ=0 | λ=1 | λ=2 | λ=4 |
+|---|---|---|---|---|
+| outlet (node1) | **12.28** | 16.84 | 15.20 | 16.38 |
+| node74 | **0.504** | 0.901 | 0.812 | 0.834 |
+| node152 | **0.183** | 0.210 | 0.226 | 0.210 |
+| node183 | 0.112 | 0.106 | 0.106 | 0.119 |
+| node48 | 0.100 | 0.101 | 0.100 | 0.095 |
+
+**IMPROVEMENTS.**
+- **Pooled FHV mildly better with weighting (weak evidence).** 0.111 → 0.088 / 0.101
+  / 0.098 — the up-weighting does nudge high-flow volume error down. But it is offset
+  by the rollout-RMSE degradation below and does not survive as a net win.
+- **The weight genuinely bit at λ=2 (evidence — closes E5's open question).**
+  `w_mean` 1.37, `c_peak` 0.996, `w_max` 4.0 — so the null result is NOT because the
+  lever was dormant (E5's caveat); it is a real "weighting does not help" result.
+
+**DEGRADED / FAILURE MODES.**
+- **Deployed rollout is WORSE with any weighting (evidence — the decisive read).**
+  `river_q` RMSE rises at the two largest nodes: outlet 12.28 → 15.2–16.8 (+24–37%),
+  node74 0.504 → 0.81–0.90 (+60–80%). Cause = peak-driven **over-shoot** (node74
+  peak ratio 0.87 → 1.16 / 1.34 / 1.41; node48 0.91 → 1.10–1.15). The pooled
+  `peak_ratio` moving toward 1.0 (0.963 → 1.000 at λ=2) is over-shoot at some nodes
+  cancelling under-shoot at others, **not** a genuine accuracy gain.
+- **1-step and `river_h` untouched / worse (evidence).** `val_q_1step` 0.18–0.20 (no
+  trend), spatial `river_h` NSE −118 → −122 → −153 → −128 (worse at λ=2). Peak
+  weighting does not address the binding `river_h`/1-step constraint.
+- **Weight activation is non-monotonic / seed-driven (evidence).** `w_mean` 1.00017
+  (λ=1) → 1.37 (λ=2) → 1.05 (λ=4): higher λ bit *less*. Activation depends on the
+  training trajectory, so even the "dose" is not clean — reinforcing that the effect
+  is dominated by seed/trajectory noise.
+- **Fixed-horizon is hopelessly seed-dominated (evidence — process note).** hps1
+  (λ=0) is a 4th pure-pushforward replicate; final fixed RMSE now spans
+  **{9.3, 30.7, 95, 1559}** across identical-intent configs. hps3's low frac_gt2
+  (0.656) and RMSE 8.87 are NOT attributable to λ. Ignore single-cell fixed-horizon.
+
+**HYPOTHESES.**
+- *(evidence)* Peak-weighting is **orthogonal to the rollout operator** (amp flat,
+  KGE flat) but **not free** in free rollout: forcing sharper peaks in the training
+  objective biases the model toward over-shoot, which spatial accumulation amplifies
+  at the large nodes → higher rollout RMSE. So the lever can only trade peak-bias for
+  volume-error, it cannot add skill.
+- *(speculation)* The `river_h` failure (NSE ~−120 everywhere, invariant to loss/
+  weighting/curriculum across E5–E10) is a **scaling/normalisation** problem, not a
+  loss-shape problem — consistent with it being the one axis untouched by every loss
+  lever tried. Prioritise TODO §1.
+
+**RECOMMENDATIONS.**
+1. **Close the peak-weight lever.** Keep `peak_lambda = 0` (plain MSE) on the
+   pushforward base; do not sweep λ/γ/w_max further. E5 (inert) + E10 (bit but no
+   benefit) together close it.
+2. **Redirect to distribution/scaling (TODO §1).** `river_h` and outlet-dominated
+   rollout error are the binding failures and are invariant to every loss lever
+   tried (E4→E10) — they are the next real target.
+3. **Apply the engineering fix** (gate `peak_stats` on `loss_type == :huber ||
+   peak_lambda > 0`) only if peak-weighting is ever revisited, to drop the
+   `peak_delta = 1000` workaround.
+4. **Never trust single-cell fixed-horizon RMSE** (now replicated 4× at 9.3–1559);
+   judge on deployed free-rollout per-node RMSE/peak and multi-seed replicates.
+
+## E9 — hybrid-loss (`pushforward_tf_weight`) sweep — `sava_small_v081_e9_hybrid_sweep`
+
+**NAME:** `sava_small_v081_e9_hybrid_sweep` (box search, 4 cells, one knob:
+`train.strategy.pushforward_tf_weight ∈ {0.0, 0.25, 0.5, 0.75}` = `(1−α)`;
+everything else at the E6-pushforward base — `rollout_grad = pushforward`, MSE,
+`lr_start = 1.3457e-4`, `mb_theta = 1.0`, full `[1,2,5,8,10]` curriculum, 8×64 /
+mlp 2, 250 epochs, always-on q≥0 floor). **The keystone experiment** — designed to
+break the E6 trade-off (pushforward stabilises the rollout but wrecks the 1-step /
+`river_h` fit) by adding a teacher-forced 1-step term to the endpoint-only loss:
+`L = α·L_pushforward(endpoint) + (1−α)·L_1step(ground-truth)`. Config:
+[experiments/sava_small_v081_e9_hybrid_sweep/config.toml](../experiments/sava_small_v081_e9_hybrid_sweep/config.toml).
+
+**SUMMARY — the hybrid loss fixes the *teacher-forced* 1-step metric, but that gain
+does NOT carry to the free rollout, so tf is not worth it on this evidence.** The
+`val_*_1step` metrics recover dramatically (`val_q_1step` 0.152→0.017 at tf=0.25,
+≈ full_bptt; `val_h_1step` 9.34→1.55) — but these are **one-step, ground-truth-fed**
+errors, not deployed skill. Re-scoring the **free-rollout** validation timeseries
+(what actually gets plotted) shows the tf=0.25 benefit nearly evaporates and is
+**outlet-localised**: outlet `river_q` RMSE 13.30→12.27 (−8%, plausibly within the
+seed band), MAE −27%, peak ratio 0.71→0.86 are the only clear wins; upstream gauges
+are a wash-or-worse (node152 q_RMSE +39%), and rollout `river_h` is **mixed to
+worse** (outlet RMSE 3.91→6.40, +64%). So the E6 1-step/`river_h` regression is
+**not** meaningfully fixed *in rollout*, and the **3.3× wall-clock cost** buys
+little. What IS seed-robust: the low-amp pushforward solution is lost with any tf
+(`amp` 7.7→13.5), `tf ≥ 0.5` is catastrophic (over-prediction → fixed RMSE 1e6→1e31),
+and `amp` decouples from rollout stability. **Revised verdict: keep pure pushforward
+as the base;** tf=0.25 needs a multi-seed run proving the outlet peak/MAE gain is
+real before adoption. (Seed context: pure pushforward replicated 3× gives fixed RMSE
+{95, 9.3, 30.7} — the horizon metric is seed-dominated.)
+
+**The four cells (best-epoch; outlet = node1_r1 daterange, true max 122.4):**
+
+| cell | tf_weight | **final_amp** | best_val_rmse | final fixed RMSE | frac_gt2 | pooled KGE | outlet ratio | pbias | q_nse med / p10 | **val_q_1step** | **val_h_1step** | river_h NSE | best_ep | train |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| hps1 | 0.0 | **7.70** | 5.90 | 30.7 | 1.0 | **0.875** | 0.71 | 6.8 | 0.977 / **0.839** | 0.152 | 9.34 | −124 | 30 | 2.23 h |
+| **hps2** | **0.25** | 13.54 | 5.95 | **12.4** | **0.906** | 0.853 | 0.86 | 8.6 | 0.976 / 0.837 | **0.017** | 1.55 | −86 | 14 | 7.36 h |
+| hps3 | 0.5 | 13.41 | 5.80 | **1.19e6** | 1.0 | 0.735 | 1.03 | 15.5 | 0.971 / 0.809 | 0.014 | 0.92 | −63 | 16 | 7.39 h |
+| hps4 | 0.75 | 12.02 | 5.78 | **2.9e31** | 1.0 | 0.687 | 1.26 | 20.4 | 0.977 / 0.776 | **0.012** | **0.69** | −41 | 19 | 7.29 h |
+| *E6 full_bptt* | *1.0* | *11.03* | *120903* | *Inf* | *1.0* | *0.681* | *1.29* | *—* | *0.976 / 0.77* | *0.0144* | *—* | *−7.9* | *13* | *4.98 h* |
+
+**Free-rollout validation timeseries — the deployed skill (hps1 tf=0 → hps2 tf=0.25),
+RMSE per gauge on the daterange window.** This is the corrective read: the
+`val_*_1step` columns above are teacher-forced and do NOT represent this.
+
+| gauge | q RMSE tf=0 | q RMSE tf=0.25 | Δq | h RMSE tf=0 | h RMSE tf=0.25 | Δh |
+|---|---|---|---|---|---|---|
+| outlet (node1) | 13.30 | 12.27 | **−8%** | 3.91 | 6.40 | **+64%** |
+| node74 | 0.569 | 0.538 | −5% | 1.29 | 0.74 | −43% |
+| node152 | 0.175 | 0.244 | **+39%** | 1.88 | 1.95 | +4% |
+| node183 | 0.117 | 0.111 | −5% | 0.76 | 0.70 | −8% |
+| node48 | 0.105 | 0.109 | +4% | 15.70 | 14.33 | −9% |
+
+(Outlet q MAE 10.12→7.38 −27% and peak ratio 0.71→0.86 are the only clear tf=0.25
+wins; everything else is a wash or mixed. Single seed.)
+
+**IMPROVEMENTS.**
+- **Teacher-forced 1-step metric recovers strongly (evidence — but see the caveat).**
+  `val_q_1step` 0.152 → 0.017 → 0.014 → 0.012 (matches full_bptt 0.0144 at tf=0.25);
+  `val_h_1step` 9.34 → 1.55 → 0.92 → 0.69; spatial `river_h` NSE −124 → −41. **CAVEAT:
+  these are one-step, ground-truth-fed errors and do NOT translate to free rollout**
+  (see the rollout table) — so E6 caveat #2 is *not* meaningfully fixed where it
+  matters. Treat this as a diagnostic of the 1-step map, not a skill gain.
+- **Modest outlet-only `river_q` rollout gain at tf=0.25 (weak evidence, single
+  seed).** Outlet RMSE −8% (likely within seed band), MAE −27%, peak ratio 0.71→0.86.
+  Confined to the outlet; upstream gauges wash-or-worse, rollout `river_h` mixed to
+  worse (outlet +64%). Not worth the 3.3× cost without multi-seed proof.
+
+**DEGRADED / FAILURE MODES.**
+- **Low-amp pushforward solution lost with any tf > 0 (evidence).** `amp`
+  7.70 → 13.5 / 13.4 / 12.0 — jumps to ≥ full_bptt's 11 and stays. Low-amp and
+  sharp-1-step are **opposed**; this knob trades along that axis, it does not escape
+  it. The literal win condition (`amp ≈ 6.4`) is **not met**.
+- **`tf ≥ 0.5` catastrophic (evidence).** Over-prediction (outlet 0.71 → 1.03 → 1.26,
+  pbias 6.8 → 20.4, pooled peak_ratio 0.91 → 1.16) compounds in free rollout → fixed
+  RMSE 1.19e6 (tf=0.5), **2.9e31** (tf=0.75). Benign KGE decays 0.875 → 0.687,
+  q_nse p10 0.839 → 0.776.
+- **`amp` decouples from rollout stability under hybrid training (evidence —
+  undercuts E6 mechanism).** hps2 has the **highest** amp (13.5) yet the **best**
+  (bounded) rollout; hps3/hps4 have similar amp but diverge. So amp no longer orders
+  fixed-horizon outcomes — the tf-driven **over-prediction bias**, not amp, is the
+  operative failure mode at high tf. E6's "amp is the mechanism" needs multi-seed
+  re-examination.
+- **`river_h` improved but NOT solved (evidence).** Best NSE −41 (tf=0.75) is still
+  badly negative; the hybrid loss lifts it but does not make it skilful.
+- **`tf > 0` is ~3.3× slower for little rollout gain (evidence).** 26.5 ks vs 8.0 ks
+  (extra teacher-forced 1-step forward/backward per step). Combined with the
+  near-flat free-rollout timeseries, the cost/benefit is poor. `best_epoch` is early
+  everywhere (14–30) and `best_val_rmse` is flat (~5.8–5.95) — the selection metric
+  does not discriminate.
+- **The `val_*_1step` metric is misleading for this loss (evidence — process
+  lesson).** It improved 9× yet the deployed free-rollout timeseries barely moved
+  (and worsened on outlet h). Judging the hybrid loss on `val_*_1step` overstated
+  its value; always score it on **free-rollout** timeseries.
+
+**HYPOTHESES.**
+- *(evidence)* The system has a **fundamental low-amp ↔ sharp-1-step tension**: the
+  contractive/smoothed map pushforward learns (low amp, stable rollout) is the same
+  one that fits the sharp 1-step transition poorly, and vice versa. Loss weighting
+  moves along this axis but cannot escape it — a faithful rollout AND a sharp 1-step
+  map may be **unreachable via loss weighting alone**.
+- *(speculation)* The amp/rollout decoupling suggests the fixed-horizon divergence
+  at high tf is a **bias** phenomenon (systematic over-prediction from matching
+  sharp peaks) rather than a **gain** (amp) phenomenon — so the remaining lever may
+  be an explicit anti-bias / volume constraint, not further gain reduction.
+
+**RECOMMENDATIONS.**
+1. **Keep pure pushforward (`tf_weight = 0`) as the working base.** On this
+   single-seed evidence the free-rollout timeseries barely improves at tf=0.25 (and
+   worsens on outlet h) for 3.3× the wall-clock — not a justified base change. **Do
+   NOT exceed 0.25** regardless (over-prediction blow-up at tf≥0.5).
+2. **Do not adopt tf=0.25 without a multi-seed {0, 0.25} run (≥3 seeds each)**
+   proving the outlet `river_q` peak/MAE gain is real and not seed noise (the 8%
+   outlet RMSE gap is plausibly within the pure-pushforward seed band). Same run
+   settles the amp/rollout decoupling.
+3. **Score any future hybrid-loss variant on free-rollout timeseries, never on
+   `val_*_1step`** — E9 showed a 9× teacher-forced-metric gain that did not survive
+   rollout.
+4. **Treat `river_h` as unsolved** (rollout outlet h got *worse* at tf=0.25); it
+   likely needs the separate scaling/normalisation work (TODO §1), not tf.
+5. **Re-examine the E6 "amp is the mechanism" claim** in light of the decoupling;
+   the operative high-tf failure is over-prediction bias, not gain.
+
+## E8 — curriculum-schedule (rollout-depth) sweep — `sava_small_v081_e8_schedule_sweep`
+
+**NAME:** `sava_small_v081_e8_schedule_sweep` (box search, 3 cells; whole
+`[train.strategy]` table replaced per cell so steps + durations stay consistent,
+each dict summing to 250 epochs, `pushforward` + MSE + `tf_weight = 0` pinned).
+Deepest curriculum horizon **10 → 20 → 30** (`nhz` 11 / 21 / 31); everything else
+at the E6-pushforward base (`lr_start = 1.3457e-4`, `mb_theta = 1.0`, 8×64 /
+mlp 2, 250 epochs, always-on q≥0 floor). Config:
+[experiments/sava_small_v081_e8_schedule_sweep/config.toml](../experiments/sava_small_v081_e8_schedule_sweep/config.toml).
+
+**SUMMARY — the hypothesis is refuted, but the design confounds depth with epoch
+budget; a clean schedule study is still owed.** The premise was that training to
+`eval_horizon = 30` would close the 3× train/eval-horizon extrapolation and cut
+the horizon-30 over-shoot. Instead, going deeper made the **fixed-horizon rollout
+worse** (`frac_gt2` 0.75 → 0.875 → 1.0; final RMSE 9.3 → 15.7 → **3.6e6**), and the
+horizon-30 cell — trained exactly to the eval horizon — still diverges at
+horizon 30. **But the sweep varies three things at once** (max horizon,
+phase-count, and — under the fixed 250-epoch budget — epochs-per-phase): going
+hps1→hps3 **halved** the `steps=1` teacher-forced budget (50 → 25 epochs). So the
+two failure modes have *different* causes: the **gradient explosions** at depth 30
+(137 non-finite skips, 66 back-offs, max grad 1.2e16; diverging final models,
+val_rollout 416 @20 / 3.9e13 @30) are genuinely **depth-driven** (longer detached
+prefix ⇒ endpoint further off-trajectory ⇒ larger gradient), whereas the **1-step
+/ `river_h` starvation** (val_h_1step 8.6 → 122 → 161) is largely a **shallow-
+budget** effect (less time at `steps=1`, and training ends far from it).
+**Critically, all three best checkpoints sit in the `steps=1` phase** (epochs
+18/10/22), so the deep training never once beat the shallow checkpoint
+(`best_val_rmse` flat 5.68→6.10→6.01) and the apparent best-epoch skill gain is
+**not** a depth benefit. Net: **as-designed deepening is a net negative on pure
+pushforward, but this cannot isolate depth from budget — a proper schedule study
+(shallow budget held fixed) is still needed. Run E9 first.**
+
+**The three cells (best-epoch; outlet = node1_r1 daterange, true max 122.4):**
+
+| cell | deepest | **final_amp** | best_val_rmse | final fixed RMSE | **frac_gt2** | final peak_ratio | pooled KGE | pbias | fhv | outlet ratio | q_nse med / p10 | val_q_1step | val_h_1step | best_ep | skips | backoffs | train |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| hps1 | 10 | 7.40 | **5.68** | **9.3** | 0.75 | 2.92 | 0.885 | 6.4 | 0.072 | 0.81 | 0.979 / 0.843 | **0.144** | **8.59** | 18 | 0 | 0 | 2.27 h |
+| hps2 | 20 | **8.97** | 6.10 | 15.7 | 0.875 | 20.98 | 0.938 | 3.0 | 0.036 | 0.80 | 0.979 / **0.866** | 0.156 | 122.5 | 10 | 0 | 0 | 3.06 h |
+| hps3 | 30 | 6.73 | 6.01 | **3.6e6** | 1.0 | 5.8e6 | **0.948** | **2.6** | **0.028** | 0.76 | 0.979 / 0.856 | 0.292 | 161.3 | 22 | **137** | **66** | 3.82 h |
+| *E6 pushforward* | *10* | *6.37* | *1196* | *61,092* | *1.0* | *1.67e5* | *0.876* | *—* | *—* | *0.93* | *0.980 / 0.85* | *0.165* | *—* | *200* | *0* | *0* | *2.03 h* |
+
+**IMPROVEMENTS.**
+- **Best-epoch benign skill trends up across cells — but NOT attributable to depth
+  (evidence + confound).** pooled KGE 0.885 → 0.938 → 0.948, pbias 6.4 → 3.0 → 2.6,
+  fhv 0.072 → 0.036 → 0.028. The monotone *direction* is real, but **all three
+  best checkpoints are in the `steps=1` phase** (best_epoch 18/10/22), so none saw
+  deep rollout training — this cannot be a depth benefit. It reflects shallow-phase
+  training + differing `steps=1` epoch counts + seed variance. Do **not** read it
+  as "deeper ⇒ better skill."
+- **q_nse p10 mildly up** (0.843 → 0.866 → 0.856) — marginal, within seed band.
+
+**DEGRADED / FAILURE MODES.**
+- **Fixed-horizon over-shoot got WORSE, not better (evidence — hypothesis
+  refuted).** `frac_gt2` 0.75 → 0.875 → **1.0**; final RMSE 9.3 → 15.7 → **3.6e6**.
+  Training to the eval horizon did **not** close the gap; the horizon-30 cell
+  diverges at horizon 30.
+- **Depth destabilises pushforward training (evidence — depth-driven).** hps3:
+  **137 non-finite skips, 66 back-offs, max grad 1.2e16**; final models diverge
+  (val_rollout 416 @20, 3.9e13 @30); `best_epoch` collapses (18 → 10). The
+  unanchored deep-endpoint loss explodes — this one IS intrinsic to horizon length.
+- **1-step / `river_h` starved harder (evidence — mostly budget-driven).**
+  val_h_1step 8.6 → 122 → 161; val_q_1step 0.144 → 0.292. The `steps=1` budget
+  shrank 50 → 25 and all best checkpoints are shallow, so this is largely the
+  epoch-redistribution confound, not pure depth — the cost E9 (per-phase 1-step
+  term) is designed to offset regardless of budget.
+- **`amp` non-monotonic (evidence).** 7.40 → 8.97 → 6.73 — no clean depth effect;
+  the mid cell is *worse* than the control.
+- **1.35–1.68× slower** (2.27 → 3.06 → 3.82 h) with no usable payoff.
+
+**HYPOTHESES.**
+- *(evidence)* The two failures have **different causes** (the design confounds
+  them): gradient explosions are **depth-driven** (longer detached prefix ⇒ larger
+  endpoint residual/gradient — intrinsic to horizon length, budget-independent),
+  while 1-step/`river_h` decay is **budget-driven** (the `steps=1` phase shrank
+  50 → 25 and training ends far from it — would occur even if the added phases were
+  shallow). The sweep cannot separate these on its own.
+- *(evidence)* Depth delivered **no realised benefit**: best checkpoints are all
+  shallow, `best_val_rmse` is flat, and the final deep models diverge. Whatever
+  useful signal deep supervision carries was never converted into a selected model.
+- *(speculation)* With `pushforward_tf_weight > 0` (E9) re-injecting the 1-step
+  term at *every* phase, the shallow map is protected regardless of budget,
+  neutralising the budget failure and letting depth be tested on its own merits —
+  the **E8×E9 stack**. Separately, a **budget-controlled schedule study** (below)
+  is needed to isolate depth from fragmentation.
+
+**RECOMMENDATIONS.**
+1. **Do NOT deepen the curriculum on pure pushforward** (`tf_weight = 0`). It is a
+   net negative: worse fixed-horizon rollout, unstable training, starved h/1-step,
+   slower.
+2. **Run E9 first, then revisit depth as an E8×E9 stack** — deepen only with a
+   non-zero `pushforward_tf_weight` (and consider tighter `grad_clip` / more
+   `phase_backoff` for the horizon-30 phase).
+3. **Keep the deepest phase at ~10 for now** (hps1 is the best fixed-horizon cell
+   and the only clean-training one).
+4. **A clean schedule study is STILL OWED — this sweep confounds depth with epoch
+   budget.** Design the follow-up with proper controls: (a) **isolate
+   fragmentation** — max horizon 10 but chopped into ~9 short phases (hps3's
+   phase-count without the depth); (b) **isolate depth** — add deep phases while
+   **holding ~50 epochs at `steps=1`** (steal from mid phases or raise total
+   epochs); (c) consider a **longer total budget** so deep phases get real epochs
+   *and* the shallow map is preserved. Only then can "is deeper better?" be
+   answered. Until then, treat E8's depth verdict as *as-designed*, not intrinsic.
+5. **Report `frac_gt2` with a seed caveat** — this control gave 0.75 vs E7's
+   identical-config 1.0; the metric is seed-chaotic (do not rank cells by it).
+
+## E7 — training-noise (input-perturbation) sweep — `sava_small_v081_e7_noise_sweep`
+
+**NAME:** `sava_small_v081_e7_noise_sweep` (box search, 5 cells, one knob:
+`train.strategy.noise_scale ∈ {0.0, 0.01, 0.03, 0.1, 0.3}`, normalized/z-scored
+state units; everything else at the **E6-pushforward** base — `rollout_grad =
+pushforward`, MSE, `lr_start = 1.3457e-4`, `mb_theta = 1.0`, full `[1,2,5,8,10]`
+curriculum, 8×64 / mlp 2, 250 epochs). `hps1` (noise=0) is the E6-pushforward
+control — but note the code now carries the always-on q≥0 floor
+(`_floor_q_norm_nonnegative`, src/gnn.jl) added *after* E6, so `hps1` doubles as a
+(seed-confounded) A/B of that floor vs E6. Config:
+[experiments/sava_small_v081_e7_noise_sweep/config.toml](../experiments/sava_small_v081_e7_noise_sweep/config.toml).
+
+**SUMMARY — noise is a weak/chaotic lever; the q≥0 floor is the boundedness win.**
+Two findings. **(1)** The hypothesis that *noise lowers `amp`* is **rejected**:
+`amp` sits at 6.8–7.5 in every cell with no trend vs noise. **(2)** Every E7 cell
+is far more bounded than E6, including the noise=0 control — `hps1` improved
+`best_val_rmse` **1196 → 5.60** and final fixed RMSE **61,092 → 95** vs the E6
+pushforward cell, whose only code delta is the always-on q≥0 floor. That ~200–600×
+jump exceeds E5's ~80× chaotic band, so the **floor** is the credible driver (not
+seed). Noise *did* move `frac_gt2` off 1.0 — but only at 0.01 (0.844) and 0.1
+(0.875); 0.03 **diverged** (final RMSE 1.07e13) and 0.3 held at 1.0. The
+non-monotone zig-zag = a weak signal swamped by seed chaos, not a dose-response.
+Noise mildly improves benign skill with dose (pooled KGE 0.782→0.908, pbias
+11.7→4.7) and the 1-step/`river_h` fit peaks at 0.1, but `river_h` NSE stays
+catastrophic (~−93) — **noise does not fix the pushforward h/1-step regression.**
+No cell diverges on the benign daterange (outlet ratio 0.68–1.0). Best balance:
+**hps4 (noise=0.1)**.
+
+**The five cells (best-epoch; outlet = node1_r1 daterange, true max 122.4):**
+
+| cell | noise | **final_amp** | best_val_rmse | final fixed RMSE | **frac_gt2** | final peak_ratio | pooled KGE | pooled peak_ratio | pbias | outlet ratio | q_nse med / p10 | val_q_1step | val_h_1step | best_epoch |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| hps1 | 0.0 | 7.09 | **5.60** | 95 (finite) | 1.0 | 69.8 | 0.782 | 1.045 | 11.7 | 0.97 | 0.978 / 0.812 | 0.150 | 8.05 | 26 |
+| hps2 | 0.01 | 7.52 | 7.28 | **11.4** | **0.844** | 3.91 | 0.880 | 0.897 | 6.3 | 0.68 | 0.981 / 0.856 | 0.164 | 9.53 | 18 |
+| hps3 | 0.03 | 7.10 | 6.26 | **1.07e13** *(diverges)* | 1.0 | 3.34e13 | 0.849 | 1.006 | 7.8 | 1.00 | 0.981 / 0.854 | 0.149 | 8.32 | 150 |
+| **hps4** | **0.1** | 7.15 | 6.38 | **15.9** | **0.875** | 5.74 | 0.872 | 0.966 | 6.1 | 0.81 | 0.982 / 0.859 | **0.109** | **6.24** | 22 |
+| hps5 | 0.3 | **6.76** | 6.32 | 19.3 | 1.0 | 18.6 | **0.908** | 0.924 | **4.7** | 0.81 | 0.983 / **0.877** | 0.136 | 6.91 | 44 |
+| *E6 pushforward* | *0* | *6.37* | *1196* | *61,092* | *1.0* | *1.67e5* | *0.876* | *1.086* | *—* | *0.93* | *0.980 / 0.85* | *0.165* | *—* | *200* |
+
+**IMPROVEMENTS.**
+- **q≥0 floor → step-change in boundedness (evidence, seed-confounded).** hps1
+  vs E6-pushforward (identical config, only the added always-on floor differs):
+  `best_val_rmse` 1196→5.60, final fixed RMSE 61,092→95. Magnitude ~200–600× is
+  beyond the E5 chaotic band (~80×), so credited to the floor. Carry it forward.
+- **Mild noise nudges `frac_gt2` below 1.0 (weak evidence).** 0.01→0.844 and
+  0.1→0.875 are the first sub-1.0 `frac_gt2` values in the series — but see the
+  non-monotonicity caveat; treat as fragile until multi-seed confirmed.
+- **Benign skill improves with noise dose (evidence).** pooled KGE 0.782→0.908,
+  pbias 11.7→4.7, q_nse p10 0.812→0.877 monotone in noise. Cheap regularisation.
+- **1-step/h best at noise=0.1 (evidence, partial).** `val_q_1step` 0.109 and
+  `val_h_1step` 6.24 are the sweep-best — mild help, not a cure.
+
+**DEGRADED / FAILURE MODES.**
+- **`amp` does NOT respond to noise (evidence — hypothesis rejected).** Flat
+  6.8–7.5, no trend. The `frac_gt2` gains are NOT via reduced per-step gain, so
+  the "noise → contractive fixed point" story is unsupported here.
+- **Non-monotone / chaotic dose-response (evidence).** 0.03 diverged (final RMSE
+  1.07e13) between two stable neighbours (0.01, 0.1); 0.3 held `frac_gt2`=1.0.
+  Single-seed noise cannot be trusted as a clean lever — the signal is weak
+  relative to seed chaos (per E5).
+- **`river_h` regression persists (evidence).** river_h NSE ~−82…−109 in every
+  cell; noise does not fix the endpoint-only-supervision cost. → E9's job.
+
+**HYPOTHESES.**
+- *(evidence)* The q≥0 floor removes a negative-discharge feedback path that let
+  the free rollout blow up; it bounds the tail far more than any noise level. The
+  cleanest confirmation is a **fixed-seed A/B toggling the floor** (code toggle,
+  since it is now always-on).
+- *(speculation)* Noise's real value is mild off-trajectory regularisation
+  (benign KGE/pbias, slight 1-step/h help), not stability. Its `frac_gt2` effect
+  may be a seed artefact; a 3-seed repeat at {0, 0.05, 0.1} would settle it.
+
+**RECOMMENDATIONS.**
+1. **Adopt the q≥0 floor as permanent** (already always-on) and treat it as the
+   headline boundedness lever, not noise.
+2. **The cell RANKING is within seed noise — do NOT read "0.1 is best" as a tuned
+   value.** The whole-sweep pooled-KGE spread is 0.782→0.908 = **0.13**, at/below
+   the single-config reseed band (~0.15, E1 vs E2-hps1). Only the **monotone
+   direction** survives that noise floor: benign skill improves smoothly with dose
+   (q_nse p10 0.812→0.877, pbias 11.7→4.7, KGE ↑ across all 5 points — a 5-point
+   monotone trend is far harder to get by chance than a single "winner"). The
+   per-cell winners on the **chaotic** axes (`frac_gt2` zig-zag 1.0/0.844/1.0/
+   0.875/1.0; 0.03 diverging to RMSE 1e13 between two stable neighbours;
+   `val_q_1step` un-ordered) are **coincidence**, not a ranking. `frac_gt2` is also
+   coarse (32 anchors → ~0.03 granularity), so its sub-1.0 dips are not reliable.
+3. **If used, carry noise for the REGULARISATION direction, not a tuned value:**
+   pick a **small** ~0.05 for the smooth benign-skill benefit — NOT because 0.1 won
+   a horse race — and only keep it if a **≥3-seed repeat at {0, 0.05, 0.1}**
+   confirms the effect clears seed noise. Given `amp` did not move and the effect
+   is within the reseed band, noise is a **low-priority** knob.
+4. **Do not raise noise ≥0.3** (no benefit; `frac_gt2` back to 1.0).
+5. **Priority stays E9 (hybrid loss)** — the persistent `river_h`/1-step
+   regression is untouched by noise and is the next real target.
 
 ## E6 — rollout-gradient strategy comparison — `sava_small_v081_e6_rollout_grad`
 
