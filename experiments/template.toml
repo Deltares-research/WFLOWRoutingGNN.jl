@@ -140,6 +140,11 @@ rollout_grad = "full_bptt"
 # Compute device: "cpu" or "gpu"
 device = "cpu"
 
+# Optional deterministic seed. When set, this run seeds CPU/GPU RNGs before
+# model initialisation and training so random initial weights, shuffled batches,
+# and injected rollout noise are reproducible.
+# seed = 42
+
 # --- Fixed-horizon validation metric, early stopping & checkpointing ----------
 # Each epoch, a constant-length autoregressive rollout is run from many anchor
 # start points in the validation split. Unlike the curriculum `val_rollout`

@@ -3,6 +3,7 @@ using Flux
 using GraphNeuralNetworks
 using MLUtils
 using NCDatasets
+using Statistics
 
 # ---------------------------------------------------------------------------
 # Dataset from real test model data
@@ -93,6 +94,12 @@ const VALID_TS_KWARGS = (
         @test TrainSettings(; VALID_TS_KWARGS..., rollout_grad = :detached) isa TrainSettings
     end
 
+    @testset "seed validation" begin
+        @test_throws ArgumentError TrainSettings(; VALID_TS_KWARGS..., seed = -1)
+        @test TrainSettings(; VALID_TS_KWARGS..., seed = 0).seed == 0
+        @test TrainSettings(; VALID_TS_KWARGS..., seed = 42).seed == 42
+    end
+
 end
 
 # ---------------------------------------------------------------------------
@@ -120,6 +127,7 @@ end
     @test s2.h_loss_scale         == s.h_loss_scale
     @test s2.phase_backoff_factor == s.phase_backoff_factor
     @test s2.rollout_grad         == s.rollout_grad
+    @test s2.seed                 === nothing
 
     # Non-default scale survives the round-trip too.
     si   = TrainSettings(; VALID_TS_KWARGS..., h_loss_scale = :increment)
@@ -141,6 +149,13 @@ end
     spf2 = load_train_settings(path)
     rm(path)
     @test spf2.rollout_grad == :pushforward
+
+    # Optional seed survives the round-trip too.
+    ss   = TrainSettings(; VALID_TS_KWARGS..., seed = 1337)
+    save_train_settings(path, ss)
+    ss2  = load_train_settings(path)
+    rm(path)
+    @test ss2.seed == 1337
 
 end
 

@@ -199,6 +199,45 @@ catchment the plotted cell sits.
 
 ---
 
+# Experiment tooling
+
+## Seeded repetition option (multi-seed replication)
+
+**Motivation (E7–E10).** Every recent result is **hopelessly seed-dominated** —
+the pure-pushforward base alone gave fixed-horizon RMSE ∈ {9.3, 30.7, 95, 1559}
+across four nominally-identical configs, and `frac_gt2` flips between 0.75 and 1.0
+run-to-run. No single-seed conclusion is trustworthy; EXPERIMENTS.md already owes
+a **≥3-seed confirmation** of every lever within the seed band. Make that a
+first-class, config-driven capability instead of the current manual copy-configs
+hack.
+
+- [x] **Precondition — seed control added.** `run_wflow_gnn`
+      ([src/run.jl](../src/run.jl)) now accepts `[train].seed` and applies
+      deterministic seeding at run start (CPU and CUDA RNG), so weight init,
+      shuffling, and stochastic training operations are reproducible per seed.
+- [x] **Add a `repetitions` (a.k.a. `n_seeds`) option** that runs the *same*
+      configuration `R` times with different seeds. Two candidate homes:
+      - **hparsearch box (preferred):** treat the seed as an implicit search axis
+        — expand each combination from `_box_combinations`
+        ([src/hparsearch.jl](../src/hparsearch.jl#L121)) into `R` runs with
+        `seed ∈ seeds`, reusing the existing zero-padded `run_name` suffixing so
+        each replicate writes to its own output folder. A `[hparsearch].seeds =
+        [1,2,3]` (or `repetitions = 3` → auto seeds `1:R`) key drives it.
+      - **single-run:** a top-level `repetitions` that wraps `run_wflow_gnn` in a
+        seed loop for configs that are not a search.
+- [x] **Aggregate across replicates.** Emit per-seed metrics plus a summary
+      (mean / std / min / max, or median + IQR) of the headline scalars
+      (fixed-horizon RMSE, `frac_gt2`, pooled KGE, `river_h` NSE, `amp`) so a
+      lever's effect can be read **against** the seed band, not confounded by it.
+      Write to a combined metrics table alongside the per-run outputs.
+- [x] **Default `repetitions = 1`** so existing configs are unchanged; multi-seed
+      is opt-in.
+- Touch: `src/run.jl` (seed plumbing + `Random.seed!`), `src/hparsearch.jl`
+  (`_box_combinations` seed expansion + aggregation), config templates
+  (`experiments/template*.toml`).
+
+---
+
 # Computational performance
 
 Distilled from the 02-09-2026 benchmark log in

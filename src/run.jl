@@ -1,5 +1,6 @@
 import JLD2
 import Dates
+using Random
 using CUDA, cuDNN
 using SparseArrays
 
@@ -126,6 +127,7 @@ function settings_from_config(d::AbstractDict, toml_dir::AbstractString)
         h_loss_scale     = Symbol(get(td, "h_loss_scale", "absolute")),
         phase_backoff_factor = get(td, "phase_backoff_factor", 0.5),
         rollout_grad     = Symbol(get(td, "rollout_grad", "full_bptt")),
+        seed             = haskey(td, "seed") ? Int(td["seed"]) : nothing,
         eval_horizon     = get(td, "eval_horizon", 30),
         eval_anchors     = get(td, "eval_anchors", 32),
         upstream_points  = get(ed, "upstream_points", get(td, "upstream_points", 5)),
@@ -480,6 +482,7 @@ function write_run_metrics_toml(path::AbstractString, losses, ts::TrainSettings,
     putf!(run_t, "val_n_timesteps",        run_meta.val_n_timesteps)
     putf!(run_t, "epochs_run",             losses.stopped_epoch)
     putf!(run_t, "best_epoch",             losses.best_epoch)
+    putf!(run_t, "seed",                   ts.seed)
     root["run"] = run_t
 
     loss_t = Dict{String, Any}()
@@ -631,6 +634,16 @@ Returns `(model, metrics)` where `metrics` is a `NamedTuple` with fields:
 - `val_n_timesteps`             : number of timesteps in the val trajectory
 """
 function run_wflow_gnn(ds::DataSettings, ms::ModelSettings, ts::TrainSettings)
+
+    # Reproducibility toggle: when a seed is configured, seed both CPU and GPU
+    # RNGs before any stochastic run component (init, shuffling, injected noise).
+    if !isnothing(ts.seed)
+        Random.seed!(ts.seed)
+        if CUDA.functional()
+            CUDA.seed!(UInt64(ts.seed))
+        end
+        @info "Using fixed RNG seed $(ts.seed)"
+    end
 
     # --- 1. Build time-series graphs ---
     staticmaps_file = joinpath(ds.wflow_model_path, "staticmaps.nc")

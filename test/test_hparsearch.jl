@@ -22,6 +22,7 @@ using WflowRoutingGNN
                 "batch_size" => 2,
                 "lr_start" => 1e-3,
                 "lr_final" => 1e-4,
+                "seed" => 123,
                 # Intentionally omit lr_steps to verify fallback stays in sync.
                 "grad_clip" => 1.0,
                 "rollout_grad" => "detached",
@@ -44,6 +45,7 @@ using WflowRoutingGNN
             ),
             "hparsearch" => Dict{String, Any}(
                 "search_type" => "box",
+                "repetitions" => 2,
                 "search_space" => Dict{String, Any}(
                     "train.grad_clip" => [1.0, 0.1],
                     "train.strategy.peak_lambda" => [0.0, 2.0],
@@ -76,9 +78,14 @@ using WflowRoutingGNN
         @test ts_b.upstream_points == 6
         @test ts_a.rollout_grad == :detached
         @test ts_b.rollout_grad == :detached
+        @test ts_a.seed == 123
+        @test ts_b.seed == 123
         @test ds_a.runs_dir == ds_b.runs_dir
         @test ds_a.wflow_model_path == ds_b.wflow_model_path
         @test ms_a.hidden_dim == ms_b.hidden_dim
+
+        seeds = WflowRoutingGNN._resolve_replication_seeds(parsed["hparsearch"])
+        @test seeds == [1, 2]
 
         combos = WflowRoutingGNN._box_combinations(Dict{String, Vector{Any}}(
             "train.grad_clip" => Any[1.0, 0.1],
@@ -101,5 +108,12 @@ using WflowRoutingGNN
             (0.1f0, 0.0f0),
             (0.1f0, 2.0f0),
         ])
+
+        @test WflowRoutingGNN._resolve_replication_seeds(Dict{String,Any}()) == Int[]
+        @test WflowRoutingGNN._resolve_replication_seeds(Dict{String,Any}("seeds" => Any[3, 9])) == [3, 9]
+        @test_throws ArgumentError WflowRoutingGNN._resolve_replication_seeds(
+            Dict{String,Any}("seeds" => Any[1], "repetitions" => 2))
+        @test_throws ArgumentError WflowRoutingGNN._resolve_replication_seeds(
+            Dict{String,Any}("repetitions" => 0))
     end
 end

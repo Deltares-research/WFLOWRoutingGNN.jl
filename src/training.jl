@@ -51,6 +51,9 @@ Fields:
                      `:pushforward` detaches self-generated rollout states and
                      supervises only the final step; `:detached` detaches the
                      incoming state at every step and supervises every step.
+- `seed`          : optional RNG seed for reproducible weight initialisation,
+                     loader shuffling, and stochastic training operations.
+                     `nothing` keeps default non-deterministic seeding.
 - `strategy`       : training curriculum (rollout steps and noise schedule).
 - `device`         : compute device; `:cpu` or `:gpu`. If `:gpu` is requested but
                      CUDA is unavailable, falls back to `:cpu` with a warning.
@@ -96,6 +99,7 @@ struct TrainSettings
     h_loss_scale     :: Symbol
     phase_backoff_factor :: Float32
     rollout_grad     :: Symbol
+    seed             :: Union{Nothing, Int}
     strategy         :: TrainingStrategy
     device           :: Symbol
     val_daterange    :: Union{Nothing, Tuple{Dates.DateTime, Dates.DateTime}}
@@ -127,6 +131,7 @@ function TrainSettings(;
         h_loss_scale     :: Symbol = :absolute,
         phase_backoff_factor :: Real = 0.5,
         rollout_grad     :: Symbol = :full_bptt,
+        seed             :: Union{Nothing, Int} = nothing,
         device           :: Symbol = :cpu,
         val_daterange    :: Union{Nothing, Tuple{Dates.DateTime, Dates.DateTime}} = nothing,
         eval_horizon     :: Int = 30,
@@ -152,6 +157,8 @@ function TrainSettings(;
         throw(ArgumentError("phase_backoff_factor must be in (0, 1] (1 disables backoff)"))
     rollout_grad in (:full_bptt, :pushforward, :detached) ||
         throw(ArgumentError("rollout_grad must be :full_bptt, :pushforward, or :detached"))
+    isnothing(seed) || seed >= 0 ||
+        throw(ArgumentError("seed must be nothing or a non-negative Int"))
     device in (:cpu, :gpu) || throw(ArgumentError("device must be :cpu or :gpu"))
     eval_horizon >= 0 || throw(ArgumentError("eval_horizon must be non-negative (0 disables the fixed-horizon eval)"))
     eval_horizon == 0 || eval_anchors > 0 ||
@@ -180,7 +187,7 @@ function TrainSettings(;
                   Float32(lr_start), Float32(lr_final),
                   lr_steps, lr_warmup_epochs, Float32(lr_peak_decay), Float32(grad_clip),
                   h_loss_scale, Float32(phase_backoff_factor), rollout_grad,
-                  strategy, device, val_daterange,
+                  seed, strategy, device, val_daterange,
                   eval_horizon, eval_anchors, upstream_points,
                   early_stopping, early_stopping_patience,
                   checkpoint_every, checkpoint_full_eval)
@@ -199,6 +206,7 @@ function Base.show(io::IO, s::TrainSettings)
     println(io, "  h_loss_scale     : ", s.h_loss_scale)
     println(io, "  phase_backoff_factor : ", s.phase_backoff_factor)
     println(io, "  rollout_grad     : ", s.rollout_grad)
+    println(io, "  seed             : ", isnothing(s.seed) ? "nothing" : s.seed)
     println(io, "  device           : ", s.device)
     println(io, "  val_daterange : ", isnothing(s.val_daterange) ? "nothing" :
                                      string(s.val_daterange[1], " – ", s.val_daterange[2]))
@@ -254,6 +262,9 @@ function save_train_settings(path::String, s::TrainSettings)
     if !isnothing(s.val_daterange)
         dict["val_daterange"] = [string(s.val_daterange[1]), string(s.val_daterange[2])]
     end
+    if !isnothing(s.seed)
+        dict["seed"] = s.seed
+    end
     open(path, "w") do io
         TOML.print(io, dict)
     end
@@ -290,6 +301,10 @@ function load_train_settings(path::String)
         h_loss_scale     = Symbol(get(d, "h_loss_scale", "absolute")),
         phase_backoff_factor = Float32(get(d, "phase_backoff_factor", 0.5)),
         rollout_grad     = Symbol(get(d, "rollout_grad", "full_bptt")),
+        seed             = begin
+            sv = get(d, "seed", nothing)
+            isnothing(sv) ? nothing : Int(sv)
+        end,
         eval_horizon     = get(d, "eval_horizon", 30),
         eval_anchors     = get(d, "eval_anchors", 32),
         upstream_points  = get(d, "upstream_points", 5),

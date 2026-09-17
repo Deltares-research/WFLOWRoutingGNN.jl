@@ -15,6 +15,9 @@
 #
 # After all runs complete, a summary CSV is written to:
 #   <runs_dir>/<run_name>_hps_results.csv
+# If multi-seed repetitions are enabled, aggregate summaries are also written:
+#   <runs_dir>/<run_name>_hps_summary.csv
+#   <runs_dir>/<run_name>_hps_summary.toml
 # ──────────────────────────────────────────────────────────────────────────────
 
 [data]
@@ -114,6 +117,13 @@ pushforward_tf_weight = 0.0
 # Search strategy.  Currently only "box" is supported, which evaluates every
 # Cartesian-product combination of the values in search_space.
 search_type = "box"
+
+# Optional run repetition controls (choose exactly one):
+# - repetitions = N  → run each combination N times with seeds 1..N
+# - seeds = [..]     → run each combination once per explicit seed
+# If neither is set, each combination runs once with default (unseeded) RNG.
+# repetitions = 3
+# seeds = [11, 29, 47]
 
 [hparsearch.search_space]
 # Each key is a dot-separated path into the [data] / [model] / [train] tables
