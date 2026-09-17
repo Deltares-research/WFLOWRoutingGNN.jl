@@ -246,6 +246,54 @@ function scale_river_h!(slice           :: AbstractMatrix{Float32},
     end
 end
 
+function scale_river_inwater!(slice           :: AbstractMatrix{Float32},
+                              rows            :: Vector{Int},
+                              cols            :: Vector{Int},
+                              staticmaps_file :: String,
+                              schema          :: WflowSchema = SCHEMA_V1)
+    NCDataset(staticmaps_file, "r") do ds
+        coerce(x) = ismissing(x) ? NaN32 : Float32(x)
+        area = ds[schema.upstream_area_var][:, :]
+        inv  = Vector{Float32}(undef, length(rows))
+        for i in eachindex(rows)
+            a = coerce(area[rows[i], cols[i]])
+            if !isnan(a) && a > 0f0
+                slice[i, :] ./= a
+                inv[i] = a          # postscale: multiply by area to recover m^3/s
+            else
+                inv[i] = NaN32
+            end
+        end
+        inv
+    end
+end
+
+function _log1p_nonnegative!(x::AbstractArray{Float32})
+    @inbounds for i in eachindex(x)
+        v = x[i]
+        if isnan(v)
+            continue
+        end
+        x[i] = log1p(max(v, 0f0))
+    end
+    return x
+end
+
+function _log_upstream_area_feature(rows::Vector{Int}, cols::Vector{Int},
+                                    staticmaps_file::String,
+                                    schema::WflowSchema = SCHEMA_V1)
+    NCDataset(staticmaps_file, "r") do ds
+        coerce(x) = ismissing(x) ? NaN32 : Float32(x)
+        area = ds[schema.upstream_area_var][:, :]
+        out  = Vector{Float32}(undef, length(rows))
+        for i in eachindex(rows)
+            a = coerce(area[rows[i], cols[i]])
+            out[i] = isnan(a) ? NaN32 : log1p(max(a, 0f0))
+        end
+        return out
+    end
+end
+
 """
 Dict mapping `(domain, varname)` to a preprocessing scaler function.
 
@@ -259,9 +307,28 @@ const VAR_SCALERS = Dict(
     "river" => Dict(
         "river_q" => scale_river_q!,
         "river_h" => scale_river_h!,
+        "river_inwater" => scale_river_inwater!,
     ),
     "land"        => Dict{String, Function}(),
     "subsurface"  => Dict{String, Function}(),
+)
+
+"""
+Dict mapping `(domain, varname)` to optional static pre-standardization transforms.
+
+These transforms are applied in-place to the per-node static vector before
+z-score normalization.
+"""
+const STATIC_TRANSFORMS = Dict(
+    "river" => Dict(
+        "river_length" => _log1p_nonnegative!,
+        "river_slope" => _log1p_nonnegative!,
+        "river_width" => _log1p_nonnegative!,
+        "river_depth" => _log1p_nonnegative!,
+        # river_manning_n intentionally left on plain z-score
+    ),
+    "land" => Dict{String, Function}(),
+    "subsurface" => Dict{String, Function}(),
 )
 
 """
@@ -295,7 +362,10 @@ Construct a `GNNGraph` for the wflow routing domain with standardized node featu
 - The fifth return value is the shared `static` feature matrix.
 """
 function build_wflow_graph(staticmaps_file::String, output_file::String, domain::String;
-                           schema::WflowSchema = SCHEMA_V1)
+                           schema::WflowSchema = SCHEMA_V1,
+                           stats_frac::Real = 1.0,
+                           include_log_upstream_area::Bool = false)
+    0 < stats_frac <= 1 || throw(ArgumentError("stats_frac must be in (0, 1]"))
     # ── 0. Check grid alignment; detect reversed axes ────────────────────────
     alignment  = check_and_correct_grid_alignment(staticmaps_file, output_file, domain, schema)
     dim1_flip  = alignment.dim1_flip
@@ -339,9 +409,10 @@ function build_wflow_graph(staticmaps_file::String, output_file::String, domain:
     coerce(x) = ismissing(x) ? NaN32 : Float32(x)
 
     # Standardize a feature slice in-place, ignoring NaNs.
+    # Stats are estimated from `fit_view` only, then applied to all of `slice`.
     # Returns (mean, std) for the stats dict.
-    function standardize!(slice::AbstractArray{Float32})
-        vals = filter(!isnan, vec(slice))
+    function standardize!(slice::AbstractArray{Float32}, fit_view::AbstractArray{Float32})
+        vals = filter(!isnan, vec(fit_view))
         μ    = isempty(vals) ? 0f0 : mean(vals)
         σ    = (isempty(vals) || length(vals) == 1) ? 1f0 : std(vals)
         σ    = σ == 0f0 ? 1f0 : σ   # guard against constant variables
@@ -363,6 +434,7 @@ function build_wflow_graph(staticmaps_file::String, output_file::String, domain:
             isnothing(ref_idx) && throw(ArgumentError(
                 "schema has no output-sourced state/forcing variables"))
             ntimes = size(out_ds[all_tv[ref_idx].second.ncdf_name], 3)
+            nfit_t = max(1, round(Int, stats_frac * ntimes))
 
             # Extract time-varying variables; VarSpec carries ncdf_name and source.
             function extract_timeseries(var_pairs)
@@ -393,7 +465,7 @@ function build_wflow_graph(staticmaps_file::String, output_file::String, domain:
                         postscale[lname] = domain_scalers[lname](
                             @view(arr[vi, :, :]), rows, cols, staticmaps_file, schema)
                     end
-                    μ, σ = standardize!(@view arr[vi, :, :])
+                    μ, σ = standardize!(@view(arr[vi, :, :]), @view(arr[vi, :, 1:nfit_t]))
                     stats[lname] = (mean = μ, std = σ)
                 end
                 arr
@@ -417,15 +489,29 @@ function build_wflow_graph(staticmaps_file::String, output_file::String, domain:
                             arr[vi, i] = coerce(data[r_out, c_out])
                         end
                     end
-                    μ, σ = standardize!(@view arr[vi, :])
+                    static_tx = get(STATIC_TRANSFORMS, domain, Dict{String,Function}())
+                    if haskey(static_tx, lname)
+                        static_tx[lname](@view arr[vi, :])
+                    end
+                    μ, σ = standardize!(@view(arr[vi, :]), @view(arr[vi, :]))
                     stats[lname] = (mean = μ, std = σ)
                 end
                 arr
             end
 
-            extract_timeseries(schema.state_vars),
-            extract_timeseries(schema.forcing_vars),
-            extract_static(schema.static_vars)
+            state_arr   = extract_timeseries(schema.state_vars)
+            forcing_arr = extract_timeseries(schema.forcing_vars)
+            static_arr  = extract_static(schema.static_vars)
+
+            # Optional synthetic static feature for downstream conditioning.
+            if include_log_upstream_area && domain == "river"
+                feat = reshape(_log_upstream_area_feature(rows, cols, staticmaps_file, schema), 1, :)
+                μ, σ = standardize!(@view(feat[1, :]), @view(feat[1, :]))
+                stats["river_log_upstream_area"] = (mean = μ, std = σ)
+                static_arr = vcat(static_arr, feat)
+            end
+
+            state_arr, forcing_arr, static_arr
         end
     end
 
@@ -443,6 +529,109 @@ function build_wflow_graph(staticmaps_file::String, output_file::String, domain:
             nrows = nrows,
             ncols = ncols)
     return graphs, stats, grid, postscale, static
+end
+
+"""
+    normalized_tail_diagnostics(graphs, static, domain; frac_train, frac_val)
+
+Compute lightweight normalized-tail diagnostics for z-scored features across
+train/val/test temporal splits and static features.
+"""
+function normalized_tail_diagnostics(graphs::Vector{<:GNNGraph},
+                                     static::AbstractMatrix{<:Real},
+                                     domain::String;
+                                     frac_train::Real,
+                                     frac_val::Real)
+    0 < frac_train < 1 || throw(ArgumentError("frac_train must be in (0,1)"))
+    0 < frac_val < 1 || throw(ArgumentError("frac_val must be in (0,1)"))
+    frac_train + frac_val < 1 || throw(ArgumentError("frac_train + frac_val must be < 1"))
+    isempty(graphs) && throw(ArgumentError("graphs must not be empty"))
+
+    state_vars = DOMAIN_VARS[domain]["state"]
+    forcing_vars = DOMAIN_VARS[domain]["forcing"]
+    static_vars = vcat(DOMAIN_VARS[domain]["static"],
+                       size(static, 1) > length(DOMAIN_VARS[domain]["static"]) ? ["river_log_upstream_area"] : String[])
+    n_state = length(state_vars)
+    n_forcing = length(forcing_vars)
+    n_times = length(graphs)
+
+    n_train = max(1, round(Int, frac_train * n_times))
+    n_val = max(1, round(Int, frac_val * n_times))
+    t_train = 1:n_train
+    t_val_start = min(n_times, n_train + 1)
+    t_val_stop = min(n_times, n_train + n_val)
+    t_val = t_val_start:t_val_stop
+    t_test_start = min(n_times, t_val_stop + 1)
+    t_test = t_test_start:n_times
+
+    function _summ(v)
+        vals = Float64[x for x in v if isfinite(x)]
+        n = length(vals)
+        if n == 0
+            return Dict("n" => 0,
+                        "p99_abs" => NaN,
+                        "p999_abs" => NaN,
+                        "max_abs" => NaN,
+                        "frac_abs_gt3" => NaN,
+                        "frac_abs_gt5" => NaN)
+        end
+        av = abs.(vals)
+        return Dict(
+            "n" => n,
+            "p99_abs" => quantile(av, 0.99),
+            "p999_abs" => quantile(av, 0.999),
+            "max_abs" => maximum(av),
+            "frac_abs_gt3" => count(>(3.0), av) / n,
+            "frac_abs_gt5" => count(>(5.0), av) / n,
+        )
+    end
+
+    function _collect_tv(vi::Int, is_state::Bool, tr::UnitRange{Int})
+        out = Float32[]
+        for t in tr
+            arr = is_state ? graphs[t].ndata.state : graphs[t].ndata.forcing
+            append!(out, vec(arr[vi:vi, :]))
+        end
+        out
+    end
+
+    splits = Dict(
+        "train" => t_train,
+        "val" => t_val,
+        "test" => t_test,
+    )
+
+    result = Dict{String, Any}()
+    for (name, tr) in splits
+        split_dict = Dict{String, Any}()
+        for (vi, vname) in enumerate(state_vars)
+            split_dict[vname] = _summ(_collect_tv(vi, true, tr))
+        end
+        for (vi, vname) in enumerate(forcing_vars)
+            split_dict[vname] = _summ(_collect_tv(vi, false, tr))
+        end
+        result[name] = split_dict
+    end
+
+    static_dict = Dict{String, Any}()
+    for (vi, vname) in enumerate(static_vars)
+        static_dict[vname] = _summ(vec(static[vi:vi, :]))
+    end
+    result["static"] = static_dict
+    return result
+end
+
+"""
+    write_normalized_tail_diagnostics(path, diagnostics)
+
+Write normalized-tail diagnostics to TOML.
+"""
+function write_normalized_tail_diagnostics(path::String, diagnostics::Dict{String,Any})
+    mkpath(dirname(path))
+    open(path, "w") do io
+        TOML.print(io, diagnostics)
+    end
+    return path
 end
 
 """

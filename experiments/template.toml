@@ -76,6 +76,10 @@ mb_theta = 1.0
 # mass-balance output stays exact. Widens the decoder's first layer by 2 inputs.
 mb_augment_decoder = false
 
+# Optional synthetic static feature: append log1p(upstream_area) as an extra
+# static input channel (river domain). Helps conditioning for downstream nodes.
+include_log_upstream_area = false
+
 
 [train]
 # Total number of training epochs

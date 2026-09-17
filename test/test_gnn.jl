@@ -38,7 +38,8 @@ end
                       enc_activation  = relu,
                       proc_activation = tanh,
                       mb_theta        = 0.5f0,
-                      mb_augment_decoder = true)
+                      mb_augment_decoder = true,
+                      include_log_upstream_area = true)
 
     path = tempname() * ".toml"
     save_model_settings(path, s)
@@ -52,6 +53,7 @@ end
     @test s2.proc_activation === s.proc_activation
     @test s2.mb_theta        == s.mb_theta
     @test s2.mb_augment_decoder == s.mb_augment_decoder
+    @test s2.include_log_upstream_area == s.include_log_upstream_area
 
 end
 
@@ -74,6 +76,24 @@ end
         @test size(m.decoder.weight) == (GNN_N_STATE, GNN_HIDDEN)
     end
 
+end
+
+@testset "WflowGNN optional log-upstream-area feature" begin
+    s = ModelSettings(domain = GNN_DOMAIN,
+                      hidden_dim = GNN_HIDDEN,
+                      nlayers = GNN_NLAYERS,
+                      include_log_upstream_area = true)
+    m = WflowGNN(s)
+
+    @test size(m.encoder.weight) == (GNN_HIDDEN, GNN_IN_DIM + 1)
+
+    static = rand(Float32, GNN_N_STATIC + 1, GNN_N_NODES)
+    g = rand_graph(GNN_N_NODES, GNN_N_EDGES,
+                   ndata = (state   = rand(Float32, GNN_N_STATE,   GNN_N_NODES),
+                            forcing = rand(Float32, GNN_N_FORCING, GNN_N_NODES)))
+    out = m(g, g.ndata.state, g.ndata.forcing, static, g.ndata.forcing)
+    @test size(out) == (GNN_N_STATE, GNN_N_NODES)
+    @test all(isfinite, out)
 end
 
 @testset "WflowGNN forward pass" begin

@@ -1,4 +1,5 @@
 using Test
+import TOML
 using NCDatasets
 using MLUtils
 using GraphNeuralNetworks
@@ -136,8 +137,12 @@ function _raw_nodes(ncfile::String, vname::String)
         data = ds[vname][ntuple(_ -> Colon(), ndims(ds[vname]))...]
         coerce(x) = ismissing(x) ? NaN32 : Float32(x)
         if ndims(data) == 2
-            # Static vars from staticmaps.nc — no axis flip, no extra transform
-            [coerce(data[REF_ROWS[i], REF_COLS[i]]) for i in 1:REF_N_NODES]
+            vals = Float32[coerce(data[REF_ROWS[i], REF_COLS[i]]) for i in 1:REF_N_NODES]
+            static_tx = get(WflowRoutingGNN.STATIC_TRANSFORMS, "river", Dict{String,Function}())
+            if haskey(static_tx, vname)
+                static_tx[vname](vals)
+            end
+            vals
         else
             # Time-varying vars: build (n_nodes × n_times) matrix, apply scaler, flatten.
             n_t = size(data, 3)
@@ -234,7 +239,12 @@ const STATIC_VARS  = DOMAIN_VARS["river"]["static"]
         raw_len = NCDataset(STATICMAPS, "r") do ds
             Float32(ds["river_length"][REF_ROWS[spot_i], REF_COLS[spot_i]])
         end
-        expected_len = (raw_len - BG_STATS["river_length"].mean) / BG_STATS["river_length"].std
+        len_vec = Float32[raw_len]
+        static_tx = get(WflowRoutingGNN.STATIC_TRANSFORMS, "river", Dict{String,Function}())
+        if haskey(static_tx, "river_length")
+            static_tx["river_length"](len_vec)
+        end
+        expected_len = (len_vec[1] - BG_STATS["river_length"].mean) / BG_STATS["river_length"].std
         @test BG_STATIC[1, spot_i] ≈ expected_len  atol=1f-5
     end
 
@@ -454,4 +464,58 @@ end
     @test occursin("myrun",        str)
     @test occursin("0.6",          str)
     @test occursin("0.2",          str)
+end
+
+@testset "build_wflow_graph stats_frac uses early timesteps for fit" begin
+    graphs_full, stats_full, _, _, _ = build_wflow_graph(STATICMAPS, OUTPUT_NC, "river"; stats_frac = 1.0)
+    _, stats_half, _, _, _ = build_wflow_graph(STATICMAPS, OUTPUT_NC, "river"; stats_frac = 0.5)
+
+    n_fit = max(1, round(Int, 0.5 * length(graphs_full)))
+    q_scaled = NCDataset(OUTPUT_NC, "r") do ds
+        coerce(x) = ismissing(x) ? NaN32 : Float32(x)
+        data = ds["river_q"][:, :, :]
+        mat = [coerce(data[OUT_ROWS[i], OUT_COLS[i], t])
+               for i in 1:REF_N_NODES, t in 1:REF_NTIMES]
+        domain_scalers = get(VAR_SCALERS, "river", Dict{String,Function}())
+        haskey(domain_scalers, "river_q") &&
+            domain_scalers["river_q"](mat, REF_ROWS, REF_COLS, STATICMAPS)
+        mat
+    end
+    train_vals = collect(vec(@view q_scaled[:, 1:n_fit]))
+    μ_ref, _ = _ref_stats(train_vals)
+
+    @test stats_half["river_q"].mean ≈ μ_ref atol=1f-6
+    @test stats_half["river_q"].mean != stats_full["river_q"].mean
+end
+
+@testset "build_wflow_graph optional log upstream area feature" begin
+    _, stats0, _, _, static0 = build_wflow_graph(STATICMAPS, OUTPUT_NC, "river";
+                                                 include_log_upstream_area = false)
+    _, stats1, _, _, static1 = build_wflow_graph(STATICMAPS, OUTPUT_NC, "river";
+                                                 include_log_upstream_area = true)
+
+    @test size(static1, 1) == size(static0, 1) + 1
+    @test haskey(stats1, "river_log_upstream_area")
+    @test !haskey(stats0, "river_log_upstream_area")
+    @test isfinite(stats1["river_log_upstream_area"].mean)
+    @test isfinite(stats1["river_log_upstream_area"].std)
+end
+
+@testset "normalized tail diagnostics writer" begin
+    diags = WflowRoutingGNN.normalized_tail_diagnostics(BG_GRAPHS, BG_STATIC, "river";
+                                                        frac_train = 0.6,
+                                                        frac_val = 0.2)
+    @test haskey(diags, "train")
+    @test haskey(diags, "val")
+    @test haskey(diags, "test")
+    @test haskey(diags, "static")
+    @test haskey(diags["train"], "river_q")
+    @test haskey(diags["train"]["river_q"], "p99_abs")
+
+    path = tempname() * ".toml"
+    WflowRoutingGNN.write_normalized_tail_diagnostics(path, diags)
+    loaded = TOML.parsefile(path)
+    rm(path)
+    @test haskey(loaded, "train")
+    @test haskey(loaded, "static")
 end

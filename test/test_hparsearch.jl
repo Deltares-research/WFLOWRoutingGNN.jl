@@ -16,6 +16,7 @@ using WflowRoutingGNN
                 "domain" => "river",
                 "hidden_dim" => 32,
                 "nlayers" => 2,
+                "include_log_upstream_area" => true,
             ),
             "train" => Dict{String, Any}(
                 "epochs" => 4,
@@ -83,6 +84,8 @@ using WflowRoutingGNN
         @test ds_a.runs_dir == ds_b.runs_dir
         @test ds_a.wflow_model_path == ds_b.wflow_model_path
         @test ms_a.hidden_dim == ms_b.hidden_dim
+        @test ms_a.include_log_upstream_area == true
+        @test ms_b.include_log_upstream_area == true
 
         seeds = WflowRoutingGNN._resolve_replication_seeds(parsed["hparsearch"])
         @test seeds == [1, 2]

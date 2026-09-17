@@ -51,14 +51,14 @@ Rescaling q/h to attack `amp` (per-node σ, or θ*=σ_h/(dt·σ_q), see
 [notes/mass_balance_stability_notes.md](notes/mass_balance_stability_notes.md) §4)
 is a separate, MB-invasive item — not below.
 
-- [ ] Keep physics channels (`q`, `h`, `inwater`) on **linear z-score** (nonlinear
+- [x] Keep physics channels (`q`, `h`, `inwater`) on **linear z-score** (nonlinear
       transforms would need inverting inside the MB layer).
-- [ ] Area-normalise `river_inwater` like `river_q` (fold into `σ/μ_inwater`).
-- [ ] `log1p`+z-score the skewed statics (`river_slope`, `width`, `depth`,
+- [x] Area-normalise `river_inwater` like `river_q` (fold into `σ/μ_inwater`).
+- [x] `log1p`+z-score the skewed statics (`river_slope`, `width`, `depth`,
       `length`); plain z-score for `river_manning_n`.
-- [ ] Optional `log(upstream_area)` static feature.
-- [ ] Fit all stats on the **training split only**; add a normalized-tail
-      diagnostic dump.
+- [x] Optional `log(upstream_area)` static feature.
+- [x] Fit all stats on the **training split only**.
+- [x] Add a normalized-tail diagnostic dump.
 - Touch: `src/preprocess.jl` (`VAR_SCALERS`), `src/gnn.jl`, `src/schema.jl`.
 
 ## 2b. Validation metrics — remaining items

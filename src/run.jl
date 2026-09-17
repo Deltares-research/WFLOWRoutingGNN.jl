@@ -99,6 +99,7 @@ function settings_from_config(d::AbstractDict, toml_dir::AbstractString)
         enforce_mass_balance = get(md, "enforce_mass_balance", true),
         mb_theta        = Float32(get(md, "mb_theta", 1.0)),
         mb_augment_decoder = get(md, "mb_augment_decoder", false),
+        include_log_upstream_area = get(md, "include_log_upstream_area", false),
     )
 
     td = d["train"]
@@ -651,7 +652,11 @@ function run_wflow_gnn(ds::DataSettings, ms::ModelSettings, ts::TrainSettings)
 
     @info "Building Graph"
     schema = load_schema(ds.wflow_schema)
-    graphs, norm_stats, grid, postscale, static_arr = build_wflow_graph(staticmaps_file, output_file, ms.domain; schema)
+    graphs, norm_stats, grid, postscale, static_arr = build_wflow_graph(
+        staticmaps_file, output_file, ms.domain;
+        schema,
+        stats_frac = ds.train_frac,
+        include_log_upstream_area = ms.include_log_upstream_area)
 
     g0        = graphs[1]
     n_nodes   = g0.num_nodes
@@ -742,6 +747,15 @@ function run_wflow_gnn(ds::DataSettings, ms::ModelSettings, ts::TrainSettings)
     mkpath(metrics_dir)
     mkpath(plots_dir)
     mkpath(output_dir)
+
+    # Lightweight normalized-tail dump for train/val/test/static z-scored
+    # features. Helps detect heavy-tail outliers after feature scaling.
+    tail_diag = normalized_tail_diagnostics(
+        graphs, static_arr, ms.domain;
+        frac_train = ds.train_frac,
+        frac_val = ds.val_frac)
+    write_normalized_tail_diagnostics(
+        joinpath(metrics_dir, "normalized_tail_diagnostics.toml"), tail_diag)
 
     # Fixed-horizon validation metric (constant-length rollout from anchors),
     # comparable epoch-to-epoch and used for early stopping when enabled.

@@ -75,6 +75,11 @@ Hyperparameters for a `WflowGNN` model.
                    unchanged (exact). Only used when the mass balance is active
                    (`river` domain with `enforce_mass_balance = true`); ignored
                    otherwise (default `false`).
+- `include_log_upstream_area` : append one optional synthetic static feature,
+                   `log1p(upstream_area)`, to the model input (river domain).
+                   Useful for better downstream conditioning. Must match the
+                   preprocessing setting used when building graph features
+                   (default `false`).
 """
 Base.@kwdef struct ModelSettings
     domain               :: String
@@ -86,6 +91,7 @@ Base.@kwdef struct ModelSettings
     enforce_mass_balance :: Bool = true
     mb_theta             :: Float32 = 1.0f0
     mb_augment_decoder   :: Bool = false
+    include_log_upstream_area :: Bool = false
 end
 
 function Base.show(io::IO, s::ModelSettings)
@@ -98,7 +104,8 @@ function Base.show(io::IO, s::ModelSettings)
     println(io, "  proc_activation : ", _activation_name(s.proc_activation))
     println(io, "  enforce_mass_balance : ", s.enforce_mass_balance)
     println(io, "  mb_theta        : ", s.mb_theta)
-    print(  io, "  mb_augment_decoder : ", s.mb_augment_decoder)
+    println(io, "  mb_augment_decoder : ", s.mb_augment_decoder)
+    print(  io, "  include_log_upstream_area : ", s.include_log_upstream_area)
 end
 
 """
@@ -118,6 +125,7 @@ function save_model_settings(path::String, s::ModelSettings)
         "enforce_mass_balance" => s.enforce_mass_balance,
         "mb_theta"        => s.mb_theta,
         "mb_augment_decoder" => s.mb_augment_decoder,
+        "include_log_upstream_area" => s.include_log_upstream_area,
     )
     open(path, "w") do io
         TOML.print(io, dict)
@@ -145,6 +153,7 @@ function load_model_settings(path::String)
         enforce_mass_balance = get(d, "enforce_mass_balance", true),
         mb_theta        = Float32(get(d, "mb_theta", 1.0)),
         mb_augment_decoder = get(d, "mb_augment_decoder", false),
+        include_log_upstream_area = get(d, "include_log_upstream_area", false),
     )
 end
 
@@ -710,7 +719,8 @@ function WflowGNN(s::ModelSettings)
     s.domain in keys(DOMAIN_VARS) ||
         throw(ArgumentError("domain must be one of $(join(sort(collect(keys(DOMAIN_VARS))), ", ")), got \"$(s.domain)\""))
     vars    = DOMAIN_VARS[s.domain]
-    in_dim  = length(vars["state"]) + length(vars["forcing"]) + length(vars["static"])
+    extra_static = (s.domain == "river" && s.include_log_upstream_area) ? 1 : 0
+    in_dim  = length(vars["state"]) + length(vars["forcing"]) + length(vars["static"]) + extra_static
     out_dim = length(vars["state"])
     return WflowGNN(in_dim, s.hidden_dim, out_dim;
                     nlayers         = s.nlayers,
@@ -737,7 +747,8 @@ function WflowGNN(s::ModelSettings, A::AbstractMatrix{Float32})
     s.domain in keys(DOMAIN_VARS) ||
         throw(ArgumentError("domain must be one of $(join(sort(collect(keys(DOMAIN_VARS))), ", ")), got \"$(s.domain)\""))
     vars    = DOMAIN_VARS[s.domain]
-    in_dim  = length(vars["state"]) + length(vars["forcing"]) + length(vars["static"])
+    extra_static = (s.domain == "river" && s.include_log_upstream_area) ? 1 : 0
+    in_dim  = length(vars["state"]) + length(vars["forcing"]) + length(vars["static"]) + extra_static
     out_dim = length(vars["state"])
     return WflowGNN(in_dim, s.hidden_dim, out_dim;
                     nlayers         = s.nlayers,
@@ -758,7 +769,8 @@ function WflowGNN(s::ModelSettings, mb::MassBalanceLayer)
     s.domain in keys(DOMAIN_VARS) ||
         throw(ArgumentError("domain must be one of $(join(sort(collect(keys(DOMAIN_VARS))), ", ")), got \"$(s.domain)\""))
     vars   = DOMAIN_VARS[s.domain]
-    in_dim = length(vars["state"]) + length(vars["forcing"]) + length(vars["static"])
+    extra_static = (s.domain == "river" && s.include_log_upstream_area) ? 1 : 0
+    in_dim = length(vars["state"]) + length(vars["forcing"]) + length(vars["static"]) + extra_static
     return WflowGNN(in_dim, s.hidden_dim, 1;
                     nlayers         = s.nlayers,
                     mlp_layers      = s.mlp_layers,
@@ -778,7 +790,8 @@ function WflowGNN(s::ModelSettings, mb::MassBalanceLayer, A::AbstractMatrix{Floa
     s.domain in keys(DOMAIN_VARS) ||
         throw(ArgumentError("domain must be one of $(join(sort(collect(keys(DOMAIN_VARS))), ", ")), got \"$(s.domain)\""))
     vars   = DOMAIN_VARS[s.domain]
-    in_dim = length(vars["state"]) + length(vars["forcing"]) + length(vars["static"])
+    extra_static = (s.domain == "river" && s.include_log_upstream_area) ? 1 : 0
+    in_dim = length(vars["state"]) + length(vars["forcing"]) + length(vars["static"]) + extra_static
     return WflowGNN(in_dim, s.hidden_dim, 1;
                     nlayers         = s.nlayers,
                     mlp_layers      = s.mlp_layers,

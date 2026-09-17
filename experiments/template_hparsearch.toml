@@ -73,6 +73,10 @@ mb_theta = 1.0
 # hard mass-balance output stays exact. Sweepable via [hparsearch.search_space].
 mb_augment_decoder = false
 
+# Optional synthetic static feature: append log1p(upstream_area) as an extra
+# static input channel (river domain).
+include_log_upstream_area = false
+
 
 [train]
 # Base training settings — individual values may be overridden by [hparsearch]
@@ -144,6 +148,9 @@ search_type = "box"
 
 # Physics-augmented decoder inputs (upstream-Q sum + explicit depth estimate).
 "model.mb_augment_decoder" = [false, true]
+
+# Optional upstream-area context feature.
+"model.include_log_upstream_area" = [false, true]
 
 # Learning rate
 "train.lr_start" = [1e-3, 5e-4]
