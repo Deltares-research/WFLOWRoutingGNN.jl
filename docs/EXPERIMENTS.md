@@ -6,6 +6,28 @@ Experiment configs live under `experiments/`. Newest at the top.
 
 # PROPOSED
 
+> **E11 — distribution/physics-aware feature scaling (TODO §1) on the best-known
+> base, 5-seed replication. CONFIGURED, not yet run.** The first item off the
+> "still owed" list below: the new normalization (log1p-scaled skewed statics
+> `slope`/`width`/`depth`/`length`, area-normalised `river_inwater`, train-split-only
+> stats — all now default — plus the optional `log1p(upstream_area)` static context
+> feature, `include_log_upstream_area = true`) applied to the established pure-
+> pushforward base and run **5× over seeds 1–5** so the effect reads as mean ± std,
+> not a single seed-dominated point. Only intended deltas vs the E9/E10 hps1 base:
+> the new normalization, plain MSE (drops the E10 `huber + peak_delta=1000`
+> workaround since peak-weighting is closed), and the 5-seed replication. Everything
+> else held at the working base (`rollout_grad = pushforward`, `tf = 0`, `noise = 0`,
+> `peak_lambda = 0`, `mb_theta = 1`, `lr = 1.3457e-4`, `h_loss_scale = increment`,
+> `[1,2,5,8,10]×50 = 250` ep, 8×64 / mlp 2, q≥0 floor). **Key read-out:** does
+> `spatial_median.river_h.nse` (the binding failure, stuck ~−120 across E4→E10 and
+> hypothesised to be a scaling problem) move, and do the downstream/outlet rollout
+> tail (per-node RMSE, NSE p10, outlet peak ratio) tighten — judged on the deployed
+> free-rollout timeseries (E9 lesson), read as mean ± std. `amp` expected ~unchanged
+> (q/h stay linear z-score). Config:
+> [experiments/sava_small_v081_e11_normalization/config.toml](../experiments/sava_small_v081_e11_normalization/config.toml).
+> Cost ~2 h/seed on the pushforward base ⇒ ~10 h for the 5 seeds (sequential in one
+> job; the box has a single combo).
+>
 > **The planned post-E6 pushforward follow-up series (E7–E10) is COMPLETE.** No
 > single-knob sweep is queued. What the series settled: the boundedness win was the
 > always-on **q≥0 floor** (E7; noise was a weak/chaotic lever); deepening the
@@ -20,14 +42,15 @@ Experiment configs live under `experiments/`. Newest at the top.
 > **Still OWED (not yet configured) — the real open work:**
 > 1. **Distribution/scaling fixes (TODO §1)** for downstream conditioning — the
 >    prime suspect for the persistent `river_h` failure (spatial NSE stuck ~−120)
->    and the outlet-dominated rollout error. This is now the priority, not more
->    loss/curriculum knobs.
+>    and the outlet-dominated rollout error. **→ now being tested as E11 (5-seed,
+>    configured above).**
 > 2. **Clean budget-controlled schedule study** (E8 follow-up): isolate fragmentation
 >    (horizon 10 in many short phases) vs depth (add deep phases holding ~50 epochs
 >    at steps=1), maybe a longer total budget.
 > 3. **Multi-seed confirmation** (≥3 seeds) of the levers currently within the seed
 >    band before relying on any of them — fixed-horizon RMSE for the pure-pf base is
 >    now replicated 4× at {9.3, 30.7, 95, 1558}, i.e. hopelessly seed-dominated.
+>    **→ E11 establishes the 5-seed pure-pf-base reference distribution.**
 > 4. **Engineering:** gate `peak_stats` on `loss_type == :huber || peak_lambda > 0`
 >    (drops the E10 `peak_delta = 1000` workaround) if peak-weighting is ever revisited.
 
