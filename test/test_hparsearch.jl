@@ -118,5 +118,15 @@ using WflowRoutingGNN
             Dict{String,Any}("seeds" => Any[1], "repetitions" => 2))
         @test_throws ArgumentError WflowRoutingGNN._resolve_replication_seeds(
             Dict{String,Any}("repetitions" => 0))
+
+        # Repetitions-only mode: empty search space means one base combination.
+        hps_empty = WflowRoutingGNN.HParSearchSettings(
+            search_type = "box",
+            search_space = Dict{String, Vector{Any}}(),
+            seeds = [1, 2, 3],
+        )
+        combos_empty = WflowRoutingGNN._box_combinations(hps_empty.search_space)
+        @test length(combos_empty) == 1
+        @test isempty(first(combos_empty))
     end
 end

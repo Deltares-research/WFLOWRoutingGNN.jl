@@ -41,8 +41,6 @@ function HParSearchSettings(;
         throw(ArgumentError("search_type must be one of " *
                             join(SUPPORTED_SEARCH_TYPES, ", ") *
                             "; got \"$search_type\""))
-    isempty(search_space) &&
-        throw(ArgumentError("search_space must not be empty"))
     seeds_v = Int[seeds...]
     all(>=(0), seeds_v) ||
         throw(ArgumentError("all seeds must be non-negative"))
