@@ -61,6 +61,95 @@ is a separate, MB-invasive item — not below.
 - [x] Add a normalized-tail diagnostic dump.
 - Touch: `src/preprocess.jl` (`VAR_SCALERS`), `src/gnn.jl`, `src/schema.jl`.
 
+## 1a. MB-invasive rescaling — Option A (per-node σ + smooth h-floor)
+
+**Why (E11 + floor-diagnostics, 2026-09-18).** E11's non-invasive scaling fixed
+`river_q` (best-in-series KGE 0.919) but left `river_h` **degenerate**: collapsed
+to a near-constant upstream (`std(pred_h) = 0.000` at headwater `node48`, all 5
+seeds) and over-dispersed downstream. Reading the persisted `mb_diagnostics.csv`
+across all 5 seeds shows the proximate mechanism: the **`max(0,·)` depth floor
+fires on ~62 % of nodes every step** (`frac_h_raw_neg` mean 0.61–0.63, max ~0.78),
+and the **median node's post-floor depth is exactly 0 in ~90–96 % of timesteps**
+(`pred_h_med = 0`). Two coupled root causes, each needing a *different* invasive
+fix:
+  - **(i) Representation.** A single global `σ_h = 24.582` under-resolves
+    headwater depth (0.2 m maps to a normalized span ~0.008 — below resolution),
+    so the decoder treats upstream h as noise. → **per-node `σ_h`/`μ_h`** (and
+    `σ_q`/`μ_q`).
+  - **(ii) Gradient dead-zone.** The hard `max(0,·)` has **zero gradient on the
+    clamped branch**, so ~62 % of the h-channel provides **no learning signal** to
+    stop the chronic physical over-drain (`net_flux_med ≈ −0.13`, median node loses
+    water every step). → **smooth (softplus-style) floor**.
+
+> **Scope / honesty (from the same analysis).** The floor lives in **physical**
+> space (`net_flux = A^⊤q_phys + I − q_phys`), so **per-node σ does NOT change how
+> often the floor fires** — it fixes representation (i), not the physical
+> over-drain. The smooth floor fixes the dead-zone (ii). Neither removes the
+> deeper "h is slaved to q via the balance" root — that is the **B/C-hybrid
+> reformulation** ([notes/mass_balance_formulations.md](notes/mass_balance_formulations.md)).
+> Option A is the **cheap, immediate** invasive step; expect it to be *necessary
+> but not sufficient*. Do NOT expect it to fix the downstream over-shoot or the
+> stiff fixed-horizon divergence (`frac_gt2 = 1.0`).
+
+- [x] **Per-node normalization stats for `q`, `h` (and `inwater`).** Replace the
+      scalar `μ`/`σ` from `standardize!` ([src/preprocess.jl](../src/preprocess.jl#L410))
+      with **per-node** `(1×n)` vectors, computed **train-split-only**, persisted
+      to `norm_stats` (scalar → vector schema change). Keep them **affine per
+      node** — additivity and the `A^⊤(·)` routing gather stay exact, so the MB
+      round-trip and conservation self-test are preserved (a nonlinear per-node
+      map would break additivity; an affine one does not).
+- [x] **Thread per-node `σ_q,μ_q,σ_h,μ_h` into `MassBalanceLayer`.** Change the
+      scalar fields to `(1×n)` vectors and reuse the **existing `postscale`
+      tiling** path ([src/gnn.jl](../src/gnn.jl#L270)) so batching / `gpu` / `cpu`
+      are unchanged. The de/renormalization
+      (`h_phys = ph·(h_norm·σ_h + μ_h)`; inverse on return) becomes per-node.
+- [x] **Smooth depth floor.** Replace the hard `h_phys_new = max.(0f0, …)`
+      ([src/gnn.jl](../src/gnn.jl#L335)) with a softplus-style non-negative map so
+      the near-dry branch carries a small gradient (kills the dead-zone) while
+      keeping `h ≥ 0`. Behind a toggle; keep the hard `max(0,·)` path for A/B.
+      Consider the same for the q floor (`_floor_q_norm_nonnegative`,
+      [src/gnn.jl](../src/gnn.jl#L344)).
+- [x] **Per-node stiffness check.** After per-node σ, the training stiffness is
+      `∂h_norm,i/∂q_norm,i = −θ·Δt·σ_q,i/σ_h,i` (was a uniform −21.95·θ). Log it
+      per node; confirm it tracks the local rating slope and that `amp`/`mb_gain`
+      drop below the current ≈7 / ≈22 (the mechanism test — if `amp` is unchanged,
+      per-node σ did not help the accumulation amp and only (i) was addressed).
+- [ ] **Validation (per the E11 lesson — never trust the aggregate NSE).**
+      - `std(pred_h)/std(truth_h)` per gauge must move toward ≈1 at **both** ends
+        (the specific artifact E11 caught); `node48` must stop being a flatline.
+      - `frac_h_raw_neg` (network-wide) and a **per-node floor fraction**
+        (`mean(h_raw .< 0; dims=2)`) must drop from ~62 %.
+      - Pred budget residual stays ~0 (per-node affine must preserve exact
+        conservation) — self-test.
+      - Multi-seed (≥3) given the documented seed chaos.
+- **Prereq diagnostic (cheap, gradient-free — do first).** [x] Persist a **per-node
+      floor fraction** so the collapse localises to specific nodes: the current CSV
+      only writes the across-nodes `frac_h_raw_neg` median
+      ([src/plot.jl](../src/plot.jl#L850)), which averages out the node48 signal.
+      Add a per-node `floor_frac` column (or a small side table) from the
+      already-computed `h_raw` matrix in `rollout_mb_diagnostics`
+      ([src/rollout.jl](../src/rollout.jl#L544)).
+      Also persist a compact `metrics.toml` summary block (`mass_balance_floor`)
+      with network/nodewise aggregates (mean/median/p90/max and max-node index)
+      for cross-run comparison without parsing CSV.
+- Touch: `src/preprocess.jl` (`standardize!` → per-node vectors, `norm_stats`
+      schema), `src/gnn.jl` (`MassBalanceLayer` fields + de/renormalize + smooth
+      floor), `src/rollout.jl` (`mb_diagnostics` per-node floor fraction),
+      `src/plot.jl` (persist it), config toggle for the smooth floor, tests for
+      the conservation self-test + `q,h ≥ 0`.
+- **VALIDATED (E11, 2026-09-18, 5-seed on the pushforward base).** Fixes **(b)** for
+  `river_q`: pooled KGE **0.919 ± 0.033** (best in series, PBIAS ≈ 0), q well-scaled at
+  every node, `amp` unchanged (6.65 ± 0.78). **But it does NOT fix `river_h`.** The
+  `river_h` spatial NSE −118 → −4.64 is a *degenerate-flatline artifact*, not skill:
+  on the free rollout `river_h` collapses to a near-constant upstream (std(pred_h)=0 at
+  the headwater, all 5 seeds) and over-shoots downstream. Since `river_h` is derived
+  analytically from q, this is a **decoder / h(q)-derivation** problem, i.e. item **(a)**
+  territory, not feature conditioning. The stiff fixed-horizon rollout also still
+  diverges (`frac_gt2 = 1.0`). See docs/EXPERIMENTS.md E11 (with correction).
+  → **Adopt the scaling for the `river_q` gain.** `river_h` + the flux-accumulation amp
+  remain the top open problem and need item **(a)** (MB-invasive q/h rescaling, §4 of
+  mass_balance_stability_notes) — separate work.
+
 ## 2b. Validation metrics — remaining items
 
 Tier 1 (peak diagnostics: `peak_epoch_diagnostics`) and Tier 2

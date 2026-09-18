@@ -39,7 +39,9 @@ end
                       proc_activation = tanh,
                       mb_theta        = 0.5f0,
                       mb_augment_decoder = true,
-                      include_log_upstream_area = true)
+                      include_log_upstream_area = true,
+                      mb_smooth_h_floor = true,
+                      mb_h_floor_softness = 0.02f0)
 
     path = tempname() * ".toml"
     save_model_settings(path, s)
@@ -54,6 +56,8 @@ end
     @test s2.mb_theta        == s.mb_theta
     @test s2.mb_augment_decoder == s.mb_augment_decoder
     @test s2.include_log_upstream_area == s.include_log_upstream_area
+    @test s2.mb_smooth_h_floor == s.mb_smooth_h_floor
+    @test s2.mb_h_floor_softness == s.mb_h_floor_softness
 
 end
 
@@ -139,8 +143,12 @@ end
     ph = fill(0.5f0, N)
     mb = WflowRoutingGNN.MassBalanceLayer(
         pq, ph, ph ./ pq,
-        0.0f0, 1.0f0, 0.0f0, 1.0f0, 0.0f0, 1.0f0, 86400.0f0,
+        fill(0.0f0, N), fill(1.0f0, N),
+        fill(0.0f0, N), fill(1.0f0, N),
+        fill(0.0f0, N), fill(1.0f0, N),
+        86400.0f0,
         A_routing, nothing, 0, 1.0f0,
+        false, 0.05f0,
     )
 
     s_base = ModelSettings(domain = GNN_DOMAIN, hidden_dim = GNN_HIDDEN,

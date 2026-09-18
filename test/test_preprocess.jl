@@ -121,7 +121,7 @@ const REF_NTIMES = NCDataset(OUTPUT_NC, "r") do ds
 end
 
 # Reproduce the standardize! logic from gnn.jl for reference computations.
-function _ref_stats(vals::Vector{Float32})
+function _ref_stats(vals::AbstractVector{Float32})
     v = filter(!isnan, vals)
     u = isempty(v) ? 0f0 : mean(v)
     s = (isempty(v) || length(v) == 1) ? 1f0 : std(v)
@@ -157,6 +157,21 @@ function _raw_nodes(ncfile::String, vname::String)
     end
 end
 
+function _raw_nodes_matrix(ncfile::String, vname::String)
+    NCDataset(ncfile, "r") do ds
+        data = ds[vname][:, :, :]
+        coerce(x) = ismissing(x) ? NaN32 : Float32(x)
+        n_t = size(data, 3)
+        mat = [coerce(data[OUT_ROWS[i], OUT_COLS[i], t])
+               for i in 1:REF_N_NODES, t in 1:n_t]
+        domain_scalers = get(VAR_SCALERS, "river", Dict{String,Function}())
+        if haskey(domain_scalers, vname)
+            domain_scalers[vname](mat, REF_ROWS, REF_COLS, STATICMAPS)
+        end
+        mat
+    end
+end
+
 const BG_GRAPHS, BG_STATS, BG_GRID, BG_POSTSCALE, BG_STATIC = build_wflow_graph(STATICMAPS, OUTPUT_NC, "river")
 
 const REF_NCOLS = NCDataset(STATICMAPS, "r") do ds
@@ -188,10 +203,23 @@ const STATIC_VARS  = DOMAIN_VARS["river"]["static"]
 
     @testset "normalization stats match raw-data reference" begin
         for vname in [STATE_VARS; FORCING_VARS]
-            raw          = _raw_nodes(OUTPUT_NC, vname)
-            u_ref, s_ref = _ref_stats(raw)
-            @test BG_STATS[vname].mean == u_ref
-            @test BG_STATS[vname].std  == s_ref
+            if vname in WflowRoutingGNN.PER_NODE_NORM_VARS
+                rawm = _raw_nodes_matrix(OUTPUT_NC, vname)
+                @test BG_STATS[vname].mean isa AbstractVector
+                @test BG_STATS[vname].std isa AbstractVector
+                @test length(BG_STATS[vname].mean) == REF_N_NODES
+                @test length(BG_STATS[vname].std) == REF_N_NODES
+                for i in 1:REF_N_NODES
+                    u_ref, s_ref = _ref_stats(vec(@view rawm[i, :]))
+                    @test BG_STATS[vname].mean[i] ≈ u_ref atol=1f-6
+                    @test BG_STATS[vname].std[i]  ≈ s_ref atol=1f-6
+                end
+            else
+                raw          = _raw_nodes(OUTPUT_NC, vname)
+                u_ref, s_ref = _ref_stats(raw)
+                @test BG_STATS[vname].mean == u_ref
+                @test BG_STATS[vname].std  == s_ref
+            end
         end
         for vname in STATIC_VARS
             raw          = _raw_nodes(STATICMAPS, vname)
@@ -224,7 +252,7 @@ const STATIC_VARS  = DOMAIN_VARS["river"]["static"]
         slice_q = reshape([raw_q_val], 1, 1)
         haskey(domain_scalers, "river_q") &&
             domain_scalers["river_q"](slice_q, [REF_ROWS[spot_i]], [REF_COLS[spot_i]], STATICMAPS)
-        expected_q = (slice_q[1,1] - BG_STATS["river_q"].mean) / BG_STATS["river_q"].std
+        expected_q = (slice_q[1,1] - BG_STATS["river_q"].mean[spot_i]) / BG_STATS["river_q"].std[spot_i]
         @test BG_GRAPHS[spot_t].ndata.state[1, spot_i] ≈ expected_q  atol=1f-5
 
         raw_h = NCDataset(OUTPUT_NC, "r") do ds
@@ -233,7 +261,7 @@ const STATIC_VARS  = DOMAIN_VARS["river"]["static"]
         slice_h = reshape([raw_h], 1, 1)
         haskey(domain_scalers, "river_h") &&
             domain_scalers["river_h"](slice_h, [REF_ROWS[spot_i]], [REF_COLS[spot_i]], STATICMAPS)
-        expected_h = (slice_h[1,1] - BG_STATS["river_h"].mean) / BG_STATS["river_h"].std
+        expected_h = (slice_h[1,1] - BG_STATS["river_h"].mean[spot_i]) / BG_STATS["river_h"].std[spot_i]
         @test BG_GRAPHS[spot_t].ndata.state[2, spot_i] ≈ expected_h  atol=1f-5
 
         raw_len = NCDataset(STATICMAPS, "r") do ds
@@ -481,11 +509,11 @@ end
             domain_scalers["river_q"](mat, REF_ROWS, REF_COLS, STATICMAPS)
         mat
     end
-    train_vals = collect(vec(@view q_scaled[:, 1:n_fit]))
-    μ_ref, _ = _ref_stats(train_vals)
+    μ_ref_node1, _ = _ref_stats(vec(@view q_scaled[1, 1:n_fit]))
 
-    @test stats_half["river_q"].mean ≈ μ_ref atol=1f-6
-    @test stats_half["river_q"].mean != stats_full["river_q"].mean
+    @test stats_half["river_q"].mean isa AbstractVector
+    @test stats_half["river_q"].mean[1] ≈ μ_ref_node1 atol=1f-6
+    @test any(stats_half["river_q"].mean .!= stats_full["river_q"].mean)
 end
 
 @testset "build_wflow_graph optional log upstream area feature" begin

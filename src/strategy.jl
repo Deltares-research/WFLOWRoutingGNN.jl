@@ -667,7 +667,9 @@ function mb_amplification(model::WflowGNN, batch::Vector{<:GNNGraph}, static::Ab
         dh    = h_pred .- h_ref
         denom = sqrt(mean(abs2, dq))
         amp   = denom > 0f0 ? Float32(sqrt(mean(abs2, dh)) / denom) : NaN32
-        gain  = Float32(mb.θ * mb.dt * mb.σ_q / mb.σ_h)
+        gain_vec = mb.θ .* mb.dt .* mb.σ_q ./ mb.σ_h
+        fg = Float32[x for x in gain_vec if isfinite(x)]
+        gain = isempty(fg) ? NaN32 : Float32(median(fg))
         (amp, gain)
     end
 end

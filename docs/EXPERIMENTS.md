@@ -6,52 +6,33 @@ Experiment configs live under `experiments/`. Newest at the top.
 
 # PROPOSED
 
-> **E11 — distribution/physics-aware feature scaling (TODO §1) on the best-known
-> base, 5-seed replication. CONFIGURED, not yet run.** The first item off the
-> "still owed" list below: the new normalization (log1p-scaled skewed statics
-> `slope`/`width`/`depth`/`length`, area-normalised `river_inwater`, train-split-only
-> stats — all now default — plus the optional `log1p(upstream_area)` static context
-> feature, `include_log_upstream_area = true`) applied to the established pure-
-> pushforward base and run **5× over seeds 1–5** so the effect reads as mean ± std,
-> not a single seed-dominated point. Only intended deltas vs the E9/E10 hps1 base:
-> the new normalization, plain MSE (drops the E10 `huber + peak_delta=1000`
-> workaround since peak-weighting is closed), and the 5-seed replication. Everything
-> else held at the working base (`rollout_grad = pushforward`, `tf = 0`, `noise = 0`,
-> `peak_lambda = 0`, `mb_theta = 1`, `lr = 1.3457e-4`, `h_loss_scale = increment`,
-> `[1,2,5,8,10]×50 = 250` ep, 8×64 / mlp 2, q≥0 floor). **Key read-out:** does
-> `spatial_median.river_h.nse` (the binding failure, stuck ~−120 across E4→E10 and
-> hypothesised to be a scaling problem) move, and do the downstream/outlet rollout
-> tail (per-node RMSE, NSE p10, outlet peak ratio) tighten — judged on the deployed
-> free-rollout timeseries (E9 lesson), read as mean ± std. `amp` expected ~unchanged
-> (q/h stay linear z-score). Config:
-> [experiments/sava_small_v081_e11_normalization/config.toml](../experiments/sava_small_v081_e11_normalization/config.toml).
-> Cost ~2 h/seed on the pushforward base ⇒ ~10 h for the 5 seeds (sequential in one
-> job; the box has a single combo).
+> **The planned post-E6 pushforward follow-up series (E7–E10) is COMPLETE, and the
+> first distribution/scaling test (E11) is DONE — a major win (see COMPLETED).** No
+> single-knob sweep is queued.
 >
-> **The planned post-E6 pushforward follow-up series (E7–E10) is COMPLETE.** No
-> single-knob sweep is queued. What the series settled: the boundedness win was the
-> always-on **q≥0 floor** (E7; noise was a weak/chaotic lever); deepening the
-> curriculum on pure pushforward was a **net negative** (E8, but confounded with
-> epoch budget); the hybrid loss recovered only the **teacher-forced** 1-step metric
-> and did NOT help the free rollout at acceptable cost (E9, tf=0.25 NOT adopted); and
-> per-node **peak-weighting is a closed lever** — even when the weight genuinely bit
-> (E10, λ=2 `w_mean` 1.37), it gave no reliable peak or rollout benefit and mildly
-> **worsened** the deployed rollout. **Working base stays pure pushforward
-> (`rollout_grad = pushforward`, `tf_weight = 0`, MSE, q≥0 floor, `mb_theta = 1`).**
+> **Working base (updated after E11):** `rollout_grad = pushforward`, `tf_weight = 0`,
+> MSE, q≥0 floor, `mb_theta = 1`, **and the new distribution/physics-aware feature
+> scaling (log1p skewed statics + area-normalised inwater + `log1p(upstream_area)`
+> context feature) — adopt it for the `river_q`/KGE gain (best-in-series 0.919). NOTE:
+> it does NOT fix `river_h` (that "win" was a degenerate-flatline artifact — see E11).**
 >
 > **Still OWED (not yet configured) — the real open work:**
-> 1. **Distribution/scaling fixes (TODO §1)** for downstream conditioning — the
->    prime suspect for the persistent `river_h` failure (spatial NSE stuck ~−120)
->    and the outlet-dominated rollout error. **→ now being tested as E11 (5-seed,
->    configured above).**
-> 2. **Clean budget-controlled schedule study** (E8 follow-up): isolate fragmentation
+> 1. **`river_h` is still broken (E11 correction).** On the free rollout it collapses to
+>    a near-constant upstream (std(pred_h)=0 at the headwater, all seeds) and
+>    over-shoots/oscillates downstream. `river_h` is derived analytically from q, so
+>    this is a **decoder / h(q)-derivation / q-h scaling** problem, not a feature
+>    problem — needs an MB-invasive fix (per-node σ, or θ\*=σ_h/(dt·σ_q); see
+>    mass_balance_stability_notes.md §4). This likely also addresses items 2–3 below.
+> 2. **The stiff fixed-horizon rollout still diverges (all E11 seeds `frac_gt2 = 1.0`).**
+>    This is the **outlet flux-accumulation amp** (`amp≈7`, `mb_gain≈22`) / downstream
+>    `river_h` over-shoot — same MB-invasive family as item 1.
+> 3. **Attribute the E11 `river_q` win:** it bundled `log1p(upstream_area)` with the
+>    automatic scaling changes — an A/B (`include_log_upstream_area` on/off) would
+>    isolate the driver if we care.
+> 4. **Clean budget-controlled schedule study** (E8 follow-up): isolate fragmentation
 >    (horizon 10 in many short phases) vs depth (add deep phases holding ~50 epochs
 >    at steps=1), maybe a longer total budget.
-> 3. **Multi-seed confirmation** (≥3 seeds) of the levers currently within the seed
->    band before relying on any of them — fixed-horizon RMSE for the pure-pf base is
->    now replicated 4× at {9.3, 30.7, 95, 1558}, i.e. hopelessly seed-dominated.
->    **→ E11 establishes the 5-seed pure-pf-base reference distribution.**
-> 4. **Engineering:** gate `peak_stats` on `loss_type == :huber || peak_lambda > 0`
+> 5. **Engineering:** gate `peak_stats` on `loss_type == :huber || peak_lambda > 0`
 >    (drops the E10 `peak_delta = 1000` workaround) if peak-weighting is ever revisited.
 
 ---
@@ -199,6 +180,158 @@ Experiment configs live under `experiments/`. Newest at the top.
 > dominated rollout error — need the distribution/scaling work (TODO §1), which is
 > now the priority.** (Process note: hps1 λ=0 is a 4th pure-pf replicate; fixed-
 > horizon final RMSE now spans {9.3, 30.7, 95, 1559} — hopelessly seed-dominated.)
+>
+> **E11 — the new feature scaling is a real `river_q`/KGE win but does NOT fix
+> `river_h` (corrected after reading the timeseries — the aggregate metric lied).**
+> The distribution/physics-aware normalization (log1p skewed statics + area-normalised
+> `river_inwater` + `log1p(upstream_area)` context feature) on the pure-pushforward
+> base, 5 seeds, delivers a genuine `river_q` improvement — **pooled KGE best-in-series
+> (0.919 ± 0.033)**, chronic over-prediction gone (pbias ≈ 0), q tracks peaks well at
+> every gauge (std(pred_q)/std(truth_q) ≈ 0.8–1.1), `amp` unchanged (6.65 ± 0.78, as
+> designed). **But the headline "river_h fixed" from the aggregate NSE is an
+> ARTIFACT.** The `river_h` spatial NSE −118 → −4.64 is a *failure-mode change, not
+> skill*: on the deployed free-rollout timeseries the model predicts a **near-constant
+> `river_h` at upstream nodes** (std(pred_h) = **0.000** at headwater `node48` across
+> all 5 seeds — a dead flat line; `node183` mean 0.04 vs truth 0.23) and **over-shoots /
+> oscillates downstream** (std ratio 3–8 at the outlet, spiking to 10+ vs truth ~1–2).
+> The old base's `node48` h RMSE 17.08 was an *exploding* seed, so the "87×" claim just
+> compared a flatline to an explosion — both worthless. `river_h` remains an **open
+> binding failure**; the normalization changed how it fails (upstream collapse instead
+> of explosion), it did not give it skill. The stiff fixed-horizon 30-step rollout also
+> still diverges for all seeds (`frac_gt2 = 1.0`). **Adopt the new scaling for the q/KGE
+> gain, but `river_h` is NOT resolved — it (upstream collapse + downstream over-shoot)
+> plus the outlet flux-accumulation amp are now the top open problems, likely needing an
+> MB-invasive fix to the analytic h(q) derivation, not another feature.** (Lesson: a
+> falling RMSE/NSE at small-truth nodes can be a degenerate constant — always check
+> std(pred)/std(truth) per node and look at the plots.)
+
+## E11 — distribution/physics-aware feature scaling (TODO §1), 5-seed — `sava_small_v081_e11_normalization`
+
+**NAME:** single fixed config replicated over **5 seeds** (`[hparsearch].repetitions
+= 5`, empty `search_space` ⇒ 1 combo × seeds 1–5; runs `…_hps01_s01…s05`, aggregate
+`…_hps_summary.{csv,toml}` with mean/std/min/max). The new distribution/physics-aware
+feature scaling (TODO §1, now default): **log1p-then-z-score** the skewed statics
+(`river_slope`/`width`/`depth`/`length`), **area-normalise** `river_inwater` like
+`river_q`, **train-split-only** stats, **plus** `include_log_upstream_area = true`
+(extra `log1p(upstream_area)` static channel; `n_params` 75009 → 75073, +64). Applied
+to the established pure-pushforward base (`rollout_grad = pushforward`, `tf = 0`,
+`noise = 0`, MSE, `peak_lambda = 0`, `mb_theta = 1`, `lr = 1.3457e-4`,
+`h_loss_scale = increment`, `[1,2,5,8,10]×50 = 250` ep, 8×64 / mlp 2, q≥0 floor).
+Config:
+[experiments/sava_small_v081_e11_normalization/config.toml](../experiments/sava_small_v081_e11_normalization/config.toml).
+
+> **CORRECTION (2026-09-18):** my first-pass verdict claimed the new scaling *fixed*
+> `river_h` (spatial NSE −118 → −4.6, "~25× win", node48 "87× better"). **Reading the
+> deployed free-rollout timeseries showed that is wrong.** The NSE gain is a
+> *failure-mode change*, not skill: `river_h` collapses to a near-constant at upstream
+> nodes and over-shoots downstream. The `river_q`/KGE/amp results below are correct and
+> a genuine win; the `river_h` "win" is retracted. Entry updated accordingly.
+
+**SUMMARY — a real `river_q`/KGE win; `river_h` is NOT fixed (the aggregate NSE
+misled).** The new scaling genuinely improves the discharge side: **pooled KGE is the
+best of the whole series (0.919 ± 0.033)**, the chronic over-prediction is gone
+(pbias ≈ 0 / mildly negative), q tracks peaks at every gauge (std(pred_q)/std(truth_q)
+≈ 0.8–1.1), and `amp` is unchanged (6.65 ± 0.78, as designed — q/h stay linear
+z-score). **But `river_h` is not fixed.** Its spatial NSE moved −118 → −4.64, yet the
+timeseries reveal this is a *degenerate* prediction, not skill: at **upstream** nodes
+the model outputs a **near-constant** `river_h` (std(pred_h) = **0.000** at headwater
+`node48` in all 5 seeds — a flat line; `node183` mean 0.04 vs truth 0.23), which gives
+small absolute error only because the truth there is small; at **downstream** nodes
+(outlet, node74) `river_h` **over-shoots / oscillates** (std ratio 3–8, spiking to 10+
+vs truth ~1–2). The old base's node48 h RMSE 17.08 was an *exploding* seed, so the
+earlier "87×" improvement merely compared a flatline to an explosion. `river_h`
+remains an **open binding failure**: the normalization changed its failure mode
+(upstream collapse instead of network-wide explosion), it did not teach it the
+dynamics. **The catch:** the stiff fixed-horizon 30-step rollout **still diverges for
+every seed** (`frac_gt2 = 1.0`, `fixed_val_rmse` ∈ {NaN, NaN, 9.7e5, 1.5e9, 4.3e9}).
+
+**Five seeds (mean ± std; deployed daterange rollout, outlet = node1_r1, true peak 122.4):**
+
+| metric | mean ± std | per-seed (s1…s5) |
+|---|---|---|
+| **pooled KGE** (river_q) | **0.919 ± 0.033** | 0.865, 0.932, 0.916, 0.952, 0.930 |
+| pooled pbias | +0.2 avg | 8.5, −3.5, −4.3, −1.8, −3.7 |
+| pooled peak_ratio | 0.92 | 0.895, 0.920, 0.859, 0.974, 0.943 |
+| `river_q` spatial NSE (med) | 0.975 | 0.976, 0.979, 0.970, 0.973, 0.977 |
+| **final_amp** | **6.65 ± 0.78** | 6.74, 7.76, 5.55, 6.64, 6.57 |
+| `river_h` spatial NSE (†degenerate) | −4.64 ± 0.27 | −4.67, −4.31, −4.87, −4.91, −4.42 |
+| val_h_1step | 3.2 | 3.35, 2.42, 3.98, 3.82, 3.97 |
+| val_q_1step | 0.12 | 0.096, 0.056, 0.184, 0.130, 0.140 |
+| best_epoch | — | 18, 8, 19, 184, 34 |
+| **fixed_val_rmse** | seed-chaotic | NaN, NaN, 9.7e5, 1.5e9, 4.3e9 (frac_gt2 = 1.0 all) |
+
+† The `river_h` NSE −4.64 does **not** mean skill — see the per-node dynamic-range
+table below; the prediction is a near-constant upstream and over-shoots downstream.
+
+**`river_h` dynamic-range check — std(pred_h) ÷ std(truth_h), per gauge (5-seed):**
+
+| gauge (upstream→down) | h std ratio (mean) | pred_h behaviour | q std ratio |
+|---|---|---|---|
+| node48 (headwater) | **0.00** | pred std is exactly 0 all 5 seeds — a dead constant | ~0.84 |
+| node183 | 0.96 | flat ~0 + spurious spikes; mean 0.04 vs truth 0.23 (under) | ~0.98 |
+| node152 | 0.75 | mixed / under-dispersed | ~1.0 |
+| node74 | 3.66 | over-shoot / oscillation | ~0.95 |
+| outlet (node1) | 5.92 | wild oscillation, over-shoots to 10+ (truth ~1–2) | ~0.99 |
+
+A good prediction has ratio ≈ 1. `river_h` is degenerate at BOTH ends (collapsed
+upstream, over-dispersed downstream); `river_q` is well-scaled everywhere. The
+per-gauge h *RMSE* looks "better" upstream only because a flatline near small truth has
+low absolute error — do not read it as skill. (`river_q` per-gauge RMSE unchanged vs
+old: outlet 12.28 → 12.09 ± 1.24; node74 0.50 → 0.55; node152 0.18 → 0.21.)
+
+**IMPROVEMENTS.**
+- **Best pooled KGE of the series (evidence — the real win).** 0.919 ± 0.033 (vs
+  0.836–0.875 old base); PBIAS collapses from chronic over-prediction to ≈ 0 (mildly
+  negative on 4/5 seeds). Outlet peak ratio 0.86–0.97. `river_q` tracks peaks at every
+  gauge (std(pred_q)/std(truth_q) ≈ 0.8–1.1) and per-gauge q RMSE is unchanged vs old.
+- **`amp` unchanged / slightly lower (evidence — the designed sanity check).**
+  6.65 ± 0.78 vs 7.2–7.7. q/h stay linear z-score, so the scaling does NOT touch the
+  amplification mechanism — the q/KGE gain is a feature-conditioning gain.
+- **1-step h numerically lower (evidence, but see caveat).** `val_h_1step` ~3.2 (was
+  8.6–9.3), consistent with the old base *exploding* on h rather than the new model
+  being skilful on h — the free-rollout h is degenerate (below).
+
+**DEGRADED / FAILURE MODES.**
+- **`river_h` is NOT fixed — the aggregate NSE is a degenerate artifact (evidence —
+  the key correction).** Spatial NSE −118 → −4.64 looks like a 25× win but the
+  timeseries show the prediction is degenerate: **upstream** `river_h` collapses to a
+  **near-constant** (std(pred_h) = 0.000 at `node48` in all 5 seeds; `node183` mean
+  0.04 vs truth 0.23) and **downstream** it **over-shoots / oscillates** (std ratio 3–8
+  at outlet/node74, spiking to 10+ vs truth ~1–2). The low upstream h RMSE is just a
+  flatline near small truth. The old base's node48 h RMSE 17.08 was an exploding seed,
+  so the earlier "87×" was a flatline-vs-explosion comparison. `river_h` remains an
+  open binding failure.
+- **Stiff fixed-horizon rollout still diverges (evidence).** `frac_gt2 = 1.0` all
+  seeds; `fixed_val_rmse` {NaN, NaN, 9.7e5, 1.5e9, 4.3e9}. The outlet flux-accumulation
+  explosion (`amp≈7`, `mb_gain≈22`) is untouched.
+
+**HYPOTHESES.**
+- *(evidence)* The new scaling genuinely improves `river_q` conditioning (best KGE,
+  pbias≈0, well-scaled q at every node) at no cost to `amp` — the discharge side of
+  the model is better conditioned.
+- *(evidence)* `river_h` is derived analytically from q; q varies fine at the headwater
+  (std ratio ~0.84) yet the derived h is a constant (std 0.000). So the h collapse is a
+  **structural h(q)-derivation / decoder-scaling** problem (the analytic map saturates
+  or floors at low flow), NOT a feature-conditioning problem — which is why the input
+  scaling didn't help h.
+- *(speculation)* Fixing h will need an **MB-invasive change to the h derivation / q-h
+  rescaling** (per-node σ, or θ\*=σ_h/(dt·σ_q); mass_balance_stability_notes §4), the
+  same family of change needed for the downstream over-shoot / flux-accumulation amp.
+
+**RECOMMENDATIONS.**
+1. **Adopt the new feature scaling (incl. `include_log_upstream_area = true`) for the
+   `river_q`/KGE gain** (best-in-series, seed-robust, no `amp` cost). But do NOT record
+   `river_h` as fixed — it is not.
+2. **`river_h` is now the clearest open problem, and it is a decoder/derivation issue,
+   not a feature issue.** Investigate the analytic h(q) map (why it collapses to a
+   constant at low flow) and an MB-invasive q/h rescaling; this likely also addresses
+   the downstream over-shoot and the stiff-anchor flux-accumulation divergence.
+3. **Optional A/B to attribute the q win** — `include_log_upstream_area` on/off with
+   the auto scaling held on — since this run bundles the two.
+4. **Process lesson:** a falling RMSE/NSE at small-truth nodes can be a degenerate
+   constant. Always check std(pred)/std(truth) per node AND look at the timeseries
+   before calling a variable "fixed". (Same class of error as the E9 teacher-forcing
+   trap.) Keep using 5-seed mean±std; keep ignoring single-seed `fixed_val_rmse`.
 
 ## E10 — per-node peak-weight (`peak_lambda`) sweep — `sava_small_v081_e10_peakweight_sweep`
 

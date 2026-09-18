@@ -100,6 +100,8 @@ function settings_from_config(d::AbstractDict, toml_dir::AbstractString)
         mb_theta        = Float32(get(md, "mb_theta", 1.0)),
         mb_augment_decoder = get(md, "mb_augment_decoder", false),
         include_log_upstream_area = get(md, "include_log_upstream_area", false),
+        mb_smooth_h_floor = get(md, "mb_smooth_h_floor", false),
+        mb_h_floor_softness = Float32(get(md, "mb_h_floor_softness", 0.05)),
     )
 
     td = d["train"]
@@ -201,9 +203,34 @@ function build_gnn_model(ms::ModelSettings, graphs, norm_stats, postscale,
     A_sparse = sparse(all_tgt, all_src, ones(Float32, length(all_src)), n_nodes, n_nodes)
 
     if ms.domain == "river" && ms.enforce_mass_balance
+        stat_vec(vname::String, field::Symbol) = begin
+            raw = getfield(norm_stats[vname], field)
+            if raw isa AbstractVector
+                length(raw) == n_nodes ||
+                    throw(ArgumentError("norm_stats[$vname].$field length $(length(raw)) != n_nodes $n_nodes"))
+                Float32.(raw)
+            else
+                fill(Float32(raw), n_nodes)
+            end
+        end
+        finite_median(v::AbstractVector{<:Real}) = begin
+            fv = Float32[x for x in v if isfinite(x)]
+            isempty(fv) ? NaN32 : Float32(median(fv))
+        end
+        finite_max(v::AbstractVector{<:Real}) = begin
+            fv = Float32[x for x in v if isfinite(x)]
+            isempty(fv) ? NaN32 : Float32(maximum(fv))
+        end
+
         dt     = get_timestep(output_file)
         pq_vec = postscale["river_q"]
         ph_vec = postscale["river_h"]
+        μ_q = stat_vec("river_q", :mean)
+        σ_q = stat_vec("river_q", :std)
+        μ_h = stat_vec("river_h", :mean)
+        σ_h = stat_vec("river_h", :std)
+        μ_inwater = stat_vec("river_inwater", :mean)
+        σ_inwater = stat_vec("river_inwater", :std)
         # Routing-only adjacency (no self-loops): A_routing[i,j]=1 means j flows into i.
         A_routing = sparse(all_tgt[1:length(src_edges)], all_src[1:length(src_edges)],
                            ones(Float32, length(src_edges)), n_nodes, n_nodes)
@@ -211,32 +238,43 @@ function build_gnn_model(ms::ModelSettings, graphs, norm_stats, postscale,
             pq_vec,
             ph_vec,
             ph_vec ./ pq_vec,
-            Float32(norm_stats["river_q"].mean),
-            Float32(norm_stats["river_q"].std),
-            Float32(norm_stats["river_h"].mean),
-            Float32(norm_stats["river_h"].std),
-            Float32(norm_stats["river_inwater"].mean),
-            Float32(norm_stats["river_inwater"].std),
+            μ_q,
+            σ_q,
+            μ_h,
+            σ_h,
+            μ_inwater,
+            σ_inwater,
             dt,
             A_routing,
             nothing,  # A_routing_batched — set via precompute_batched
             0,        # batch_size
             ms.mb_theta,
+            ms.mb_smooth_h_floor,
+            ms.mb_h_floor_softness,
         )
         # Base weight balances the q- and h-loss magnitudes; ∂h_norm/∂q_norm of
         # the hard mass-balance decoder equals `dt·σ_q/σ_h = 1/base`, so the
         # h-branch injects a q-gradient amplified by `1/base` at :absolute.
         # :increment squares the weight (measures h on the `dt·σ_q` increment
         # scale), cancelling that amplification so ∂h_norm/∂q_norm ≈ O(1).
-        base_weight = mb.σ_h / (mb.dt * mb.σ_q)
+          base_weight_vec = mb.σ_h ./ (mb.dt .* mb.σ_q)
+          base_weight = finite_median(base_weight_vec)
         h_weight    = h_loss_scale === :increment ? base_weight^2 : base_weight
         @info "Mass balance h_loss_weight = $(round(h_weight; sigdigits=3)) " *
               "[scale=$(h_loss_scale)]  " *
-              "(σ_h=$(round(mb.σ_h; sigdigits=3)), σ_q=$(round(mb.σ_q; sigdigits=3)), dt=$(mb.dt) s)"
+              "(median σ_h=$(round(finite_median(mb.σ_h); sigdigits=3)), " *
+              "median σ_q=$(round(finite_median(mb.σ_q); sigdigits=3)), dt=$(mb.dt) s)"
+          gain_vec = mb.θ .* mb.dt .* mb.σ_q ./ mb.σ_h
+          @info "Mass balance per-node gain |∂h_norm/∂q_norm| summary: " *
+              "median=$(round(finite_median(gain_vec); sigdigits=3)) " *
+              "max=$(round(finite_max(gain_vec); sigdigits=3))"
         if mb.θ != 1f0
             @info "Mass balance θ = $(mb.θ) (mixed implicit/explicit; " *
                   "θ=1 fully implicit, θ=0 fully explicit). Effective stiff " *
                   "gain ∂h_norm/∂q_norm scaled by θ."
+        end
+        if mb.smooth_h_floor
+            @info "Mass balance smooth h-floor enabled (softness=$(mb.h_floor_softness) m)"
         end
         strategy === nothing || (strategy.h_loss_weight = h_weight)
         model = WflowGNN(ms, mb, A_sparse)
@@ -254,6 +292,108 @@ function build_gnn_model(ms::ModelSettings, graphs, norm_stats, postscale,
     return precompute_batched(model, batch_size)
 end
 
+function _write_mb_floor_fraction_by_node(path::AbstractString,
+                                          frac_h_raw_neg_node::AbstractVector,
+                                          n_valid_h_raw_node::AbstractVector{<:Integer})
+    n_nodes = length(frac_h_raw_neg_node)
+    length(n_valid_h_raw_node) == n_nodes ||
+        throw(ArgumentError("floor-fraction vectors must have matching lengths"))
+    open(path, "w") do io
+        println(io, "node_idx,frac_h_raw_neg,n_valid,n_neg")
+        for i in 1:n_nodes
+            n_valid = Int(n_valid_h_raw_node[i])
+            if n_valid == 0
+                println(io, string(i, ",NaN,0,0"))
+            else
+                frac  = Float32(frac_h_raw_neg_node[i])
+                n_neg = round(Int, frac * n_valid)
+                println(io, string(i, ",", frac, ",", n_valid, ",", n_neg))
+            end
+        end
+    end
+    return path
+end
+
+function _mb_floor_summary(diags)
+    frac_node = Float32.(diags.frac_h_raw_neg_node)
+    valid_node = Int.(diags.n_valid_h_raw_node)
+
+    finite_mask = isfinite.(frac_node)
+    frac_finite = frac_node[finite_mask]
+    n_nodes = length(frac_node)
+    n_nodes_finite = length(frac_finite)
+
+    # Network-wide fraction over all valid node-time samples.
+    hvals = filter(isfinite, vec(diags.h_raw))
+    frac_network = isempty(hvals) ? NaN32 : Float32(mean(hvals .< 0f0))
+
+    if n_nodes_finite == 0
+        return (;
+            n_nodes,
+            n_nodes_finite,
+            frac_h_raw_neg_network = frac_network,
+            frac_h_raw_neg_node_mean = NaN32,
+            frac_h_raw_neg_node_median = NaN32,
+            frac_h_raw_neg_node_p90 = NaN32,
+            frac_h_raw_neg_node_max = NaN32,
+            frac_h_raw_neg_node_max_idx = 0,
+            n_valid_h_raw_total = sum(valid_node),
+        )
+    end
+
+    frac_sorted = sort(frac_finite)
+    p90_idx = clamp(round(Int, 0.9 * length(frac_sorted)), 1, length(frac_sorted))
+    frac_p90 = frac_sorted[p90_idx]
+
+    max_frac = maximum(frac_node)
+    max_idx = findfirst(==(max_frac), frac_node)
+
+    return (;
+        n_nodes,
+        n_nodes_finite,
+        frac_h_raw_neg_network = frac_network,
+        frac_h_raw_neg_node_mean = Float32(mean(frac_finite)),
+        frac_h_raw_neg_node_median = Float32(median(frac_finite)),
+        frac_h_raw_neg_node_p90 = Float32(frac_p90),
+        frac_h_raw_neg_node_max = Float32(max_frac),
+        frac_h_raw_neg_node_max_idx = isnothing(max_idx) ? 0 : Int(max_idx),
+        n_valid_h_raw_total = sum(valid_node),
+    )
+end
+
+function _write_mb_stiffness_by_node(path::AbstractString, mb::MassBalanceLayer)
+    gain = mb.θ .* mb.dt .* mb.σ_q ./ mb.σ_h
+    open(path, "w") do io
+        println(io, "node_idx,mb_gain,mb_base_weight,sigma_q,sigma_h")
+        for i in eachindex(gain)
+            g = Float32(gain[i])
+            b = isfinite(g) && g != 0f0 ? Float32(1f0 / g) : NaN32
+            println(io, string(i, ",", g, ",", b, ",", Float32(mb.σ_q[i]), ",", Float32(mb.σ_h[i])))
+        end
+    end
+    return path
+end
+
+function _mb_stiffness_summary(mb::MassBalanceLayer)
+    gain = Float32.(mb.θ .* mb.dt .* mb.σ_q ./ mb.σ_h)
+    fg = sort(Float32[x for x in gain if isfinite(x)])
+    n = length(gain)
+    if isempty(fg)
+        return (n_nodes = n, n_finite = 0,
+                gain_median = NaN32, gain_p90 = NaN32, gain_max = NaN32,
+                gain_max_idx = 0)
+    end
+    p90_idx = clamp(round(Int, 0.9 * length(fg)), 1, length(fg))
+    gmax = maximum(gain)
+    max_idx = findfirst(==(gmax), gain)
+    return (n_nodes = n,
+            n_finite = length(fg),
+            gain_median = Float32(median(fg)),
+            gain_p90 = Float32(fg[p90_idx]),
+            gain_max = Float32(gmax),
+            gain_max_idx = isnothing(max_idx) ? 0 : Int(max_idx))
+end
+
 """
     evaluate_and_write(cpu_model, dataset, norm_stats, grid, postscale, static_arr,
                        ms, ts, output_file, staticmaps_file, all_times, schema, run_dir)
@@ -269,11 +409,13 @@ Shared by [`run_wflow_gnn`](@ref) for the final model and, when
 `ts.checkpoint_full_eval` is set, for each periodic checkpoint.
 
 Returns a `NamedTuple` `(; val_rollout_duration, val_n_timesteps,
-spatial_summary, ramp, river_q_perf, volume_budget)`; the last four feed the per-run
+spatial_summary, ramp, river_q_perf, volume_budget, mb_floor, mb_stiffness)`; the last six feed the per-run
 `metrics.toml` summary (`spatial_summary` from [`spatial_metric_summary`](@ref),
 `ramp` from [`overprediction_vs_ramp`](@ref), `river_q_perf` from
 [`river_q_performance_metrics`](@ref), `volume_budget` from
-[`volume_budget_diagnostics`](@ref)) and are `nothing` when not applicable.
+[`volume_budget_diagnostics`](@ref), and `mb_floor` from validation
+mass-balance diagnostics, plus `mb_stiffness` from per-node MB gain diagnostics)
+and are `nothing` when not applicable.
 """
 function evaluate_and_write(model, dataset, norm_stats, grid, postscale,
                             static_arr, ms::ModelSettings, ts::TrainSettings,
@@ -288,6 +430,8 @@ function evaluate_and_write(model, dataset, norm_stats, grid, postscale,
     ramp_summary         = nothing
     river_q_perf         = nothing
     volume_budget_summary = nothing
+    mb_floor_summary     = nothing
+    mb_stiffness_summary = nothing
 
     for (split_name, split_data, t_offset) in (
             ("train", dataset.train, 0),
@@ -366,6 +510,17 @@ function evaluate_and_write(model, dataset, norm_stats, grid, postscale,
                                     path       = joinpath(plots_dir, "mb_diagnostics.png"),
                                     timestamps = split_times,
                                     csv_path   = joinpath(metrics_dir, "mb_diagnostics.csv"))
+                _write_mb_floor_fraction_by_node(
+                    joinpath(metrics_dir, "mb_floor_fraction_by_node.csv"),
+                    mb_diags.frac_h_raw_neg_node,
+                    mb_diags.n_valid_h_raw_node,
+                )
+                mb_floor_summary = _mb_floor_summary(mb_diags)
+                _write_mb_stiffness_by_node(
+                    joinpath(metrics_dir, "mb_stiffness_by_node.csv"),
+                    cpu_model.mass_balance,
+                )
+                mb_stiffness_summary = _mb_stiffness_summary(cpu_model.mass_balance)
 
                 volume_budget_summary = volume_budget_diagnostics(
                     mb_diags;
@@ -438,12 +593,14 @@ function evaluate_and_write(model, dataset, norm_stats, grid, postscale,
     end
 
     return (; val_rollout_duration, val_n_timesteps, spatial_summary, ramp = ramp_summary,
-            river_q_perf, volume_budget = volume_budget_summary)
+            river_q_perf, volume_budget = volume_budget_summary,
+            mb_floor = mb_floor_summary,
+            mb_stiffness = mb_stiffness_summary)
 end
 
 """
     write_run_metrics_toml(path, losses, ts, run_meta, spatial_summary, ramp,
-                           river_q_perf, volume_budget) -> path
+                           river_q_perf, volume_budget, mb_floor, mb_stiffness) -> path
 
 Write a compact scalar summary of a completed run to `path` as TOML: the final
 (and best) values of the per-epoch training history, run metadata (`run_meta`),
@@ -451,14 +608,17 @@ the median of each aggregated spatial-error metric per state variable, the
 overprediction-vs-ramp correlations, the Tier-2 river-discharge performance
 metrics (`river_q_perf` from [`river_q_performance_metrics`](@ref)) and, when
 available, the system volume-budget diagnostics (`volume_budget` from
-[`volume_budget_diagnostics`](@ref)); and, when `losses.loss_type == :huber`, the Tier-1 peak-loss diagnostics from
+[`volume_budget_diagnostics`](@ref)); the mass-balance floor diagnostics summary
+(`mb_floor`, derived from validation `h_raw`); the per-node MB stiffness summary
+(`mb_stiffness`, from `θ·dt·σ_q/σ_h`); and, when `losses.loss_type == :huber`, the Tier-1 peak-loss diagnostics from
 [`peak_epoch_diagnostics`](@ref). Non-finite values are omitted so the file
 stays a valid, parser-friendly TOML of plain numbers — a token-cheap single-file
 entry point for downstream evaluation agents.
 """
 function write_run_metrics_toml(path::AbstractString, losses, ts::TrainSettings,
                                 run_meta, spatial_summary, ramp,
-                                river_q_perf = nothing, volume_budget = nothing)
+                                river_q_perf = nothing, volume_budget = nothing,
+                                mb_floor = nothing, mb_stiffness = nothing)
     function putf!(d, k, v)
         v === nothing && return
         if v isa Integer
@@ -570,6 +730,31 @@ function write_run_metrics_toml(path::AbstractString, losses, ts::TrainSettings,
         putf!(vb_t, "volume_drift", volume_budget.volume_drift)
         putf!(vb_t, "budget_residual_rms", volume_budget.budget_residual_rms)
         root["volume_budget"] = vb_t
+    end
+
+    if mb_floor !== nothing
+        mbf_t = Dict{String, Any}()
+        putf!(mbf_t, "n_nodes", mb_floor.n_nodes)
+        putf!(mbf_t, "n_nodes_finite", mb_floor.n_nodes_finite)
+        putf!(mbf_t, "n_valid_h_raw_total", mb_floor.n_valid_h_raw_total)
+        putf!(mbf_t, "frac_h_raw_neg_network", mb_floor.frac_h_raw_neg_network)
+        putf!(mbf_t, "frac_h_raw_neg_node_mean", mb_floor.frac_h_raw_neg_node_mean)
+        putf!(mbf_t, "frac_h_raw_neg_node_median", mb_floor.frac_h_raw_neg_node_median)
+        putf!(mbf_t, "frac_h_raw_neg_node_p90", mb_floor.frac_h_raw_neg_node_p90)
+        putf!(mbf_t, "frac_h_raw_neg_node_max", mb_floor.frac_h_raw_neg_node_max)
+        putf!(mbf_t, "frac_h_raw_neg_node_max_idx", mb_floor.frac_h_raw_neg_node_max_idx)
+        root["mass_balance_floor"] = mbf_t
+    end
+
+    if mb_stiffness !== nothing
+        mbs_t = Dict{String, Any}()
+        putf!(mbs_t, "n_nodes", mb_stiffness.n_nodes)
+        putf!(mbs_t, "n_finite", mb_stiffness.n_finite)
+        putf!(mbs_t, "gain_median", mb_stiffness.gain_median)
+        putf!(mbs_t, "gain_p90", mb_stiffness.gain_p90)
+        putf!(mbs_t, "gain_max", mb_stiffness.gain_max)
+        putf!(mbs_t, "gain_max_idx", mb_stiffness.gain_max_idx)
+        root["mass_balance_stiffness"] = mbs_t
     end
 
     if any(isfinite, get(losses, :peak_c_peak, Float32[]))
@@ -821,8 +1006,9 @@ function run_wflow_gnn(ds::DataSettings, ms::ModelSettings, ts::TrainSettings)
     save_train_settings(joinpath(model_dir, "train_settings.toml"), ts)
 
     # Normalisation statistics
+    encode_stat(x) = x isa AbstractVector ? Float64.(x) : Float64(x)
     stats_dict = Dict(
-        var => Dict("mean" => Float64(s.mean), "std" => Float64(s.std))
+        var => Dict("mean" => encode_stat(s.mean), "std" => encode_stat(s.std))
         for (var, s) in norm_stats
     )
     open(joinpath(model_dir, "norm_stats.toml"), "w") do io
@@ -904,7 +1090,8 @@ function run_wflow_gnn(ds::DataSettings, ms::ModelSettings, ts::TrainSettings)
                               val_rollout_duration_s = val_rollout_duration,
                               val_n_timesteps        = val_n_timesteps),
                                     eval_out.spatial_summary, eval_out.ramp,
-                                    eval_out.river_q_perf, eval_out.volume_budget)
+                            eval_out.river_q_perf, eval_out.volume_budget,
+                                    eval_out.mb_floor, eval_out.mb_stiffness)
 
     metrics = (
         final_train_loss           = last(train_rollout),

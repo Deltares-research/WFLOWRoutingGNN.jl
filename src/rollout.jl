@@ -285,15 +285,23 @@ function evaluate_trajectory(model, split, norm_stats, domain::String,
     end
 
     # --- 5. Undo z-score normalisation on state variables -------------------
+    stat_vec(x, n) = begin
+        if x isa AbstractVector
+            length(x) == n || throw(ArgumentError("norm stat vector length $(length(x)) != node count $n"))
+            Float32.(x)
+        else
+            fill(Float32(x), n)
+        end
+    end
     state_vars = DOMAIN_VARS[domain]["state"]
     for (vi, vname) in enumerate(state_vars)
-        μ = Float32(norm_stats[vname].mean)
-        σ = Float32(norm_stats[vname].std)
+        μ = reshape(stat_vec(norm_stats[vname].mean, n_nodes), n_nodes, 1)
+        σ = reshape(stat_vec(norm_stats[vname].std, n_nodes), n_nodes, 1)
         pred_states[vi, :, :] .= pred_states[vi, :, :] .* σ .+ μ
         true_states[vi, :, :] .= true_states[vi, :, :] .* σ .+ μ
         # Undo any per-node preprocessing applied before z-score normalisation
         if haskey(postscale, vname)
-            scale = postscale[vname]   # length n_nodes
+            scale = reshape(postscale[vname], n_nodes, 1)   # length n_nodes
             pred_states[vi, :, :] .*= scale
             true_states[vi, :, :] .*= scale
         end
@@ -350,8 +358,8 @@ struct FixedHorizonEval
     true_q_phys :: Array{Float32, 3}
     true_peak   :: Float32
     qi          :: Int
-    q_mu        :: Float32
-    q_sigma     :: Float32
+    q_mu        :: Vector{Float32}
+    q_sigma     :: Vector{Float32}
     q_postscale :: Vector{Float32}
     horizon     :: Int
     N           :: Int
@@ -408,8 +416,16 @@ function build_fixed_horizon_eval(split, static::AbstractMatrix{Float32},
 
     qi    = 1                                   # discharge is state row 1 (mass-balance convention)
     qname = DOMAIN_VARS[domain]["state"][qi]
-    μq    = Float32(norm_stats[qname].mean)
-    σq    = Float32(norm_stats[qname].std)
+    stat_vec(x, n) = begin
+        if x isa AbstractVector
+            length(x) == n || throw(ArgumentError("norm stat vector length $(length(x)) != node count $n"))
+            Float32.(x)
+        else
+            fill(Float32(x), n)
+        end
+    end
+    μq    = stat_vec(norm_stats[qname].mean, N)
+    σq    = stat_vec(norm_stats[qname].std, N)
     qpost = get(postscale, qname, ones(Float32, N))
 
     # Start-state flow summary distribution over the full flattened validation
@@ -436,7 +452,8 @@ function build_fixed_horizon_eval(split, static::AbstractMatrix{Float32},
         end
     end
 
-    true_q_phys = (true_q_norm .* σq .+ μq) .* reshape(qpost, N, 1, 1)
+    true_q_phys = (true_q_norm .* reshape(σq, N, 1, 1) .+ reshape(μq, N, 1, 1)) .*
+                  reshape(qpost, N, 1, 1)
     true_peak   = Float32(maximum(abs, true_q_phys))
     gB          = GNNGraphs.batch([g0 for _ in 1:B])
 
@@ -480,7 +497,8 @@ function fixed_horizon_metrics(model::WflowGNN, fh::FixedHorizonEval; device::Sy
 
     # (N·B, H) block order → (N, B, H) → (N, H, B)
     pred_q_norm = permutedims(reshape(q_norm, fh.N, fh.B, H), (1, 3, 2))
-    pred_q_phys = (pred_q_norm .* fh.q_sigma .+ fh.q_mu) .* reshape(fh.q_postscale, fh.N, 1, 1)
+    pred_q_phys = (pred_q_norm .* reshape(fh.q_sigma, fh.N, 1, 1) .+
+                   reshape(fh.q_mu, fh.N, 1, 1)) .* reshape(fh.q_postscale, fh.N, 1, 1)
     pred_q_phys = max.(0f0, pred_q_phys)
 
     err = pred_q_phys .- fh.true_q_phys
@@ -519,6 +537,10 @@ Returns a NamedTuple with matrices of shape `(n_nodes, T)`:
 - `net_flux`    [m³/s]: upstream_q + inwater - q_out  (using predicted q)
 - `h_raw`       [m]:    h before the ≥0 floor (using predicted q)
 - `mb_verify_h` [m]:    h from MB fed true q/h — verifies the equation itself
+
+Also returns per-node floor diagnostics:
+- `frac_h_raw_neg_node` [-]: fraction of valid timesteps with `h_raw < 0` per node
+- `n_valid_h_raw_node`   [-]: number of finite `h_raw` samples per node
 """
 function rollout_mb_diagnostics(model::WflowGNN, split, static::AbstractMatrix{Float32})
     isnothing(model.mass_balance) &&
@@ -577,6 +599,14 @@ function rollout_mb_diagnostics(model::WflowGNN, split, static::AbstractMatrix{F
         mb_verify_h[:, t] = d_v.h_phys_new
     end
 
+    frac_h_raw_neg_node = Vector{Float32}(undef, n_nodes)
+    n_valid_h_raw_node  = Vector{Int}(undef, n_nodes)
+    for i in 1:n_nodes
+        vals = filter(isfinite, vec(@view h_raw[i, :]))
+        n_valid_h_raw_node[i] = length(vals)
+        frac_h_raw_neg_node[i] = isempty(vals) ? NaN32 : Float32(mean(vals .< 0f0))
+    end
+
     return (pred_q      = pred_q,
             pred_h      = pred_h,
             true_q      = true_q,
@@ -585,7 +615,9 @@ function rollout_mb_diagnostics(model::WflowGNN, split, static::AbstractMatrix{F
             inwater     = inwater,
             net_flux    = net_flux,
             h_raw       = h_raw,
-            mb_verify_h = mb_verify_h)
+            mb_verify_h = mb_verify_h,
+            frac_h_raw_neg_node = frac_h_raw_neg_node,
+            n_valid_h_raw_node = n_valid_h_raw_node)
 end
 
 """

@@ -77,6 +77,13 @@ mb_augment_decoder = false
 # static input channel (river domain).
 include_log_upstream_area = false
 
+# Optional smooth non-negative floor for mass-balance depth update (river
+# domain, enforce_mass_balance = true only). Default false preserves hard floor.
+mb_smooth_h_floor = false
+
+# Softness [m] of the smooth h-floor; used only when mb_smooth_h_floor = true.
+mb_h_floor_softness = 0.05
+
 
 [train]
 # Base training settings — individual values may be overridden by [hparsearch]
@@ -151,6 +158,10 @@ search_type = "box"
 
 # Optional upstream-area context feature.
 "model.include_log_upstream_area" = [false, true]
+
+# Optional smooth depth floor and softness sweep (enable together).
+# "model.mb_smooth_h_floor" = [false, true]
+# "model.mb_h_floor_softness" = [0.02, 0.05, 0.1]
 
 # Learning rate
 "train.lr_start" = [1e-3, 5e-4]

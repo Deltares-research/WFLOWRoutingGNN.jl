@@ -80,6 +80,16 @@ mb_augment_decoder = false
 # static input channel (river domain). Helps conditioning for downstream nodes.
 include_log_upstream_area = false
 
+# Optional smooth non-negative floor for mass-balance depth update (river
+# domain, enforce_mass_balance = true only). Keeps h >= 0 while preserving a
+# small gradient near dry channels; default false preserves the historical hard
+# clamp max(0, h_raw) for strict A/B parity.
+mb_smooth_h_floor = false
+
+# Softness of the smooth h-floor in physical meters. Larger values make the
+# floor smoother/less hard-clamped. Used only when mb_smooth_h_floor = true.
+mb_h_floor_softness = 0.05
+
 
 [train]
 # Total number of training epochs

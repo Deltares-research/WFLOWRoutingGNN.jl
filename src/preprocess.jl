@@ -331,6 +331,10 @@ const STATIC_TRANSFORMS = Dict(
     "subsurface" => Dict{String, Function}(),
 )
 
+# Variables that use per-node z-score statistics (mean/std vectors) in the
+# MB-invasive Option A path. Kept affine per node to preserve routing additivity.
+const PER_NODE_NORM_VARS = Set(["river_q", "river_h", "river_inwater"])
+
 """
     build_wflow_graph(staticmaps_file, output_file, domain)
         -> (graphs, stats, grid, postscale, static)
@@ -420,7 +424,7 @@ function build_wflow_graph(staticmaps_file::String, output_file::String, domain:
         μ, σ
     end
 
-    stats     = Dict{String, @NamedTuple{mean::Float32, std::Float32}}()
+    stats     = Dict{String, NamedTuple}()
     postscale = Dict{String, Vector{Float32}}()
 
     # ── 4 & 5. Extract all features, routing each variable to its source file ──
@@ -440,6 +444,24 @@ function build_wflow_graph(staticmaps_file::String, output_file::String, domain:
             function extract_timeseries(var_pairs)
                 n   = length(var_pairs)
                 arr = Array{Float32}(undef, n, n_nodes, ntimes)
+
+                function standardize_per_node!(slice::AbstractMatrix{Float32},
+                                               fit_view::AbstractMatrix{Float32})
+                    n = size(slice, 1)
+                    μ = Vector{Float32}(undef, n)
+                    σ = Vector{Float32}(undef, n)
+                    for i in 1:n
+                        vals = filter(!isnan, vec(@view fit_view[i, :]))
+                        μi = isempty(vals) ? 0f0 : mean(vals)
+                        σi = (isempty(vals) || length(vals) == 1) ? 1f0 : std(vals)
+                        σi = σi == 0f0 ? 1f0 : σi
+                        @views slice[i, :] .= (slice[i, :] .- μi) ./ σi
+                        μ[i] = Float32(μi)
+                        σ[i] = Float32(σi)
+                    end
+                    return μ, σ
+                end
+
                 for (vi, (lname, spec)) in enumerate(var_pairs)
                     if spec.source == :output
                         data = out_ds[spec.ncdf_name][:, :, :]
@@ -465,8 +487,14 @@ function build_wflow_graph(staticmaps_file::String, output_file::String, domain:
                         postscale[lname] = domain_scalers[lname](
                             @view(arr[vi, :, :]), rows, cols, staticmaps_file, schema)
                     end
-                    μ, σ = standardize!(@view(arr[vi, :, :]), @view(arr[vi, :, 1:nfit_t]))
-                    stats[lname] = (mean = μ, std = σ)
+                    if domain == "river" && (lname in PER_NODE_NORM_VARS)
+                        μv, σv = standardize_per_node!(@view(arr[vi, :, :]),
+                                                       @view(arr[vi, :, 1:nfit_t]))
+                        stats[lname] = (mean = μv, std = σv)
+                    else
+                        μ, σ = standardize!(@view(arr[vi, :, :]), @view(arr[vi, :, 1:nfit_t]))
+                        stats[lname] = (mean = μ, std = σ)
+                    end
                 end
                 arr
             end

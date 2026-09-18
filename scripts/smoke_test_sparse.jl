@@ -12,15 +12,27 @@ n  = g0.num_nodes
 s, t = edge_index(g0)
 A = sparse(vcat(t, collect(1:n)), vcat(s, collect(1:n)),
            ones(Float32, length(s) + n), n, n)
+A_routing = sparse(t, s, ones(Float32, length(s)), n, n)
 
 ms = ModelSettings(domain = "river")
 dt = get_timestep(output)
 mb = MassBalanceLayer(
-    postscale["river_q"], postscale["river_h"],
-    Float32(norm_stats["river_q"].mean),      Float32(norm_stats["river_q"].std),
-    Float32(norm_stats["river_h"].mean),      Float32(norm_stats["river_h"].std),
-    Float32(norm_stats["river_inwater"].mean), Float32(norm_stats["river_inwater"].std),
+    postscale["river_q"],
+    postscale["river_h"],
+    postscale["river_h"] ./ postscale["river_q"],
+    Float32.(norm_stats["river_q"].mean),
+    Float32.(norm_stats["river_q"].std),
+    Float32.(norm_stats["river_h"].mean),
+    Float32.(norm_stats["river_h"].std),
+    Float32.(norm_stats["river_inwater"].mean),
+    Float32.(norm_stats["river_inwater"].std),
     Float32(dt),
+    A_routing,
+    nothing,
+    0,
+    1.0f0,
+    false,
+    0.05f0
 )
 
 model = WflowGNN(ms, mb, A)
