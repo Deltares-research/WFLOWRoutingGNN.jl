@@ -90,6 +90,13 @@ mb_smooth_h_floor = false
 # floor smoother/less hard-clamped. Used only when mb_smooth_h_floor = true.
 mb_h_floor_softness = 0.05
 
+# Optional lower bounds for per-node z-score std used in MB-invasive
+# normalisation (train-split fit). Set >0 to prevent tiny-variance nodes from
+# dominating gradients; 0 keeps the raw per-node std.
+mb_sigma_h_floor = 0.0
+mb_sigma_q_floor = 0.0
+mb_sigma_inwater_floor = 0.0
+
 
 [train]
 # Total number of training epochs

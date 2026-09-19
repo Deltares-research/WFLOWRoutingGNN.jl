@@ -87,6 +87,13 @@ Hyperparameters for a `WflowGNN` model.
 - `mb_h_floor_softness` : softness (in physical meters) of the smooth h-floor;
                    larger values are smoother/less hard-clamped. Only used when
                    `mb_smooth_h_floor = true` (default `0.05`).
+- `mb_sigma_h_floor` : lower bound for per-node `σ_h` during preprocessing
+                   (train-split fit), used to prevent tiny-depth-variance nodes
+                   from dominating the h-loss (default `0.0` = disabled).
+- `mb_sigma_q_floor` : lower bound for per-node `σ_q` during preprocessing
+                   (default `0.0` = disabled).
+- `mb_sigma_inwater_floor` : lower bound for per-node `σ_inwater` during
+                   preprocessing (default `0.0` = disabled).
 """
 Base.@kwdef struct ModelSettings
     domain               :: String
@@ -101,6 +108,9 @@ Base.@kwdef struct ModelSettings
     include_log_upstream_area :: Bool = false
     mb_smooth_h_floor    :: Bool = false
     mb_h_floor_softness  :: Float32 = 0.05f0
+    mb_sigma_h_floor     :: Float32 = 0.0f0
+    mb_sigma_q_floor     :: Float32 = 0.0f0
+    mb_sigma_inwater_floor :: Float32 = 0.0f0
 end
 
 function Base.show(io::IO, s::ModelSettings)
@@ -116,7 +126,10 @@ function Base.show(io::IO, s::ModelSettings)
     println(io, "  mb_augment_decoder : ", s.mb_augment_decoder)
     println(io, "  include_log_upstream_area : ", s.include_log_upstream_area)
     println(io, "  mb_smooth_h_floor : ", s.mb_smooth_h_floor)
-    print(  io, "  mb_h_floor_softness : ", s.mb_h_floor_softness)
+    println(io, "  mb_h_floor_softness : ", s.mb_h_floor_softness)
+    println(io, "  mb_sigma_h_floor : ", s.mb_sigma_h_floor)
+    println(io, "  mb_sigma_q_floor : ", s.mb_sigma_q_floor)
+    print(  io, "  mb_sigma_inwater_floor : ", s.mb_sigma_inwater_floor)
 end
 
 """
@@ -139,6 +152,9 @@ function save_model_settings(path::String, s::ModelSettings)
         "include_log_upstream_area" => s.include_log_upstream_area,
         "mb_smooth_h_floor" => s.mb_smooth_h_floor,
         "mb_h_floor_softness" => Float32(s.mb_h_floor_softness),
+        "mb_sigma_h_floor" => Float32(s.mb_sigma_h_floor),
+        "mb_sigma_q_floor" => Float32(s.mb_sigma_q_floor),
+        "mb_sigma_inwater_floor" => Float32(s.mb_sigma_inwater_floor),
     )
     open(path, "w") do io
         TOML.print(io, dict)
@@ -169,6 +185,9 @@ function load_model_settings(path::String)
         include_log_upstream_area = get(d, "include_log_upstream_area", false),
         mb_smooth_h_floor = get(d, "mb_smooth_h_floor", false),
         mb_h_floor_softness = Float32(get(d, "mb_h_floor_softness", 0.05)),
+        mb_sigma_h_floor = Float32(get(d, "mb_sigma_h_floor", 0.0)),
+        mb_sigma_q_floor = Float32(get(d, "mb_sigma_q_floor", 0.0)),
+        mb_sigma_inwater_floor = Float32(get(d, "mb_sigma_inwater_floor", 0.0)),
     )
 end
 
@@ -236,8 +255,13 @@ function _nonnegative_floor(x, smooth::Bool, softness::Float32)
         return max.(0f0, x)
     end
     β = max(Float32(softness), 1f-6)
-    z = clamp.(x ./ β, -40f0, 40f0)
-    return β .* log1p.(exp.(z))
+    z = x ./ β
+    # Numerically stable softplus WITHOUT a positive-side cap:
+    #   softplus(z) = max(z, 0) + log1p(exp(-|z|)).
+    # The exp argument is always ≤ 0, so it cannot overflow; for large z the
+    # output → β·z = x (no artificial ceiling). A naive `β·log1p(exp(clamp(z,-40,40)))`
+    # instead capped h at β·40 (e.g. 2.0 m at softness 0.05) — an implementation bug.
+    return β .* (max.(z, 0f0) .+ log1p.(exp.(.-abs.(z))))
 end
 
 Flux.@layer MassBalanceLayer

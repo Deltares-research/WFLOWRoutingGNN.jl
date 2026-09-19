@@ -529,6 +529,17 @@ end
     @test isfinite(stats1["river_log_upstream_area"].std)
 end
 
+@testset "build_wflow_graph per-node sigma floor" begin
+    _, stats0, _, _, _ = build_wflow_graph(STATICMAPS, OUTPUT_NC, "river";
+                                           sigma_floor_h = 0.0)
+    _, statsf, _, _, _ = build_wflow_graph(STATICMAPS, OUTPUT_NC, "river";
+                                           sigma_floor_h = 0.5)
+
+    @test statsf["river_h"].std isa AbstractVector
+    @test minimum(statsf["river_h"].std) >= 0.5f0 - 1f-6
+    @test any(statsf["river_h"].std .> stats0["river_h"].std)
+end
+
 @testset "normalized tail diagnostics writer" begin
     diags = WflowRoutingGNN.normalized_tail_diagnostics(BG_GRAPHS, BG_STATIC, "river";
                                                         frac_train = 0.6,

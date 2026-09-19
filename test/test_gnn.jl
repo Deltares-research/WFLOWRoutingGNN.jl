@@ -41,7 +41,10 @@ end
                       mb_augment_decoder = true,
                       include_log_upstream_area = true,
                       mb_smooth_h_floor = true,
-                      mb_h_floor_softness = 0.02f0)
+                      mb_h_floor_softness = 0.02f0,
+                      mb_sigma_h_floor = 0.5f0,
+                      mb_sigma_q_floor = 0.1f0,
+                      mb_sigma_inwater_floor = 0.2f0)
 
     path = tempname() * ".toml"
     save_model_settings(path, s)
@@ -58,6 +61,9 @@ end
     @test s2.include_log_upstream_area == s.include_log_upstream_area
     @test s2.mb_smooth_h_floor == s.mb_smooth_h_floor
     @test s2.mb_h_floor_softness == s.mb_h_floor_softness
+    @test s2.mb_sigma_h_floor == s.mb_sigma_h_floor
+    @test s2.mb_sigma_q_floor == s.mb_sigma_q_floor
+    @test s2.mb_sigma_inwater_floor == s.mb_sigma_inwater_floor
 
 end
 

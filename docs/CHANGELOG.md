@@ -1,5 +1,19 @@
 This document serves as a concrete changelog of the code, summarizing briefly the changes of each commit.
 
+## 2026-09-19
+
+- Fixed a hard-cap bug in the smooth `river_h` floor. `_nonnegative_floor` in
+	[src/gnn.jl](../src/gnn.jl) computed the softplus as
+	`β·log1p(exp(clamp(x/β, -40, 40)))`; the overflow guard also clamped the
+	*positive* side, capping depth at `β·40 = softness·40` (e.g. **2.0 m** at
+	`h_floor_softness = 0.05`) on every node. This produced the strict 0↔2 rail
+	seen in E12 `river_h` (outlet had 105/222 samples pinned at exactly 2.0; nodes
+	74/152/183 also capped at 2.0 despite different per-node σ/μ/postscale).
+	Replaced with the overflow-safe identity `softplus(z) = max(z,0) + log1p(exp(-|z|))`
+	(exp argument always ≤ 0, so no overflow; large depths pass through as `β·z = x`
+	with no ceiling). **Implication:** E12 (`mb_smooth_h_floor = true`) stability /
+	boundedness results are confounded by the old cap and must be re-run.
+
 ## 2026-09-11
 
 - Fixed autotune ignoring the configured loss (commit `4731de3`, "fix autotune

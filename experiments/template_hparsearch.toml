@@ -84,6 +84,12 @@ mb_smooth_h_floor = false
 # Softness [m] of the smooth h-floor; used only when mb_smooth_h_floor = true.
 mb_h_floor_softness = 0.05
 
+# Optional lower bounds for per-node z-score std used in MB-invasive
+# normalisation (train-split fit).
+mb_sigma_h_floor = 0.0
+mb_sigma_q_floor = 0.0
+mb_sigma_inwater_floor = 0.0
+
 
 [train]
 # Base training settings — individual values may be overridden by [hparsearch]
@@ -162,6 +168,11 @@ search_type = "box"
 # Optional smooth depth floor and softness sweep (enable together).
 # "model.mb_smooth_h_floor" = [false, true]
 # "model.mb_h_floor_softness" = [0.02, 0.05, 0.1]
+
+# Optional per-node std-floor sweep for MB-invasive hardening.
+# "model.mb_sigma_h_floor" = [0.0, 0.5, 1.0]
+# "model.mb_sigma_q_floor" = [0.0]
+# "model.mb_sigma_inwater_floor" = [0.0]
 
 # Learning rate
 "train.lr_start" = [1e-3, 5e-4]

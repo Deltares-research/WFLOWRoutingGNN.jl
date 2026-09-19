@@ -102,6 +102,9 @@ function settings_from_config(d::AbstractDict, toml_dir::AbstractString)
         include_log_upstream_area = get(md, "include_log_upstream_area", false),
         mb_smooth_h_floor = get(md, "mb_smooth_h_floor", false),
         mb_h_floor_softness = Float32(get(md, "mb_h_floor_softness", 0.05)),
+        mb_sigma_h_floor = Float32(get(md, "mb_sigma_h_floor", 0.0)),
+        mb_sigma_q_floor = Float32(get(md, "mb_sigma_q_floor", 0.0)),
+        mb_sigma_inwater_floor = Float32(get(md, "mb_sigma_inwater_floor", 0.0)),
     )
 
     td = d["train"]
@@ -841,7 +844,10 @@ function run_wflow_gnn(ds::DataSettings, ms::ModelSettings, ts::TrainSettings)
         staticmaps_file, output_file, ms.domain;
         schema,
         stats_frac = ds.train_frac,
-        include_log_upstream_area = ms.include_log_upstream_area)
+        include_log_upstream_area = ms.include_log_upstream_area,
+        sigma_floor_h = ms.mb_sigma_h_floor,
+        sigma_floor_q = ms.mb_sigma_q_floor,
+        sigma_floor_inwater = ms.mb_sigma_inwater_floor)
 
     g0        = graphs[1]
     n_nodes   = g0.num_nodes

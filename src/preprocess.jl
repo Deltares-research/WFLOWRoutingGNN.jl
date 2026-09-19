@@ -368,8 +368,20 @@ Construct a `GNNGraph` for the wflow routing domain with standardized node featu
 function build_wflow_graph(staticmaps_file::String, output_file::String, domain::String;
                            schema::WflowSchema = SCHEMA_V1,
                            stats_frac::Real = 1.0,
-                           include_log_upstream_area::Bool = false)
+                           include_log_upstream_area::Bool = false,
+                           sigma_floor_h::Real = 0.0,
+                           sigma_floor_q::Real = 0.0,
+                           sigma_floor_inwater::Real = 0.0)
     0 < stats_frac <= 1 || throw(ArgumentError("stats_frac must be in (0, 1]"))
+    sigma_floor_h >= 0 || throw(ArgumentError("sigma_floor_h must be >= 0"))
+    sigma_floor_q >= 0 || throw(ArgumentError("sigma_floor_q must be >= 0"))
+    sigma_floor_inwater >= 0 || throw(ArgumentError("sigma_floor_inwater must be >= 0"))
+
+    sigma_floor_map = Dict(
+        "river_h" => Float32(sigma_floor_h),
+        "river_q" => Float32(sigma_floor_q),
+        "river_inwater" => Float32(sigma_floor_inwater),
+    )
     # ── 0. Check grid alignment; detect reversed axes ────────────────────────
     alignment  = check_and_correct_grid_alignment(staticmaps_file, output_file, domain, schema)
     dim1_flip  = alignment.dim1_flip
@@ -446,7 +458,8 @@ function build_wflow_graph(staticmaps_file::String, output_file::String, domain:
                 arr = Array{Float32}(undef, n, n_nodes, ntimes)
 
                 function standardize_per_node!(slice::AbstractMatrix{Float32},
-                                               fit_view::AbstractMatrix{Float32})
+                                               fit_view::AbstractMatrix{Float32},
+                                               σ_floor::Float32)
                     n = size(slice, 1)
                     μ = Vector{Float32}(undef, n)
                     σ = Vector{Float32}(undef, n)
@@ -455,6 +468,7 @@ function build_wflow_graph(staticmaps_file::String, output_file::String, domain:
                         μi = isempty(vals) ? 0f0 : mean(vals)
                         σi = (isempty(vals) || length(vals) == 1) ? 1f0 : std(vals)
                         σi = σi == 0f0 ? 1f0 : σi
+                        σi = max(σi, σ_floor)
                         @views slice[i, :] .= (slice[i, :] .- μi) ./ σi
                         μ[i] = Float32(μi)
                         σ[i] = Float32(σi)
@@ -488,8 +502,10 @@ function build_wflow_graph(staticmaps_file::String, output_file::String, domain:
                             @view(arr[vi, :, :]), rows, cols, staticmaps_file, schema)
                     end
                     if domain == "river" && (lname in PER_NODE_NORM_VARS)
+                        σ_floor = get(sigma_floor_map, lname, 0f0)
                         μv, σv = standardize_per_node!(@view(arr[vi, :, :]),
-                                                       @view(arr[vi, :, 1:nfit_t]))
+                                                       @view(arr[vi, :, 1:nfit_t]),
+                                                       σ_floor)
                         stats[lname] = (mean = μv, std = σv)
                     else
                         μ, σ = standardize!(@view(arr[vi, :, :]), @view(arr[vi, :, 1:nfit_t]))

@@ -114,14 +114,17 @@ fix:
       per node; confirm it tracks the local rating slope and that `amp`/`mb_gain`
       drop below the current ≈7 / ≈22 (the mechanism test — if `amp` is unchanged,
       per-node σ did not help the accumulation amp and only (i) was addressed).
-- [ ] **Validation (per the E11 lesson — never trust the aggregate NSE).**
-      - `std(pred_h)/std(truth_h)` per gauge must move toward ≈1 at **both** ends
-        (the specific artifact E11 caught); `node48` must stop being a flatline.
-      - `frac_h_raw_neg` (network-wide) and a **per-node floor fraction**
-        (`mean(h_raw .< 0; dims=2)`) must drop from ~62 %.
-      - Pred budget residual stays ~0 (per-node affine must preserve exact
-        conservation) — self-test.
-      - Multi-seed (≥3) given the documented seed chaos.
+- [x] **Validation (per the E11 lesson — never trust the aggregate NSE).**
+      **DONE — E12 (`sava_small_v081_e12_mb_pernode`), 5-seed, 2026-09-18.**
+      - `std(pred_h)/std(truth_h)` per gauge: downstream **bounded but NOT fixed**
+        (outlet 5.92→1.37, node183 0.96→1.58), and the ratio is **misleading** —
+        the outlet is a rail-to-rail 0↔2 square wave (no tracking), not a match.
+        **`node48` is STILL a flatline** (ratio 0.00 all seeds). Criterion FAILED.
+      - `frac_h_raw_neg` did **NOT** drop — it ROSE (network 0.62→0.69, p90≈1.0,
+        max=1.0 at node idx 7). The smooth floor gave gradient but did not stop the
+        physical over-drain (exactly as the honesty note predicted).
+      - Pred budget residual stayed ~0 (per-node affine preserved conservation).
+      - Multi-seed (5) confirmed the above are seed-robust.
 - **Prereq diagnostic (cheap, gradient-free — do first).** [x] Persist a **per-node
       floor fraction** so the collapse localises to specific nodes: the current CSV
       only writes the across-nodes `frac_h_raw_neg` median
@@ -149,6 +152,53 @@ fix:
   → **Adopt the scaling for the `river_q` gain.** `river_h` + the flux-accumulation amp
   remain the top open problem and need item **(a)** (MB-invasive q/h rescaling, §4 of
   mass_balance_stability_notes) — separate work.
+
+- **VALIDATED (E12, 2026-09-18, 5-seed on the E11 base).** Option A (per-node σ +
+  smooth h-floor) is **necessary-but-not-sufficient — exactly as the honesty note
+  predicted.** Real wins: `river_q` KGE 0.919→**0.940** (best-in-series), outlet q RMSE
+  ~12.1→~10.7, and rollout **boundedness** — `fixed_val_rmse` 1e9→**24.6 [11.8,38.3],
+  finite all seeds**; downstream `river_h` bounded (outlet std ratio 5.92→1.37, RMSE
+  3.10→1.02). **But `river_h` is NOT fixed:** `node48` still a flatline (ratio 0.00),
+  the outlet "1.37" is a rail-to-rail 0↔2 square wave (no tracking), floor firing ROSE
+  (0.62→0.69), and `amp`/`mb_gain` did not drop (6.65→9.38, 22.9→46.25 — a per-node
+  diagnostic-definition change, not real destabilization). **Adopt per-node σ; leave the
+  smooth floor OFF until an A/B credits it. `river_h` now needs the B/C-hybrid MB
+  reformulation** ([notes/mass_balance_formulations.md](notes/mass_balance_formulations.md)),
+  the deeper root this note flagged. See docs/EXPERIMENTS.md E12.
+  > **⚠ CORRECTION (2026-09-19): the smooth-floor arm was BUGGY** — `_nonnegative_floor`
+  > hard-capped `h` at `softness·40 = 2.0 m` (the softplus overflow guard clamped the
+  > positive side), which is the 0↔2 rail. Bug fixed. E12's stability/boundedness numbers
+  > (finite fixed RMSE, bounded downstream h) are largely that cap artifact and **E12 must
+  > be re-run** with the corrected floor (or floor OFF) before crediting a stability gain.
+
+## 1b. Harden the per-node σ base (blocks E12 + E13 re-runs)
+
+**Why (E12 + E13 diagnostics, 2026-09-19).** The per-node σ scheme (§1a) is
+UNSTABLE in the h-channel. `σ_h` spans **0.031–68.9** (vs the old global 24.582;
+37 nodes below 5); the h-loss divides by `σ_h,i`, so tiny-σ_h nodes get ~`1/σ_h²`
+gradient weight (stiffness `mb_gain` up to 486 vs the old uniform ~22). Symptoms:
+E12 pre-clip `grad_norm` ~6–170× larger than E11 (masked only by `grad_clip=1.0`);
+**E13** showed the h-channel loss explodes with the dataset window length
+(`val_h_1step` 2.9 → 7.8e6 → 1.5e7 as nhorizon 11→21→31) **in phase 1** (horizon-1),
+with the deepest cell's training `grad_norm` blowing up from epoch 1 (4.5 → 143000).
+This contaminated E13 and plausibly starves the (clip-limited) step onto floored/dead
+headwater nodes — why per-node σ gave the headwater no skill.
+
+- [x] **Floor / winsorize `σ_h` per node** (e.g. `σ_h,i = max(σ_h,i, c)` for a
+      sane `c`, or clamp to a percentile band) so a 0.03 m node cannot get ~800×
+      the outlet's gradient weight. Same consideration for `σ_q`/`σ_inwater` if they
+      show a similar spread. Touch: `src/preprocess.jl` (`standardize_per_node!`).
+      Implemented as config-controlled floors: `model.mb_sigma_h_floor`,
+      `model.mb_sigma_q_floor`, `model.mb_sigma_inwater_floor`.
+- [ ] **Re-tune the LR on the new normalization.** The carried-over `1.3457e-4` was
+      autotuned on the OLD global-σ landscape via a horizon-1 teacher-forced range
+      test — stale. Re-run `scripts/lr_range_test.jl` on the per-node base (with the
+      σ_h floor applied) and adopt the new stable LR.
+- [ ] **Investigate why longer windows amplify the h-loss from phase 1** (per-node
+      σ_h × validation-window composition) — the h-channel metric should be robust to
+      `nhorizon`. Likely resolved by the σ_h floor; confirm.
+- **Then RE-RUN E12** (per-node σ, corrected smooth floor / floor OFF) and, if a clean
+  depth answer is still wanted, **RE-RUN E13** on the hardened base.
 
 ## 2b. Validation metrics — remaining items
 
