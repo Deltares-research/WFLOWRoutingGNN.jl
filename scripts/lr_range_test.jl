@@ -103,7 +103,13 @@ function load_graphs(ds, ms)
     output_file     = joinpath(ds.wflow_model_path, ds.output_run_dir, "output.nc")
     schema = load_schema(ds.wflow_schema)
     graphs, norm_stats, grid, postscale, static_arr =
-        build_wflow_graph(staticmaps_file, output_file, ms.domain; schema)
+        build_wflow_graph(staticmaps_file, output_file, ms.domain;
+                         schema,
+                         stats_frac = ds.train_frac,
+                         include_log_upstream_area = ms.include_log_upstream_area,
+                         sigma_floor_h = ms.mb_sigma_h_floor,
+                         sigma_floor_q = ms.mb_sigma_q_floor,
+                         sigma_floor_inwater = ms.mb_sigma_inwater_floor)
     return (; graphs, norm_stats, postscale, static_arr, output_file)
 end
 
