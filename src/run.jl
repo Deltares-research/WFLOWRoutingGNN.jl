@@ -206,16 +206,6 @@ function build_gnn_model(ms::ModelSettings, graphs, norm_stats, postscale,
     A_sparse = sparse(all_tgt, all_src, ones(Float32, length(all_src)), n_nodes, n_nodes)
 
     if ms.domain == "river" && ms.enforce_mass_balance
-        stat_vec(vname::String, field::Symbol) = begin
-            raw = getfield(norm_stats[vname], field)
-            if raw isa AbstractVector
-                length(raw) == n_nodes ||
-                    throw(ArgumentError("norm_stats[$vname].$field length $(length(raw)) != n_nodes $n_nodes"))
-                Float32.(raw)
-            else
-                fill(Float32(raw), n_nodes)
-            end
-        end
         finite_median(v::AbstractVector{<:Real}) = begin
             fv = Float32[x for x in v if isfinite(x)]
             isempty(fv) ? NaN32 : Float32(median(fv))
@@ -225,36 +215,11 @@ function build_gnn_model(ms::ModelSettings, graphs, norm_stats, postscale,
             isempty(fv) ? NaN32 : Float32(maximum(fv))
         end
 
-        dt     = get_timestep(output_file)
-        pq_vec = postscale["river_q"]
-        ph_vec = postscale["river_h"]
-        μ_q = stat_vec("river_q", :mean)
-        σ_q = stat_vec("river_q", :std)
-        μ_h = stat_vec("river_h", :mean)
-        σ_h = stat_vec("river_h", :std)
-        μ_inwater = stat_vec("river_inwater", :mean)
-        σ_inwater = stat_vec("river_inwater", :std)
-        # Routing-only adjacency (no self-loops): A_routing[i,j]=1 means j flows into i.
-        A_routing = sparse(all_tgt[1:length(src_edges)], all_src[1:length(src_edges)],
-                           ones(Float32, length(src_edges)), n_nodes, n_nodes)
-        mb = MassBalanceLayer(
-            pq_vec,
-            ph_vec,
-            ph_vec ./ pq_vec,
-            μ_q,
-            σ_q,
-            μ_h,
-            σ_h,
-            μ_inwater,
-            σ_inwater,
-            dt,
-            A_routing,
-            nothing,  # A_routing_batched — set via precompute_batched
-            0,        # batch_size
-            ms.mb_theta,
-            ms.mb_smooth_h_floor,
-            ms.mb_h_floor_softness,
-        )
+        dt = get_timestep(output_file)
+        mb = build_massbalance(norm_stats, postscale, src_edges, tgt_edges, dt;
+                               θ = ms.mb_theta,
+                               smooth_h_floor = ms.mb_smooth_h_floor,
+                               h_floor_softness = ms.mb_h_floor_softness)
         # Base weight balances the q- and h-loss magnitudes; ∂h_norm/∂q_norm of
         # the hard mass-balance decoder equals `dt·σ_q/σ_h = 1/base`, so the
         # h-branch injects a q-gradient amplified by `1/base` at :absolute.

@@ -15,8 +15,13 @@ export ldd_to_graph, build_wflow_graph, make_horizon_dataset, DOMAIN_VARS, LDD_O
        DataSettings, save_data_settings, load_data_settings,
        get_timestep, peak_node_stats
 
+include("sparse_ops.jl")
+
+include("massbalance.jl")
+export MassBalanceLayer, build_massbalance, mb_diagnostics
+
 include("gnn.jl")
-export WflowGNN, MassBalanceLayer, mb_diagnostics, ModelSettings, save_model_settings, load_model_settings, ACTIVATIONS,
+export WflowGNN, ModelSettings, save_model_settings, load_model_settings, ACTIVATIONS,
        SparseConv, precompute_batched
 
 include("strategy.jl")

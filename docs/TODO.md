@@ -19,21 +19,31 @@ testable and reversible); after each, tests must stay green and a small golden r
 
 ## R1. Extract shared/MB code into their own files (pure code move)
 
-- [ ] New `src/sparse_ops.jl`: move `_topology_mul` + its `ChainRulesCore.rrule`
+- [x] New `src/sparse_ops.jl`: move `_topology_mul` + its `ChainRulesCore.rrule`
       verbatim (included first so both `massbalance.jl` and `gnn.jl` can use it).
       **Do not alter** — this is the top autodiff-memory optimisation.
-- [ ] New `src/massbalance.jl`: move `MassBalanceLayer` + its `@layer`/`@functor`/
+      (Also hosts the shared `_to_cusparse`/`_to_cpu_sparse` helpers, which both
+      `SparseConv` and the MB layer's `gpu`/`cpu` overloads use.)
+- [x] New `src/massbalance.jl`: move `MassBalanceLayer` + its `@layer`/`@functor`/
       `gpu`/`cpu` overloads, the forward operator, `mb_decoder_features`,
       `mb_diagnostics`, `_floor_q_norm_nonnegative`, `_nonnegative_floor`, and
       `precompute_batched(::MassBalanceLayer, …)` out of `src/gnn.jl`.
-- [ ] Move the inlined MB-construction block from `build_gnn_model`
+- [x] Move the inlined MB-construction block from `build_gnn_model`
       ([src/run.jl](../src/run.jl)) into an MB factory `build_massbalance(...)` in
-      `src/massbalance.jl`.
-- [ ] Update `include`/`export` order in
+      `src/massbalance.jl`. (Takes scalars `θ`/`smooth_h_floor`/`h_floor_softness`
+      rather than `ModelSettings`, since `ModelSettings` is defined later in
+      `gnn.jl`.)
+- [x] Update `include`/`export` order in
       [src/WflowRoutingGNN.jl](../src/WflowRoutingGNN.jl); `gnn.jl` keeps only the
       generic `SparseConv`/`WflowGNN`/encoder-processor-decoder plumbing.
 - Touch: `src/sparse_ops.jl` (new), `src/massbalance.jl` (new), `src/gnn.jl`,
       `src/run.jl`, `src/WflowRoutingGNN.jl`. No behaviour change; tests green.
+- [x] R1 validation (2026-10-19): full test suite 4472/4472 pass. Golden run
+      (`sava_small_v081`, seed 42, 5 epochs, CPU and GPU) vs. pre-R1 `HEAD`:
+      predictions (`river_q`/`river_h`, train+val), model weights, losses and
+      metrics CSVs are bit-identical on both devices. Rollout benchmark
+      (300 steps, CPU/GPU, single/ensemble, 2 interleaved reps) shows
+      before/after differences within run-to-run noise.
 
 ## R2. Mass-balance formulations as a dispatch hierarchy
 
