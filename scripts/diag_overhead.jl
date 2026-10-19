@@ -109,7 +109,7 @@ for dev in requested
 
     t_train = timeit(train_step, sync)
     t_1step = timeit(() -> one_step_loss(model_d, batch_d, static_d, hw), sync)
-    has_mb  = model_d.mass_balance !== nothing
+    has_mb  = WflowRoutingGNN.has_mass_balance(model_d.mass_balance)
     t_comp  = has_mb ? timeit(() -> loss_components(model_d, batch_d, static_d), sync) : 0.0
     t_amp   = has_mb ? timeit(() -> mb_amplification(model_d, batch_d, static_d), sync) : 0.0
 

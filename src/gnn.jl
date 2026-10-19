@@ -5,8 +5,8 @@ using SparseArrays
 import TOML
 
 # `_topology_mul` (+ its rrule) and the `_to_cusparse`/`_to_cpu_sparse` helpers
-# live in sparse_ops.jl; the MassBalanceLayer lives in massbalance.jl (both are
-# included before this file).
+# live in sparse_ops.jl; the mass-balance formulations (`NoMassBalance`,
+# `ThetaKinematicWave`) live in massbalance.jl (both are included before this file).
 
 # Registry of serialisable activation function names.
 const ACTIVATIONS = Dict(
@@ -44,7 +44,12 @@ Hyperparameters for a `WflowGNN` model.
                    mass balance as a hard constraint (decoder predicts only `Δq`;
                    `river_h` is derived analytically). When `false`, `river_q`
                    and `river_h` are predicted independently by the decoder
-                   (default `true`). Ignored for non-river domains.
+                   (default `true`). Ignored for non-river domains. Setting
+                   `false` always selects the `"none"` formulation.
+- `mb_formulation`  : which mass-balance formulation to use when the mass balance
+                   is enabled: `"theta_kinematic_wave"` (default; the θ-weighted
+                   kinematic-wave hard constraint) or `"none"` (no physics
+                   constraint). See [`mb_formulation_kind`](@ref).
 - `mb_theta`        : implicitness weight `θ ∈ [0, 1]` of the mass-balance time
                    discretisation (default `1.0` = fully implicit / backward
                    Euler). `0.5` = Crank–Nicolson, `0.0` = fully explicit.
@@ -87,6 +92,7 @@ Base.@kwdef struct ModelSettings
     enc_activation              = swish
     proc_activation             = swish
     enforce_mass_balance :: Bool = true
+    mb_formulation       :: String = "theta_kinematic_wave"
     mb_theta             :: Float32 = 1.0f0
     mb_augment_decoder   :: Bool = false
     include_log_upstream_area :: Bool = false
@@ -95,6 +101,24 @@ Base.@kwdef struct ModelSettings
     mb_sigma_h_floor     :: Float32 = 0.0f0
     mb_sigma_q_floor     :: Float32 = 0.0f0
     mb_sigma_inwater_floor :: Float32 = 0.0f0
+end
+
+# Valid values of `ModelSettings.mb_formulation`.
+const MB_FORMULATIONS = ("none", "theta_kinematic_wave")
+
+"""
+    mb_formulation_kind(s::ModelSettings) -> Symbol
+
+Effective mass-balance formulation for `s`: `:none` or `:theta_kinematic_wave`.
+A mass balance is only available for the `"river"` domain; `enforce_mass_balance =
+false` (the legacy switch) and `mb_formulation = "none"` both select `:none`.
+Throws `ArgumentError` for an unknown `mb_formulation`.
+"""
+function mb_formulation_kind(s::ModelSettings)::Symbol
+    s.mb_formulation in MB_FORMULATIONS ||
+        throw(ArgumentError("unknown mb_formulation \"$(s.mb_formulation)\"; choose from $(join(MB_FORMULATIONS, ", "))"))
+    (s.domain == "river" && s.enforce_mass_balance) || return :none
+    return Symbol(s.mb_formulation)
 end
 
 function Base.show(io::IO, s::ModelSettings)
@@ -106,6 +130,7 @@ function Base.show(io::IO, s::ModelSettings)
     println(io, "  enc_activation  : ", _activation_name(s.enc_activation))
     println(io, "  proc_activation : ", _activation_name(s.proc_activation))
     println(io, "  enforce_mass_balance : ", s.enforce_mass_balance)
+    println(io, "  mb_formulation  : ", s.mb_formulation)
     println(io, "  mb_theta        : ", s.mb_theta)
     println(io, "  mb_augment_decoder : ", s.mb_augment_decoder)
     println(io, "  include_log_upstream_area : ", s.include_log_upstream_area)
@@ -131,6 +156,7 @@ function save_model_settings(path::String, s::ModelSettings)
         "enc_activation"  => _activation_name(s.enc_activation),
         "proc_activation" => _activation_name(s.proc_activation),
         "enforce_mass_balance" => s.enforce_mass_balance,
+        "mb_formulation"  => s.mb_formulation,
         "mb_theta"        => s.mb_theta,
         "mb_augment_decoder" => s.mb_augment_decoder,
         "include_log_upstream_area" => s.include_log_upstream_area,
@@ -164,6 +190,7 @@ function load_model_settings(path::String)
         enc_activation  = ACTIVATIONS[enc_name],
         proc_activation = ACTIVATIONS[proc_name],
         enforce_mass_balance = get(d, "enforce_mass_balance", true),
+        mb_formulation  = get(d, "mb_formulation", "theta_kinematic_wave"),
         mb_theta        = Float32(get(d, "mb_theta", 1.0)),
         mb_augment_decoder = get(d, "mb_augment_decoder", false),
         include_log_upstream_area = get(d, "include_log_upstream_area", false),
@@ -343,18 +370,23 @@ Encode-process-decode GNN for wflow routing emulation.
 - `encoder`      : `Dense` or `Chain` of `Dense` layers mapping `in_dim -> hidden_dim`.
 - `processor`    : `GNNChain` of `GraphConv` or `SparseConv` layers operating at `hidden_dim`.
 - `decoder`      : `Dense` or `Chain` of `Dense` layers mapping `hidden_dim -> out_dim`.
-- `mass_balance` : optional `MassBalanceLayer` that hard-constrains `river_h` via the
-                   kinematic-wave mass balance. When present the decoder outputs only
-                   `Δq` (`out_dim = 1`) and `river_h` is computed analytically.
-- `augment_mb`   : when `true` (and `mass_balance` is present), two physics-derived
-                   features (`mb_decoder_features`) are appended to the decoder
-                   input, widening its first layer by `MB_DECODER_FEATURES`.
+- `mass_balance` : a [`MassBalanceFormulation`](@ref) (never `nothing`). The forward
+                   pass dispatches on it: [`NoMassBalance`](@ref) predicts the full
+                   state increment; [`ThetaKinematicWave`](@ref) hard-constrains
+                   `river_h` via the kinematic-wave mass balance (decoder outputs
+                   only `Δq`, `out_dim = 1`, and `river_h` is computed analytically).
+- `augment_mb`   : when `true` (and the formulation provides extra decoder features),
+                   physics-derived features (`extra_decoder_features`) are appended
+                   to the decoder input, widening its first layer by
+                   `extra_decoder_dim(mass_balance)`.
+
+The formulation type is a type parameter so the forward pass is type-stable.
 """
-struct WflowGNN
+struct WflowGNN{M <: MassBalanceFormulation}
     encoder      :: Union{Dense, Chain}
     processor    :: GNNChain
     decoder      :: Union{Dense, Chain}
-    mass_balance :: Union{Nothing, MassBalanceLayer}
+    mass_balance :: M
     augment_mb   :: Bool
 end
 
@@ -368,7 +400,7 @@ function Flux.gpu(m::WflowGNN)
         Flux.gpu(m.encoder),
         GNNChain(map(Flux.gpu, m.processor.layers)...),
         Flux.gpu(m.decoder),
-        isnothing(m.mass_balance) ? nothing : Flux.gpu(m.mass_balance),
+        Flux.gpu(m.mass_balance),
         m.augment_mb,
     )
 end
@@ -378,7 +410,7 @@ function Flux.cpu(m::WflowGNN)
         Flux.cpu(m.encoder),
         GNNChain(map(Flux.cpu, m.processor.layers)...),
         Flux.cpu(m.decoder),
-        isnothing(m.mass_balance) ? nothing : Flux.cpu(m.mass_balance),
+        Flux.cpu(m.mass_balance),
         m.augment_mb,
     )
 end
@@ -393,17 +425,7 @@ for `settings.domain` (from `DOMAIN_VARS`). The output dimension equals the
 number of state variables.
 """
 function WflowGNN(s::ModelSettings)
-    s.domain in keys(DOMAIN_VARS) ||
-        throw(ArgumentError("domain must be one of $(join(sort(collect(keys(DOMAIN_VARS))), ", ")), got \"$(s.domain)\""))
-    vars    = DOMAIN_VARS[s.domain]
-    extra_static = (s.domain == "river" && s.include_log_upstream_area) ? 1 : 0
-    in_dim  = length(vars["state"]) + length(vars["forcing"]) + length(vars["static"]) + extra_static
-    out_dim = length(vars["state"])
-    return WflowGNN(in_dim, s.hidden_dim, out_dim;
-                    nlayers         = s.nlayers,
-                    mlp_layers      = s.mlp_layers,
-                    enc_activation  = s.enc_activation,
-                    proc_activation = s.proc_activation)
+    return WflowGNN(s, NoMassBalance(), nothing)
 end
 
 """
@@ -421,55 +443,37 @@ Self-loops must be included explicitly if desired.
 `A` is not trainable; it is moved to GPU automatically via `Flux.gpu`.
 """
 function WflowGNN(s::ModelSettings, A::AbstractMatrix{Float32})
-    s.domain in keys(DOMAIN_VARS) ||
-        throw(ArgumentError("domain must be one of $(join(sort(collect(keys(DOMAIN_VARS))), ", ")), got \"$(s.domain)\""))
-    vars    = DOMAIN_VARS[s.domain]
-    extra_static = (s.domain == "river" && s.include_log_upstream_area) ? 1 : 0
-    in_dim  = length(vars["state"]) + length(vars["forcing"]) + length(vars["static"]) + extra_static
-    out_dim = length(vars["state"])
-    return WflowGNN(in_dim, s.hidden_dim, out_dim;
-                    nlayers         = s.nlayers,
-                    mlp_layers      = s.mlp_layers,
-                    enc_activation  = s.enc_activation,
-                    proc_activation = s.proc_activation,
-                    adj_matrix      = A)
+    return WflowGNN(s, NoMassBalance(), A)
 end
 
 """
-    WflowGNN(settings, mass_balance) -> WflowGNN
+    WflowGNN(settings, mass_balance::MassBalanceFormulation) -> WflowGNN
 
-Construct a `WflowGNN` with a hard mass-balance constraint for the river domain.
-The decoder outputs only `Δq` (`out_dim = 1`); `river_h` is derived analytically
-in the forward pass via `mass_balance`.
+Construct a `WflowGNN` around a mass-balance formulation. With
+[`ThetaKinematicWave`](@ref) the decoder outputs only `Δq` (`out_dim = 1`) and
+`river_h` is derived analytically in the forward pass.
 """
-function WflowGNN(s::ModelSettings, mb::MassBalanceLayer)
-    s.domain in keys(DOMAIN_VARS) ||
-        throw(ArgumentError("domain must be one of $(join(sort(collect(keys(DOMAIN_VARS))), ", ")), got \"$(s.domain)\""))
-    vars   = DOMAIN_VARS[s.domain]
-    extra_static = (s.domain == "river" && s.include_log_upstream_area) ? 1 : 0
-    in_dim = length(vars["state"]) + length(vars["forcing"]) + length(vars["static"]) + extra_static
-    return WflowGNN(in_dim, s.hidden_dim, 1;
-                    nlayers         = s.nlayers,
-                    mlp_layers      = s.mlp_layers,
-                    enc_activation  = s.enc_activation,
-                    proc_activation = s.proc_activation,
-                    mass_balance    = mb,
-                    augment_mb      = s.mb_augment_decoder)
+function WflowGNN(s::ModelSettings, mb::MassBalanceFormulation)
+    return WflowGNN(s, mb, nothing)
 end
 
 """
     WflowGNN(settings, mass_balance, A) -> WflowGNN
 
-Construct a `WflowGNN` with both a hard mass-balance constraint and `SparseConv`
-layers (see `WflowGNN(settings, A)` and `WflowGNN(settings, mass_balance)`).
+Core constructor: a `WflowGNN` with a mass-balance formulation and (when `A` is
+not `nothing`) `SparseConv` layers. All other public constructors forward here.
+The decoder width and the forward pass follow from the formulation by dispatch
+(`decoder_outputs`, `extra_decoder_dim`).
 """
-function WflowGNN(s::ModelSettings, mb::MassBalanceLayer, A::AbstractMatrix{Float32})
+function WflowGNN(s::ModelSettings, mb::MassBalanceFormulation,
+                  A::Union{Nothing, AbstractMatrix{Float32}})
     s.domain in keys(DOMAIN_VARS) ||
         throw(ArgumentError("domain must be one of $(join(sort(collect(keys(DOMAIN_VARS))), ", ")), got \"$(s.domain)\""))
-    vars   = DOMAIN_VARS[s.domain]
+    vars    = DOMAIN_VARS[s.domain]
     extra_static = (s.domain == "river" && s.include_log_upstream_area) ? 1 : 0
-    in_dim = length(vars["state"]) + length(vars["forcing"]) + length(vars["static"]) + extra_static
-    return WflowGNN(in_dim, s.hidden_dim, 1;
+    in_dim  = length(vars["state"]) + length(vars["forcing"]) + length(vars["static"]) + extra_static
+    out_dim = decoder_outputs(mb, length(vars["state"]))
+    return WflowGNN(in_dim, s.hidden_dim, out_dim;
                     nlayers         = s.nlayers,
                     mlp_layers      = s.mlp_layers,
                     enc_activation  = s.enc_activation,
@@ -490,16 +494,17 @@ function WflowGNN(
         mlp_layers      :: Int = 1,
         enc_activation        = swish,
         proc_activation       = swish,
-        mass_balance          = nothing,
+        mass_balance    :: MassBalanceFormulation = NoMassBalance(),
         augment_mb      :: Bool = false,
         adj_matrix            = nothing)
 
     mlp_layers >= 1 || throw(ArgumentError("mlp_layers must be >= 1, got $mlp_layers"))
 
-    # Augmentation only applies when a mass-balance layer is present (the extra
-    # features are derived from it). The resolved flag is stored on the struct.
-    augment = augment_mb && !isnothing(mass_balance)
-    dec_in  = hidden_dim + (augment ? MB_DECODER_FEATURES : 0)
+    # Augmentation only applies when the formulation provides extra decoder
+    # features (derived from it). The resolved flag is stored on the struct.
+    n_extra = extra_decoder_dim(mass_balance)
+    augment = augment_mb && n_extra > 0
+    dec_in  = hidden_dim + (augment ? n_extra : 0)
 
     # Encoder: in_dim → hidden_dim → ... → hidden_dim  (mlp_layers Dense layers)
     if mlp_layers == 1
@@ -552,11 +557,7 @@ function precompute_batched(model::WflowGNN, B::Int)
     new_layers = map(model.processor.layers) do l
         l isa SparseConv ? precompute_batched(l, B) : l
     end
-    new_mb = if !isnothing(model.mass_balance)
-        precompute_batched(model.mass_balance, B)
-    else
-        nothing
-    end
+    new_mb = precompute_batched(model.mass_balance, B)
     WflowGNN(model.encoder, GNNChain(new_layers...), model.decoder, new_mb, model.augment_mb)
 end
 
@@ -584,20 +585,14 @@ function (m::WflowGNN)(g::GNNGraph,
     x = vcat(state, forcing, static)
     h = m.encoder(x)
     h = m.processor(g, h)
-    if isnothing(m.mass_balance)
-        Δ = m.decoder(h)
-        return state .+ Δ
-    else
-        if m.augment_mb
-            # Append physics-derived, known-at-t features to the decoder input.
-            uq_norm, h_expl_norm = mb_decoder_features(m.mass_balance, g, state, forcing)
-            Δ = m.decoder(vcat(h, uq_norm, h_expl_norm))
-        else
-            Δ = m.decoder(h)
-        end
-        q_new = _floor_q_norm_nonnegative(m.mass_balance, g, state[1:1, :] .+ Δ)
-        h_new = m.mass_balance(g, state, forcing, forcing_next, q_new)
-        return vcat(q_new, h_new)
-    end
+    f = m.mass_balance
+    # Physics-derived, known-at-t features appended to the decoder input
+    # (`()` for formulations without any, or when augmentation is off).
+    extras = m.augment_mb ? extra_decoder_features(f, g, state, forcing) : ()
+    Δ = m.decoder(_decoder_input(h, extras))
+    return apply_formulation(f, g, state, forcing, forcing_next, Δ)
 end
+
+_decoder_input(h, ::Tuple{}) = h
+_decoder_input(h, extras::Tuple{Any, Any}) = vcat(h, extras[1], extras[2])
 

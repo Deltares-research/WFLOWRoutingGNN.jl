@@ -16,7 +16,7 @@ A_routing = sparse(t, s, ones(Float32, length(s)), n, n)
 
 ms = ModelSettings(domain = "river")
 dt = get_timestep(output)
-mb = MassBalanceLayer(
+mb = ThetaKinematicWave(
     postscale["river_q"],
     postscale["river_h"],
     postscale["river_h"] ./ postscale["river_q"],

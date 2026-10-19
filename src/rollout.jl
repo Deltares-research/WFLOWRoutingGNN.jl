@@ -543,9 +543,13 @@ Also returns per-node floor diagnostics:
 - `n_valid_h_raw_node`   [-]: number of finite `h_raw` samples per node
 """
 function rollout_mb_diagnostics(model::WflowGNN, split, static::AbstractMatrix{Float32})
-    isnothing(model.mass_balance) &&
-        throw(ArgumentError("rollout_mb_diagnostics requires a MassBalanceLayer"))
-    mb = model.mass_balance
+    return _rollout_mb_diagnostics(model.mass_balance, model, split, static)
+end
+
+_rollout_mb_diagnostics(::NoMassBalance, model, split, static) =
+    throw(ArgumentError("rollout_mb_diagnostics requires a mass-balance formulation (got NoMassBalance)"))
+
+function _rollout_mb_diagnostics(mb::ThetaKinematicWave, model, split, static)
 
     # Flatten windows to a consecutive timeseries (same logic as evaluate_trajectory)
     graphs = vcat(split[1], [w[end] for w in split[2:end]])

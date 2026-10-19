@@ -26,7 +26,7 @@ lives in [DECISIONS.md](DECISIONS.md) and the research notes under `docs/notes/`
   (`SparseConv`, cuSPARSE SpMM) rather than scatter-gather — the fastest path on
   GPU. Batched training uses a precomputed block-diagonal adjacency
   (`precompute_batched`, built on CPU before moving to GPU).
-- **Hard mass balance (the `MassBalanceLayer`).** The decoder predicts only the
+- **Hard mass balance (the `ThetaKinematicWave` formulation).** The decoder predicts only the
   discharge increment `Δq` (`out_dim = 1`); `river_h` is derived analytically
   from the kinematic-wave water balance every step, so conservation is exact by
   construction. The discretisation is **fully implicit** (all fluxes at `t+1`,

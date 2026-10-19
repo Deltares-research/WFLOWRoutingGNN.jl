@@ -687,7 +687,7 @@ function train_model!(model,
     peak_grad_frac      = Float32[]
     do_peak_diagnostics = strategy.loss_type == :huber
 
-    has_components = !isnothing(model.mass_balance)
+    has_components = has_mass_balance(model.mass_balance)
 
     # Fixed-horizon validation metric + early stopping / best-weight tracking.
     do_fixed_eval = !isnothing(fixed_eval)

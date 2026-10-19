@@ -615,7 +615,12 @@ the state. Returns `(nothing, nothing)` when the model has no mass balance.
 Runs entirely under `Flux.ignore_derivatives` — for diagnostic reporting only.
 """
 function loss_components(model::WflowGNN, batch::Vector{<:GNNGraph}, static::AbstractMatrix)
-    isnothing(model.mass_balance) && return (nothing, nothing)
+    return _loss_components(model.mass_balance, model, batch, static)
+end
+
+_loss_components(::NoMassBalance, model, batch, static) = (nothing, nothing)
+
+function _loss_components(::ThetaKinematicWave, model, batch, static)
     Flux.ignore_derivatives() do
         g      = batch[1]
         pred   = model(g, g.ndata.state, g.ndata.forcing, static, batch[2].ndata.forcing)
@@ -648,8 +653,12 @@ Returns `(NaN32, NaN32)` when the model has no mass balance. Non-differentiable;
 for diagnostic reporting only.
 """
 function mb_amplification(model::WflowGNN, batch::Vector{<:GNNGraph}, static::AbstractMatrix)
-    mb = model.mass_balance
-    isnothing(mb) && return (NaN32, NaN32)
+    return _mb_amplification(model.mass_balance, model, batch, static)
+end
+
+_mb_amplification(::NoMassBalance, model, batch, static) = (NaN32, NaN32)
+
+function _mb_amplification(mb::ThetaKinematicWave, model, batch, static)
     Flux.ignore_derivatives() do
         g            = batch[1]
         state        = g.ndata.state

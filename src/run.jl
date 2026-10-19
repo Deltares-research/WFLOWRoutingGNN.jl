@@ -97,6 +97,7 @@ function settings_from_config(d::AbstractDict, toml_dir::AbstractString)
         enc_activation  = ACTIVATIONS[get(md, "enc_activation",  "swish")],
         proc_activation = ACTIVATIONS[get(md, "proc_activation", "swish")],
         enforce_mass_balance = get(md, "enforce_mass_balance", true),
+        mb_formulation  = String(get(md, "mb_formulation", "theta_kinematic_wave")),
         mb_theta        = Float32(get(md, "mb_theta", 1.0)),
         mb_augment_decoder = get(md, "mb_augment_decoder", false),
         include_log_upstream_area = get(md, "include_log_upstream_area", false),
@@ -178,7 +179,8 @@ end
 
 Construct a `WflowGNN` (with block-diagonal adjacency pre-computed for
 `batch_size`) from a built graph time series. For the `"river"` domain this also
-builds the `MassBalanceLayer` and, when `strategy` is supplied, sets
+builds the mass-balance formulation (see [`mb_formulation_kind`](@ref)) and, when
+`strategy` is supplied, sets
 `strategy.h_loss_weight` to the mass-balance-consistent value.
 
 `h_loss_scale` selects how the water-depth term of the loss is normalised:
@@ -205,60 +207,35 @@ function build_gnn_model(ms::ModelSettings, graphs, norm_stats, postscale,
     all_tgt  = vcat(tgt_edges, collect(1:n_nodes))
     A_sparse = sparse(all_tgt, all_src, ones(Float32, length(all_src)), n_nodes, n_nodes)
 
-    if ms.domain == "river" && ms.enforce_mass_balance
-        finite_median(v::AbstractVector{<:Real}) = begin
-            fv = Float32[x for x in v if isfinite(x)]
-            isempty(fv) ? NaN32 : Float32(median(fv))
-        end
-        finite_max(v::AbstractVector{<:Real}) = begin
-            fv = Float32[x for x in v if isfinite(x)]
-            isempty(fv) ? NaN32 : Float32(maximum(fv))
-        end
-
-        dt = get_timestep(output_file)
-        mb = build_massbalance(norm_stats, postscale, src_edges, tgt_edges, dt;
-                               θ = ms.mb_theta,
-                               smooth_h_floor = ms.mb_smooth_h_floor,
-                               h_floor_softness = ms.mb_h_floor_softness)
-        # Base weight balances the q- and h-loss magnitudes; ∂h_norm/∂q_norm of
-        # the hard mass-balance decoder equals `dt·σ_q/σ_h = 1/base`, so the
-        # h-branch injects a q-gradient amplified by `1/base` at :absolute.
-        # :increment squares the weight (measures h on the `dt·σ_q` increment
-        # scale), cancelling that amplification so ∂h_norm/∂q_norm ≈ O(1).
-          base_weight_vec = mb.σ_h ./ (mb.dt .* mb.σ_q)
-          base_weight = finite_median(base_weight_vec)
-        h_weight    = h_loss_scale === :increment ? base_weight^2 : base_weight
-        @info "Mass balance h_loss_weight = $(round(h_weight; sigdigits=3)) " *
-              "[scale=$(h_loss_scale)]  " *
-              "(median σ_h=$(round(finite_median(mb.σ_h); sigdigits=3)), " *
-              "median σ_q=$(round(finite_median(mb.σ_q); sigdigits=3)), dt=$(mb.dt) s)"
-          gain_vec = mb.θ .* mb.dt .* mb.σ_q ./ mb.σ_h
-          @info "Mass balance per-node gain |∂h_norm/∂q_norm| summary: " *
-              "median=$(round(finite_median(gain_vec); sigdigits=3)) " *
-              "max=$(round(finite_max(gain_vec); sigdigits=3))"
-        if mb.θ != 1f0
-            @info "Mass balance θ = $(mb.θ) (mixed implicit/explicit; " *
-                  "θ=1 fully implicit, θ=0 fully explicit). Effective stiff " *
-                  "gain ∂h_norm/∂q_norm scaled by θ."
-        end
-        if mb.smooth_h_floor
-            @info "Mass balance smooth h-floor enabled (softness=$(mb.h_floor_softness) m)"
-        end
-        strategy === nothing || (strategy.h_loss_weight = h_weight)
-        model = WflowGNN(ms, mb, A_sparse)
-    else
-        if ms.domain == "river" && !ms.enforce_mass_balance
-            @info "Mass balance DISABLED: river_q and river_h are predicted " *
-                  "independently (decoder out_dim = " *
-                  "$(length(DOMAIN_VARS["river"]["state"])))"
-        end
-        model = WflowGNN(ms, A_sparse)
-    end
+    mb = _build_mb_formulation(Val(mb_formulation_kind(ms)), ms, norm_stats, postscale,
+                               src_edges, tgt_edges, output_file)
+    h_weight = mb_h_loss_weight(mb, h_loss_scale)
+    (strategy === nothing || h_weight === nothing) || (strategy.h_loss_weight = h_weight)
+    model = WflowGNN(ms, mb, A_sparse)
 
     # Block-diagonal adjacency for the batch size. Must be built on CPU
     # (blockdiag needs SparseMatrixCSC); device movement happens at the call site.
     return precompute_batched(model, batch_size)
 end
+
+# Build the mass-balance formulation selected by `mb_formulation_kind(ms)`.
+_build_mb_formulation(::Val{:none}, ms, norm_stats, postscale,
+                      src_edges, tgt_edges, output_file) = begin
+    if ms.domain == "river"
+        @info "Mass balance DISABLED: river_q and river_h are predicted " *
+              "independently (decoder out_dim = " *
+              "$(length(DOMAIN_VARS["river"]["state"])))"
+    end
+    NoMassBalance()
+end
+
+_build_mb_formulation(::Val{:theta_kinematic_wave}, ms, norm_stats, postscale,
+                      src_edges, tgt_edges, output_file) =
+    build_massbalance(norm_stats, postscale, src_edges, tgt_edges,
+                      get_timestep(output_file);
+                      θ = ms.mb_theta,
+                      smooth_h_floor = ms.mb_smooth_h_floor,
+                      h_floor_softness = ms.mb_h_floor_softness)
 
 function _write_mb_floor_fraction_by_node(path::AbstractString,
                                           frac_h_raw_neg_node::AbstractVector,
@@ -329,7 +306,7 @@ function _mb_floor_summary(diags)
     )
 end
 
-function _write_mb_stiffness_by_node(path::AbstractString, mb::MassBalanceLayer)
+function _write_mb_stiffness_by_node(path::AbstractString, mb::ThetaKinematicWave)
     gain = mb.θ .* mb.dt .* mb.σ_q ./ mb.σ_h
     open(path, "w") do io
         println(io, "node_idx,mb_gain,mb_base_weight,sigma_q,sigma_h")
@@ -342,7 +319,7 @@ function _write_mb_stiffness_by_node(path::AbstractString, mb::MassBalanceLayer)
     return path
 end
 
-function _mb_stiffness_summary(mb::MassBalanceLayer)
+function _mb_stiffness_summary(mb::ThetaKinematicWave)
     gain = Float32.(mb.θ .* mb.dt .* mb.σ_q ./ mb.σ_h)
     fg = sort(Float32[x for x in gain if isfinite(x)])
     n = length(gain)
@@ -470,7 +447,7 @@ function evaluate_and_write(model, dataset, norm_stats, grid, postscale,
                       "KGE=$(round(river_q_perf.gauge.kge; digits=3)) MAE=$(round(river_q_perf.gauge.mae; digits=3))"
             end
 
-            if !isnothing(model.mass_balance)
+            if has_mass_balance(model.mass_balance)
                 @info "Computing mass balance diagnostics on validation split"
                 cpu_model = Flux.cpu(model)
                 mb_diags = rollout_mb_diagnostics(cpu_model, split_data, static_arr)

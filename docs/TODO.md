@@ -47,25 +47,39 @@ testable and reversible); after each, tests must stay green and a small golden r
 
 ## R2. Mass-balance formulations as a dispatch hierarchy
 
-- [ ] Add `abstract type MassBalanceFormulation`; `struct NoMassBalance` (null
+- [x] Add `abstract type MassBalanceFormulation`; `struct NoMassBalance` (null
       object replacing the `nothing` sentinel) and `struct ThetaKinematicWave`
       wrapping the current `MassBalanceLayer` fields.
-- [ ] Replace the branch points with dispatch methods: `decoder_outputs(f, ms)`,
+      (`const MassBalanceLayer = ThetaKinematicWave` kept as a compat alias.)
+- [x] Replace the branch points with dispatch methods: `decoder_outputs(f, n_state)`,
       `apply_formulation(f, g, state, forcing, forcing_next, Δ)`,
       `extra_decoder_features(f, g, state, forcing)` (returns `()` for
       `NoMassBalance`), `floor_state(f, g, raw)` (identity for `NoMassBalance`).
-- [ ] Make `WflowGNN.mass_balance :: MassBalanceFormulation` (never `nothing`);
+      (Plus `extra_decoder_dim`, `has_mass_balance`, `mb_h_loss_weight`.)
+- [x] Make `WflowGNN.mass_balance :: MassBalanceFormulation` (never `nothing`);
       collapse the forward pass to encode → process → `decoder(vcat(h,
       extra_decoder_features(...)...))` → `apply_formulation(...)`.
-- [ ] Keep the `θ == 1` fast path as a cheap inner scalar branch (do **not**
+      (`WflowGNN{M}` is parametric on the formulation.)
+- [x] Keep the `θ == 1` fast path as a cheap inner scalar branch (do **not**
       over-dispatch a scalar); keep it bit-identical.
-- [ ] Remove every `isnothing(mass_balance)` branch across `gnn.jl`, `run.jl`,
-      `rollout.jl`, `training.jl`.
-- [ ] Map `ModelSettings` → formulation via a `mb_formulation` key in
+- [x] Remove every `isnothing(mass_balance)` branch across `gnn.jl`, `run.jl`,
+      `rollout.jl`, `training.jl` (and `strategy.jl`).
+- [x] Map `ModelSettings` → formulation via a `mb_formulation` key in
       `settings_from_config` (keep `enforce_mass_balance` working for back-compat).
+      (`mb_formulation` ∈ {`"theta_kinematic_wave"` (default), `"none"`};
+      `mb_formulation_kind(ms)` resolves it, `enforce_mass_balance = false` forces
+      `"none"`.) Old checkpoints with `mass_balance = nothing` still load.
 - Touch: `src/massbalance.jl`, `src/gnn.jl`, `src/run.jl`, `src/rollout.jl`,
-      `src/training.jl`. Assert **bit-identical** outputs vs pre-refactor on a
-      fixed seed.
+      `src/training.jl`, `src/strategy.jl`. Assert **bit-identical** outputs vs
+      pre-refactor on a fixed seed.
+- [x] R2 validation (2026-10-19): full test suite 4515/4515 pass. Golden run
+      (`sava_small_v081`, seed 42, 5 epochs) vs. post-R1 code, four variants
+      (CPU; GPU; GPU `enforce_mass_balance=false`; GPU `mb_theta=0.5` +
+      `mb_augment_decoder=true`): model weights, train/val predictions and all
+      metrics CSV/TOML are bit-identical (only timing fields and the new
+      `mb_formulation` key in `model_settings.toml` differ). Interleaved
+      forward / fwd+bwd / train-step / 300-step rollout benchmarks (CPU+GPU,
+      2 reps) are within run-to-run noise of the pre-R2 code.
 
 ## R3. Split preprocessing into its own stage + artifact
 

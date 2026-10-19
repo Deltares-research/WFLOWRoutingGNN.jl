@@ -5,7 +5,37 @@ using SparseArrays
 using Statistics
 
 """
-    MassBalanceLayer
+    MassBalanceFormulation
+
+Abstract supertype of the mass-balance formulations a [`WflowGNN`](@ref) can be
+built around. The model never branches on *whether* it has a mass balance; it
+dispatches on the formulation instead. A formulation implements:
+
+- `decoder_outputs(f, n_state)`   : number of state channels the decoder predicts
+- `extra_decoder_features(f, g, state, forcing)` : extra decoder inputs, a tuple of
+                                   matrices (`()` for none)
+- `extra_decoder_dim(f)`          : total row count of `extra_decoder_features`
+- `floor_state(f, g, raw)`        : physical-space floor of the raw predicted q
+- `apply_formulation(f, g, state, forcing, forcing_next, Δ)` : next full state
+- `has_mass_balance(f)`           : `true` if it constrains `river_h`
+- `mb_h_loss_weight(f, h_loss_scale)`: h-loss weight implied by its stiffness (or `nothing`)
+- `precompute_batched(f, B)`, `Flux.gpu`, `Flux.cpu`
+
+Concrete formulations: [`NoMassBalance`](@ref), [`ThetaKinematicWave`](@ref).
+"""
+abstract type MassBalanceFormulation end
+
+"""
+    NoMassBalance()
+
+Null-object formulation: no physics constraint. The model predicts the full state
+increment directly (`state .+ decoder(h)`), with no `river_h` hard constraint.
+Used for non-river domains and whenever the mass balance is disabled.
+"""
+struct NoMassBalance <: MassBalanceFormulation end
+
+"""
+    ThetaKinematicWave
 
 A non-trainable layer that enforces the kinematic-wave mass balance as a hard
 constraint in the river routing forward pass.
@@ -42,7 +72,7 @@ Fields (all per-node constants, not optimised):
 - `smooth_h_floor`: if `true`, uses a smooth non-negative floor for `h_phys_new`
 - `h_floor_softness`: smooth-floor softness in physical meters (`> 0`)
 """
-struct MassBalanceLayer{V <: AbstractVector{Float32}}
+struct ThetaKinematicWave{V <: AbstractVector{Float32}} <: MassBalanceFormulation
     postscale_q       :: V
     postscale_h       :: V
     ph_over_pq        :: V   # postscale_h ./ postscale_q — precomputed constant
@@ -61,6 +91,9 @@ struct MassBalanceLayer{V <: AbstractVector{Float32}}
     h_floor_softness  :: Float32
 end
 
+# Pre-R2 name of the θ-kinematic-wave formulation, kept for compatibility.
+const MassBalanceLayer = ThetaKinematicWave
+
 # Non-negative floor in physical space. Default is hard clamp; optional
 # softplus branch preserves a small gradient near dry-channel conditions.
 function _nonnegative_floor(x, smooth::Bool, softness::Float32)
@@ -77,17 +110,17 @@ function _nonnegative_floor(x, smooth::Bool, softness::Float32)
     return β .* (max.(z, 0f0) .+ log1p.(exp.(.-abs.(z))))
 end
 
-Flux.@layer MassBalanceLayer
-Flux.trainable(::MassBalanceLayer) = (;)  # physics constants, not optimised
+Flux.@layer ThetaKinematicWave
+Flux.trainable(::ThetaKinematicWave) = (;)  # physics constants, not optimised
 # Restrict Functors traversal to the per-node vectors; exclude A_routing
 # (not writable in-place on GPU). Device transfer is handled by the explicit
 # Flux.gpu / Flux.cpu overloads below.
-Functors.@functor MassBalanceLayer (
+Functors.@functor ThetaKinematicWave (
     postscale_q, postscale_h, ph_over_pq,
     μ_q, σ_q, μ_h, σ_h, μ_inwater, σ_inwater,
 )
-function Flux.gpu(l::MassBalanceLayer)
-    MassBalanceLayer(
+function Flux.gpu(l::ThetaKinematicWave)
+    ThetaKinematicWave(
         Flux.gpu(l.postscale_q),
         Flux.gpu(l.postscale_h),
         Flux.gpu(l.ph_over_pq),
@@ -102,8 +135,8 @@ function Flux.gpu(l::MassBalanceLayer)
     )
 end
 
-function Flux.cpu(l::MassBalanceLayer)
-    MassBalanceLayer(
+function Flux.cpu(l::ThetaKinematicWave)
+    ThetaKinematicWave(
         Flux.cpu(l.postscale_q),
         Flux.cpu(l.postscale_h),
         Flux.cpu(l.ph_over_pq),
@@ -120,9 +153,9 @@ end
 
 """
     build_massbalance(norm_stats, postscale, src_edges, tgt_edges, dt;
-                      θ, smooth_h_floor, h_floor_softness) -> MassBalanceLayer
+                      θ, smooth_h_floor, h_floor_softness) -> ThetaKinematicWave
 
-Factory for the river-domain [`MassBalanceLayer`](@ref). Pulls the per-node
+Factory for the river-domain [`ThetaKinematicWave`](@ref). Pulls the per-node
 `river_q`/`river_h`/`river_inwater` z-score statistics out of `norm_stats`
 (scalar stats are broadcast to every node, per-node vector stats are checked
 against the node count), the inverse scalers out of `postscale`, and builds the
@@ -164,7 +197,7 @@ function build_massbalance(norm_stats, postscale,
     # Routing-only adjacency (no self-loops): A_routing[i,j]=1 means j flows into i.
     A_routing = sparse(tgt_edges, src_edges,
                        ones(Float32, length(src_edges)), n_nodes, n_nodes)
-    return MassBalanceLayer(
+    return ThetaKinematicWave(
         pq_vec,
         ph_vec,
         ph_vec ./ pq_vec,
@@ -185,7 +218,7 @@ function build_massbalance(norm_stats, postscale,
 end
 
 """
-    (l::MassBalanceLayer)(g, state, forcing, q_norm_new) -> h_norm_new
+    (l::ThetaKinematicWave)(g, state, forcing, forcing_next, q_norm_new) -> h_norm_new
 
     Compute normalised water depth at the next timestep by enforcing the
     θ-weighted (mixed implicit/explicit) kinematic-wave mass balance:
@@ -207,7 +240,7 @@ Returns normalised `h_norm_new` of shape `(1, n_nodes)`.
 Handles batched `GNNGraph`s automatically: per-node constants are tiled to
 match the total node count of the batch.
 """
-function (l::MassBalanceLayer)(g            ::GNNGraph,
+function (l::ThetaKinematicWave)(g            ::GNNGraph,
                                state        ::AbstractMatrix,
                                forcing      ::AbstractMatrix,
                                forcing_next ::AbstractMatrix,
@@ -295,7 +328,7 @@ end
 
 # Floor predicted discharge in physical space and map back to normalized q.
 # This keeps river_q physically non-negative in the propagated model state.
-function _floor_q_norm_nonnegative(l::MassBalanceLayer,
+function _floor_q_norm_nonnegative(l::ThetaKinematicWave,
                                    g::GNNGraph,
                                    q_norm::AbstractMatrix)
     n     = g.num_nodes
@@ -335,7 +368,7 @@ flow through them during BPTT rollout. The hard mass-balance output is unchanged
 Both are `(1, n_nodes)`. Batched `GNNGraph`s are handled like the layer's
 forward pass (per-node constants tiled, routing dispatched three ways).
 """
-function mb_decoder_features(l           ::MassBalanceLayer,
+function mb_decoder_features(l           ::ThetaKinematicWave,
                              g           ::GNNGraph,
                              state       ::AbstractMatrix,
                              forcing     ::AbstractMatrix)
@@ -409,7 +442,7 @@ Returns a `NamedTuple` with `Vector{Float32}` per node (physical units):
 - `h_phys_raw`   [m]:    next water depth before the ≥0 floor
 - `h_phys_new`   [m]:    next water depth after floor
 """
-function mb_diagnostics(l            ::MassBalanceLayer,
+function mb_diagnostics(l            ::ThetaKinematicWave,
                         g            ::GNNGraph,
                         state        ::AbstractMatrix,
                         forcing      ::AbstractMatrix,
@@ -463,20 +496,110 @@ function mb_diagnostics(l            ::MassBalanceLayer,
 end
 
 """
-    precompute_batched(layer::MassBalanceLayer, batch_size::Int) -> MassBalanceLayer
+    precompute_batched(layer::ThetaKinematicWave, batch_size::Int) -> ThetaKinematicWave
 
-Return a new `MassBalanceLayer` with a pre-computed block-diagonal routing matrix
+Return a new `ThetaKinematicWave` with a pre-computed block-diagonal routing matrix
 `A_routing_batched = blockdiag(A_routing, ..., A_routing)` (`batch_size` copies).
 Mirrors `precompute_batched(::SparseConv, B)`. Call **before** `Flux.gpu`.
 """
-function precompute_batched(l::MassBalanceLayer, B::Int)
+function precompute_batched(l::ThetaKinematicWave, B::Int)
     A_cpu = _to_cpu_sparse(l.A_routing)
     A_blk = SparseMatrixCSC{Float32, Int32}(blockdiag(fill(A_cpu, B)...))
-    MassBalanceLayer(
+    ThetaKinematicWave(
         l.postscale_q, l.postscale_h, l.ph_over_pq,
         l.μ_q, l.σ_q, l.μ_h, l.σ_h, l.μ_inwater, l.σ_inwater, l.dt,
         A_cpu, A_blk, B, l.θ,
         l.smooth_h_floor,
         l.h_floor_softness,
     )
+end
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Formulation interface (see `MassBalanceFormulation`)
+# ──────────────────────────────────────────────────────────────────────────────
+
+# `NoMassBalance` carries no data: it has no children, no trainable parameters,
+# and is its own CPU/GPU/batched version.
+Flux.@layer NoMassBalance
+Flux.gpu(f::NoMassBalance) = f
+Flux.cpu(f::NoMassBalance) = f
+precompute_batched(f::NoMassBalance, ::Int) = f
+
+# Old checkpoints saved before the formulation hierarchy stored
+# `mass_balance = nothing` for models without a mass balance.
+Flux.loadmodel!(::NoMassBalance, ::Nothing; kw...) = nothing
+
+has_mass_balance(::NoMassBalance)       = false
+has_mass_balance(::ThetaKinematicWave)  = true
+
+# Number of state channels the decoder predicts (q only when `river_h` is derived
+# from the mass balance; every state channel otherwise).
+decoder_outputs(::NoMassBalance, n_state::Int)      = n_state
+decoder_outputs(::ThetaKinematicWave, ::Int)        = 1
+
+# Extra decoder inputs (a tuple of `(1, n_nodes)` matrices) and their row count.
+extra_decoder_dim(::NoMassBalance)      = 0
+extra_decoder_dim(::ThetaKinematicWave) = MB_DECODER_FEATURES
+extra_decoder_features(::NoMassBalance, g, state, forcing) = ()
+extra_decoder_features(f::ThetaKinematicWave, g, state, forcing) =
+    mb_decoder_features(f, g, state, forcing)
+
+# Physical-space floor of the raw predicted discharge (normalised in/out).
+floor_state(::NoMassBalance, g, raw)          = raw
+floor_state(f::ThetaKinematicWave, g, raw)    = _floor_q_norm_nonnegative(f, g, raw)
+
+"""
+    apply_formulation(f, g, state, forcing, forcing_next, Δ) -> next_state
+
+Map the decoder output `Δ` to the next normalised state `(n_state, n_nodes)`.
+`NoMassBalance` is the plain residual update `state .+ Δ`. `ThetaKinematicWave`
+treats `Δ` as the discharge increment, floors the propagated q, and derives
+`river_h` deterministically from the mass balance.
+"""
+apply_formulation(::NoMassBalance, g, state, forcing, forcing_next, Δ) = state .+ Δ
+
+function apply_formulation(f::ThetaKinematicWave, g, state, forcing, forcing_next, Δ)
+    q_new = floor_state(f, g, state[1:1, :] .+ Δ)
+    h_new = f(g, state, forcing, forcing_next, q_new)
+    return vcat(q_new, h_new)
+end
+
+# Weight of the water-depth loss term implied by the formulation's stiffness
+# (`nothing` = leave the strategy's weight untouched).
+mb_h_loss_weight(::NoMassBalance, ::Symbol) = nothing
+
+function mb_h_loss_weight(mb::ThetaKinematicWave, h_loss_scale::Symbol)
+    finite_median(v::AbstractVector{<:Real}) = begin
+        fv = Float32[x for x in v if isfinite(x)]
+        isempty(fv) ? NaN32 : Float32(median(fv))
+    end
+    finite_max(v::AbstractVector{<:Real}) = begin
+        fv = Float32[x for x in v if isfinite(x)]
+        isempty(fv) ? NaN32 : Float32(maximum(fv))
+    end
+    # Base weight balances the q- and h-loss magnitudes; ∂h_norm/∂q_norm of
+    # the hard mass-balance decoder equals `dt·σ_q/σ_h = 1/base`, so the
+    # h-branch injects a q-gradient amplified by `1/base` at :absolute.
+    # :increment squares the weight (measures h on the `dt·σ_q` increment
+    # scale), cancelling that amplification so ∂h_norm/∂q_norm ≈ O(1).
+    base_weight_vec = mb.σ_h ./ (mb.dt .* mb.σ_q)
+    base_weight = finite_median(base_weight_vec)
+    h_weight    = h_loss_scale === :increment ? base_weight^2 : base_weight
+    @info "Mass balance h_loss_weight = $(round(h_weight; sigdigits=3)) " *
+          "[scale=$(h_loss_scale)]  " *
+          "(median σ_h=$(round(finite_median(mb.σ_h); sigdigits=3)), " *
+          "median σ_q=$(round(finite_median(mb.σ_q); sigdigits=3)), dt=$(mb.dt) s)"
+    gain_vec = mb.θ .* mb.dt .* mb.σ_q ./ mb.σ_h
+    @info "Mass balance per-node gain |∂h_norm/∂q_norm| summary: " *
+          "median=$(round(finite_median(gain_vec); sigdigits=3)) " *
+          "max=$(round(finite_max(gain_vec); sigdigits=3))"
+    if mb.θ != 1f0
+        @info "Mass balance θ = $(mb.θ) (mixed implicit/explicit; " *
+              "θ=1 fully implicit, θ=0 fully explicit). Effective stiff " *
+              "gain ∂h_norm/∂q_norm scaled by θ."
+    end
+    if mb.smooth_h_floor
+        @info "Mass balance smooth h-floor enabled (softness=$(mb.h_floor_softness) m)"
+    end
+    return h_weight
 end
