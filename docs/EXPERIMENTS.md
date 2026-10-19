@@ -7,48 +7,60 @@ Experiment configs live under `experiments/`. Newest at the top.
 # PROPOSED
 
 > **The pushforward follow-up series (E7–E10) is COMPLETE; the feature-scaling test
-> (E11), the first MB-invasive test (E12), and the schedule-depth study (E13) are DONE
-> (see COMPLETED).** No single-knob sweep is queued.
+> (E11), the first MB-invasive test (E12), the schedule-depth study (E13), the σ-HARDENING
+> re-run (E12b, TODO §1b), and the σ-hardened depth ladder (E13b) are ALL DONE (see
+> COMPLETED).** No sweep is queued; the E-series has exhausted the scaling/schedule/loss
+> levers — the next move is the `river_h` MB reformulation (item 1).
 >
-> **Working base (updated after E12):** `rollout_grad = pushforward`, `tf_weight = 0`,
+> **Working base (updated after E12b/E13b):** `rollout_grad = pushforward`, `tf_weight = 0`,
 > MSE, q≥0 floor, `mb_theta = 1`, the new distribution/physics-aware feature scaling
-> (log1p skewed statics + area-normalised inwater + `log1p(upstream_area)`), **and
-> per-node (μ_i,σ_i) normalization for `river_q`/`river_h`/`river_inwater` (E12) —
-> adopt for the `river_q`/KGE gain (now best-in-series 0.940) and the rollout-
-> boundedness gain (fixed RMSE 1e9→24). NOTE: `river_h` is STILL NOT fixed — E12 only
-> bounded the downstream explosion (into a 0↔2 rail, no skill) and left the headwater
-> dead-flat. ⚠ The E12 smooth-floor (`mb_smooth_h_floor`) was BUGGY — it hard-capped h
-> at `softness·40 = 2.0 m` (now fixed in `_nonnegative_floor`); E12's stability/boundedness
-> numbers are confounded by that cap and E12 must be re-run. Keep the smooth floor OFF
-> until a clean A/B on the fixed code credits it.**
+> (log1p skewed statics + area-normalised inwater + `log1p(upstream_area)`), per-node
+> (μ_i,σ_i) normalization for `river_q`/`river_h`/`river_inwater`, **and the σ FLOORS
+> `mb_sigma_h_floor = 2.5` / `mb_sigma_q_floor = 0.002` (≈ each channel's p5) with the
+> re-autotuned LR `lr_start ≈ 2.58e-4`, `grad_clip = 10` (E12b).** Adopt for the `river_q`/
+> KGE gain AND the now-hardened gradient landscape (phase-1 grad_norm back to ~2, overall
+> median ~22 in the E11 band). **NOTE: `river_h` is STILL NOT fixed** — with the 2.0 m
+> clamp bug removed (`_nonnegative_floor`), h now explodes freely (outlet h_max 12–72 m vs
+> truth 2.84) and the headwater stays dead-flat at 0.0; the σ-floor + smooth floor were
+> necessary-but-not-sufficient. `river_h` needs the MB REFORMULATION (item 1 below).
 >
-> **⚠ NEW BLOCKER (E13, 2026-09-19): the per-node σ scheme is UNSTABLE in the h-channel
-> and must be hardened BEFORE any further per-node-σ experiment (blocks E12 + E13
-> re-runs).** σ_h spans 0.031–68.9 (vs old global 24.582); the h-loss divides by σ_h,i,
-> so tiny-σ_h nodes get ~1/σ_h² gradient weight. E13 showed this explodes the h-channel
-> loss (val_h_1step 2.9 → 7.8e6 → 1.5e7 as the dataset window grows nhorizon 11→21→31)
-> and blows up training grad_norm from epoch 1 (4.5 → 143000). Required base fixes:
-> (a) FLOOR/winsorize σ_h per node; (b) RE-TUNE the LR on the new normalization (the
-> carried-over 1.3457e-4 was autotuned on the old global-σ landscape, horizon-1).
+> **✔ RESOLVED (E12b, 2026-09-20): the per-node σ base is HARDENED and the clamp confound
+> is CLEARED (TODO §1b DONE).** The σ_h floor (2.5 ≈ p5) tamed the tiny-σ_h gradient
+> inflation (phase-1 grad_norm 143000 → ~2), the re-autotuned LR/grad_clip suit the new
+> landscape, and the fixed `_nonnegative_floor` removed the spurious 2.0 m cap (outlet
+> 0/222 pinned, vs E12's 105/222).
 >
-> **Still OWED — the real open work (reordered after E13):**
-> 1. **Harden the per-node σ base (NEW, blocks re-runs):** σ_h floor + LR retune (above).
-> 2. **`river_h` needs the MB REFORMULATION, not more scaling knobs (E12+E13 conclusion).**
->    E12 proved per-node σ + smooth floor is *necessary-but-not-sufficient*; E13 (floor
->    OFF) re-confirmed the raw failure mode — downstream h explodes (outlet h_max 13–35 m
->    vs truth 2.8) and the headwater flatlines (`node48` std=0) at every schedule depth.
->    Root cause is `h` slaved to `q` + chronic over-drain. → implement the **B/C-hybrid
->    reformulation** (notes/mass_balance_formulations.md) so `h` is not derived-then-
->    floored from `q`.
-> 3. **The stiff fixed-horizon rollout still diverges** (E12 `frac_gt2 = 0.925`; E13
->    deep cells NaN). Same MB-reformulation family as item 2.
+> **✔ ANSWERED (E13b, 2026-09-20): the curriculum schedule is NOT a lever for the binding
+> failures.** On the hardened base, deployed free-rollout q is depth-invariant and good
+> (KGE 0.90–0.95); `river_h` is broken at every depth; training to the eval horizon only
+> tautologically bounds the fixed-horizon-30 q over-shoot (`frac_gt2` 1.0→0.70) at the cost
+> of 1-step accuracy and h. **⚠ Residual gap:** σ_h floor 2.5 decontaminated nhz ≤ 21 but
+> the deepest window (nhz 31) still shows phase-1 grad blowup (582–756) and `val_h_1step`
+> still scales with window length — see item 3.
+>
+> **Still OWED — the real open work (reordered after E13b):**
+> 1. **`river_h` needs the MB REFORMULATION, not more scaling knobs (E12+E13+E12b+E13b
+>    conclusion — now the TOP priority).** Even with the σ base hardened, the fixed smooth
+>    floor, a re-tuned LR, AND every schedule depth, `river_h` is still degenerate —
+>    downstream h explodes (outlet h_max 12–72 m vs truth 2.84) and the headwater `node48`
+>    flatlines at exactly 0.0 (std=0, all seeds; the collapse is upstream of the floor).
+>    Root cause is `h` slaved-then-floored from `q` + chronic over-drain. → implement the
+>    **B/C-hybrid reformulation** (notes/mass_balance_formulations.md) so `h` is not
+>    derived-then-floored from `q`.
+> 2. **The stiff fixed-horizon rollout still diverges for shallow/mid schedules** (E12b
+>    `frac_gt2 = 1.0`; E13b hps01/hps02 `frac_gt2 = 1.0`, `fixed_val_rmse` huge). Only the
+>    train-to-eval-horizon cell bounds it, tautologically. Same MB-reformulation family as
+>    item 1.
+> 3. **Finish the σ-hardening for the deepest window (partial after E13b):** `mb_sigma_h_floor
+>    = 2.5` fixed the training grad for nhz ≤ 21 but the deepest window (nhz 31) still blows
+>    up in phase 1 (grad 582–756) and the h-channel `val_h_1step` still scales with window
+>    length (2.7 → 6800 → 8000) at every depth. If a clean deep-window run is ever needed,
+>    raise `mb_sigma_h_floor` and/or make the h-loss renormalisation window-invariant.
 > 4. **Attribute the scaling wins:** E11 bundled `log1p(upstream_area)`; E12 bundled
 >    per-node σ **with** the smooth h-floor. An A/B (`mb_smooth_h_floor` on/off, and
 >    `include_log_upstream_area` on/off) would isolate the drivers if we care.
-> 5. **Engineering:** (a) investigate why longer dataset windows (nhorizon) amplify the
->    h-channel loss from phase 1 (per-node σ_h × validation-window composition); (b) gate
->    `peak_stats` on `loss_type == :huber || peak_lambda > 0` (drops the E10
->    `peak_delta = 1000` workaround) if peak-weighting is ever revisited.
+> 5. **Engineering:** gate `peak_stats` on `loss_type == :huber || peak_lambda > 0` (drops
+>    the E10 `peak_delta = 1000` workaround) if peak-weighting is ever revisited.
 
 ---
 
@@ -220,6 +232,55 @@ Experiment configs live under `experiments/`. Newest at the top.
 > falling RMSE/NSE at small-truth nodes can be a degenerate constant — always check
 > std(pred)/std(truth) per node and look at the plots.)
 >
+> **E13b — σ-hardened DEPTH ladder (the clean re-run of E13): the decontaminated depth
+> answer is "deepening does NOT help the deployed rollout or `river_h`; it only tautologically
+> tames the FIXED-horizon-30 over-shoot by training on it" — and it PARTIALLY CORRECTS E13's
+> "deeper is worse for stability" claim.** Same design as E13 (6×50 = 300 per cell, only the
+> deepest horizon varies 10/20/30), 2 seeds, but on the σ-hardened base (σ floors 2.5/0.002,
+> LR 2.58e-4 / `grad_clip` 10 reused from E12b — E13b's own autotune failed). **(1) deployed
+> free-rollout q is good and roughly depth-INVARIANT** (pooled KGE 0.90 / 0.95 / 0.93; outlet
+> q RMSE 7–14, peak ratio 0.74–0.94) — schedule stays orthogonal to the q operator, RE-CONFIRMS
+> E8/E10/E13. **(2) NEW, and a partial correction to E13:** the deepest cell (max30, trained
+> AT the eval horizon) is the ONLY one that bounds the FIXED-horizon 30-step over-shoot —
+> `frac_gt2` 1.0 / 1.0 / **0.70** (tight, both seeds), `fixed_val_rmse` 1.6e5 / 5.7e12 / **7.4**.
+> E13 called deep cells "worse / NaN"; that was largely the σ-contamination — on the hardened
+> base the deep cell is bounded. BUT this is tautological (training on 30-step optimises the
+> 30-step endpoint), it does NOT transfer to the deployed free rollout, and it costs the 1-step
+> loss (train_loss 0.03 → 0.5–1.4) and `river_h` (NSE −5.28 → −6.70). **(3) `river_h` is STILL
+> broken at every depth** — headwater `node48` exact dead-flat 0.0 (all cells), outlet h explodes
+> 15–72 m (truth 2.84) at every depth. Deepening is NOT the `river_h` lever. **(4) ⚠ σ-floor 2.5
+> is INCOMPLETE for the deepest window:** it decontaminated the training `grad_norm` for nhz ≤ 21
+> (phase-1 grad 1.6–2.2, vs E13's 143000) but the deepest window (nhz 31) STILL blows up in
+> phase-1 (grad 582–756), and the validation h-channel metric `val_h_1step` still scales with
+> the window (2.7 → 6800 → 8000 for nhz 11/21/31) at every depth — so the deep-cell numbers carry
+> a residual-contamination asterisk, and a higher σ_h floor (or an h-loss renormalisation that is
+> window-invariant) is still owed. **Net: the schedule is not a lever for the binding failures
+> (`river_h`, deployed-rollout q); train-to-eval-horizon only buys a bounded fixed-horizon-30 q
+> at the cost of 1-step/h; the σ base needs a bit more hardening for the deepest window.**
+>
+> **E12b — the σ-HARDENING (TODO §1b) is VALIDATED: it kills the gradient landmine and
+> preserves `river_q`, the clamp-fix is confirmed, but `river_h` is STILL broken (as
+> predicted — σ-floor is necessary-not-sufficient).** Re-run of E12 on the σ-hardened base
+> (per-node σ + `mb_sigma_h_floor = 2.5`, `mb_sigma_q_floor = 0.002` ≈ each channel's p5,
+> smooth floor ON with the FIXED softplus, LR re-autotuned → `lr_start = 2.58e-4` (~2×),
+> `grad_clip = 10`), 5 seeds. **(1) The σ-floor fixed the gradient inflation** — phase-1
+> (horizon-1) `grad_norm` median is now **1.6–2.2** across all seeds (E13's contaminated
+> deep cell was 143000) and the overall median grad is **~22–23**, back in the E11 healthy
+> band (was E12 85–240). §1b's stated goal is met. **(2) The 2.0 m clamp fix is confirmed**
+> — the outlet `river_h` is **0/222 pinned at 2.0** in every seed (E12 had 105/222 at
+> exactly 2.0); h is now free and promptly explodes to **12–25 m** (truth 2.84), which
+> *retroactively proves* E12's "boundedness" was purely the cap. **(3) `river_q` survives
+> the un-clamping** — 4/5 seeds pooled KGE **0.83–0.89** (s01 is the seed-chaos outlier at
+> 0.27, dragging the mean to 0.745 ± 0.268), per-gauge q NSE 0.65–0.97, q std ratios ≈1.0,
+> outlet q peak 100 vs truth 122. **(4) `river_h` is STILL degenerate at both ends** —
+> headwater `node48` is an **exact dead-flat 0.0** (std=0, all seeds) EVEN WITH the fixed
+> smooth floor, and downstream over-disperses/explodes (outlet std ratio 3.8–5.2, h_max
+> 12–25 m; `frac_gt2 = 1.0`; `river_h_nse` −5.27 ± 0.14; `fixed_val_rmse` now huge/NaN
+> since nothing caps h). **Net: §1b is COMPLETE and UNBLOCKS the queue — the σ base is now
+> stable and the clamp confound is gone — but `river_h` needs the MB REFORMULATION (h not
+> slaved-then-floored from q; B/C-hybrid), exactly as the E12/E13 conclusion stated. Adopt
+> the σ floors as the new base; do NOT expect any h skill until the reformulation.**
+>
 > **E13 — budget-controlled schedule-DEPTH study: deepening does NOT help (the q side
 > is flat, the h side gets WORSE), but the deep cells are CONTAMINATED by a per-node-σ_h
 > h-channel explosion, so the clean depth answer needs a hardened base.** Fixing E8's
@@ -292,6 +353,89 @@ Experiment configs live under `experiments/`. Newest at the top.
 > per-node σ for the q + boundedness win; leave the smooth floor OFF until an A/B credits
 > it; `river_h` is unresolved and now needs the MB REFORMULATION (h not slaved to q; B/C-
 > hybrid, notes/mass_balance_formulations.md), not more scaling/floor knobs.**
+
+## E13b — σ-hardened DEPTH ladder (clean re-run of E13, TODO §1b base), 3 cells × 2 seeds — `sava_small_v081_e13b_depth_floored`
+
+**NAME:** the E13 depth ladder re-run on the σ-HARDENED base so the schedule can be read
+without the per-node-σ_h contamination that spoiled E13. Same design (3 whole-table cells ×
+2 seeds = 6 runs; every cell 6 phases × 50 ep = **300 total**; only the deepest horizon
+varies 10/20/30; `eval_horizon = 30`). Base deltas vs E13: **σ floors** `mb_sigma_h_floor
+= 2.5`, `mb_sigma_q_floor = 0.002`; **LR `lr_start = 2.58e-4`, `grad_clip = 10`** (reused
+from E12b — **E13b's own autotune FAILED**, so the E12b-tuned values were used instead; both
+sit on the same σ-hardened base so this is a sound substitution). Smooth floor OFF (as E13).
+
+**SUMMARY (per-cell, 2-seed; free-rollout = deployed daterange, fixed = 30-step anchors):**
+
+| cell | max_h | nhz | pooled KGE | outlet q_rmse (free) | q peak (free) | `frac_gt2` (fixed) | `fixed_val_rmse` | `river_h_nse` | `final_amp` | train_loss |
+|---|---|---|---|---|---|---|---|---|---|---|
+| hps01 | 10 | 11 | 0.897 ± 0.014 | 11.3–13.8 | 0.82–0.94 | 1.0 | 1.6e5 | −5.28 | 12.6 | 0.031 |
+| hps02 | 20 | 21 | 0.951 ± 0.006 | 7.1–8.0 | 0.85–0.94 | 1.0 | 5.7e12 | −5.28 | 14.3 | 0.030 |
+| hps03 | 30 | 31 | 0.931 ± 0.018 | 8.8–10.1 | 0.74–0.89 | **0.70 ± 0.02** | **7.4** | −6.70 | 14.9 | 0.5–1.4 |
+
+**Phase-1 (horizon-1, depth knob INACTIVE) contamination check** — the E13 process lesson:
+
+| cell | nhz | phase-1 `grad_norm` median | phase-1 `val_h_1step` median |
+|---|---|---|---|
+| hps01 | 11 | 1.9–2.2 ✓ | 2.7 ✓ |
+| hps02 | 21 | 1.6–1.8 ✓ | 6800 ✗ |
+| hps03 | 31 | 582–756 ✗ | 8000 ✗ |
+
+**FINDINGS:**
+1. **Deployed free-rollout q is good and roughly depth-INVARIANT** (KGE 0.90/0.95/0.93,
+   outlet q RMSE 7–14, peak ratio 0.74–0.94). Schedule stays orthogonal to the q operator —
+   RE-CONFIRMS E8/E10/E13. Mid-depth (max20) has the best q RMSE but within seed noise.
+2. **NEW — partial CORRECTION of E13's "deeper is worse for stability".** The deepest cell
+   (max30, trained AT the eval horizon) is the ONLY one that bounds the FIXED-horizon 30-step
+   over-shoot: `frac_gt2` 1.0 → 1.0 → **0.70** (tight std 0.02, both seeds), `fixed_val_rmse`
+   1.6e5 / 5.7e12 → **7.4** (finite). E13 saw the deep cell go NaN — that was the σ_h
+   contamination, not a genuine depth effect. **BUT** the gain is tautological (training on the
+   30-step rollout optimises the 30-step endpoint), does NOT transfer to the deployed free
+   rollout (q already good everywhere), and costs the 1-step loss (train_loss 0.03 → 0.5–1.4,
+   val_loss → 4.6) and `river_h` (NSE −5.28 → −6.70). So it is not a useful lever.
+3. **`river_h` is STILL broken at every depth** — headwater `node48` exact dead-flat 0.0 (all
+   cells), outlet h explodes 15–72 m (truth 2.84). Deepening is NOT the `river_h` lever.
+   RE-CONFIRMS. (`river_h` needs the MB reformulation, not scheduling.)
+4. **⚠ σ-floor 2.5 is INCOMPLETE for the deepest window.** It decontaminated the TRAINING
+   `grad_norm` for nhz ≤ 21 (phase-1 grad 1.6–2.2, vs E13's 143000) — a big win — but the
+   deepest window (nhz 31) STILL blows up in phase 1 (grad 582–756, max ~2e5–4e5), and the
+   VALIDATION h-channel metric `val_h_1step` still scales with the window length (2.7 → 6800 →
+   8000 for nhz 11/21/31) at every depth, even where the training grad is fine. So the deep
+   cell trained partly-unstably (its numbers carry a residual-contamination asterisk), and the
+   window-invariance of the h-channel metric is not fully restored. **Owed:** a higher σ_h floor
+   (or a window-invariant h-loss renormalisation) if the deepest cell is ever needed clean.
+5. **⚠ ROOT CAUSE of "deeper looks unstable even in phase 1" — the train/val/test SPLIT is
+   window-length-dependent, NOT a phase-1 depth effect.** `nhorizon = max(steps)+1`, and
+   `make_horizon_dataset` (src/preprocess.jl) splits the **sliding-WINDOW list** by fixed
+   FRACTION (0.7/0.2/0.1), temporally, no shuffle. That partition is computed once from the
+   deepest horizon and is FIXED for the whole run, so phase 1 already trains/validates on the
+   deep schedule's split. Because the window list is shorter for longer windows, the 70% mark
+   maps to an EARLIER calendar boundary (train-end step 6640 → 6633 → 6626 for nhz 11/21/31).
+   A hard high-h flood regime sits right at that ~70% boundary, so deepening the schedule slides
+   it from the training side to the validation side:
+   - **nhz 11:** flood regime in TRAIN → model fits it → train_h low (2.5) AND val_h low (2.7).
+   - **nhz 21:** boundary slid the regime into VAL → held-out, unfittable → **val_h explodes
+     (6800) while TRAINING stays perfectly healthy (train_h 2.5, grad 1.8)**. This is a
+     VALIDATION-METRIC ARTIFACT, not unstable optimisation. (val_h ≈ 4560 already at epoch 1 on
+     the near-untrained model ⇒ target-magnitude-driven, i.e. data, not divergence.)
+   - **nhz 31:** the regime straddles the boundary → deep in val (7600) AND the training tail now
+     sits on the hard transition, destabilising the 1-step optimisation itself (train_h/grad
+     spike, spiky epoch-to-epoch: ep1 2910, ep2 247, ep8 24, ep10 4480 — reproducible both seeds).
+   The h-channel is uniquely susceptible because ÷σ_h-normalised targets have enormous dynamic
+   range, so a flood transition that is mild in q-units is a huge excursion the instant it lands
+   in an unfit split. **So "deeper = more unstable early" is really "deeper = a different, more
+   adversarial train/val partition", amplified by σ_h scaling — the curriculum depth does nothing
+   during phase 1.** q is untouched at every depth (train q ≈ 0.021, val q ≈ 0.018), confirming
+   this is h-channel-only. **Owed (fix):** pin the split by CALENDAR DATE (independent of
+   nhorizon) rather than by window-list fraction, so all schedule depths train/validate on the
+   same regime; the current fixed-fraction split is a knife-edge at the flood boundary.
+
+**RECOMMENDATIONS:** the curriculum schedule is NOT a lever for the binding failures
+(`river_h`, deployed-rollout q over-shoot). Train-to-eval-horizon only buys a bounded
+fixed-horizon-30 q at the cost of 1-step accuracy and h — do not adopt it as a fix. Keep the
+E12b working base (σ floors + retuned LR). If a *fully* clean deep-window read is ever needed,
+raise `mb_sigma_h_floor` and/or make the h-channel loss window-invariant first. The top
+priority is unchanged: the MB REFORMULATION for `river_h` (B/C-hybrid,
+notes/mass_balance_formulations.md).
 
 ## E13 — budget-controlled curriculum-DEPTH ladder (supersedes E8), 3 cells × 2 seeds — `sava_small_v081_e13_schedule_depth`
 
@@ -367,6 +511,66 @@ orthogonal q). Before any clean depth re-run, HARDEN the per-node-σ base: (a) f
 σ_h per node; (b) re-tune the LR on the new normalization. The binding `river_h` failure needs
 the MB reformulation (B/C-hybrid), not scheduling. If a deep schedule is ever combined with
 supervision, pair it with `pushforward_tf_weight > 0` (E13×E9 cross) — not swept here.
+
+## E12b — σ-hardened re-run of E12 (TODO §1b: per-node σ floors + LR retune), 5-seed — `sava_small_v081_e12b_pernode_floored`
+
+**NAME:** re-run of E12 on the σ-HARDENED base, single fixed config × **5 seeds**
+(`[hparsearch].repetitions = 5`, empty search space). Base = E12 config with three §1b
+deltas: (1) **per-node σ floors** `mb_sigma_h_floor = 2.5`, `mb_sigma_q_floor = 0.002`
+(≈ each channel's train-split p5; `mb_sigma_inwater_floor = 0` — forcing input, no loss
+path); (2) **`mb_smooth_h_floor = true`** now with the FIXED `_nonnegative_floor`
+(numerically-stable softplus, no 2.0 m positive cap); (3) **LR re-autotuned** on this
+normalization → `lr_start = 2.58e-4` (~2× the stale 1.3457e-4), `lr_final = 2.58e-6`,
+`grad_clip = 10.0` (up from 1.0; healthy grad norm is larger on the hardened base). All
+else held from E12 (`[1,2,5,8,10]×50 = 250` ep, 8×64/mlp2, pushforward, tf=0, MSE,
+mb_theta=1, q≥0 floor).
+
+**SUMMARY (5-seed mean ± std):**
+
+| metric | E12b | E12 (clamp-confounded) |
+|---|---|---|
+| pooled KGE | 0.745 ± 0.268 (4/5 seeds 0.83–0.89; s01 outlier 0.27) | 0.940 ± 0.029 |
+| `final_amp` | 11.29 ± 1.01 | 9.38 ± 1.01 |
+| `river_h_nse` | −5.27 ± 0.14 | −4.34 |
+| `peak_ratio_frac_gt2` | 1.0 | 0.925 |
+| `fixed_val_rmse` | huge/NaN (6e8 … 6e14) | 24.6 (the CAP artifact) |
+| phase-1 `grad_norm` median | **1.6–2.2** | (E13 deep cell 143000) |
+| overall `grad_norm` median | **~22–23** (E11 band) | E12 85–240 |
+
+**PER-GAUGE free-rollout (representative seed s04; consistent across all 5):**
+
+| gauge | h std ratio | h_pred_max (truth) | pinned @2.0 | q std ratio | q NSE |
+|---|---|---|---|---|---|
+| node1 (outlet) | 4.33 | 22.3 (2.84) | **0/222** | 1.07 | 0.69 |
+| node74 | 2.67 | 4.06 (0.96) | 0/222 | 0.99 | — |
+| node152 | 0.36 | 1.88 (3.64) | 0/222 | 1.02 | — |
+| node183 | 2.90 | 3.41 (0.57) | 0/222 | 1.03 | 0.97 |
+| node48 (headwater) | **0.00** | **0.0** (0.98) | 0/222 | 0.80 | 0.65 |
+
+**FINDINGS:**
+1. **§1b σ-floor fixed the gradient inflation (the stated goal).** Phase-1 (horizon-1,
+   where E13 first showed the blowup) `grad_norm` median is **1.6–2.2** for every seed vs
+   E13's contaminated deep cell 143000; overall median grad **~22–23**, back in the E11
+   healthy band (E12 was 85–240). The tiny-σ_h landmine is gone. This UNBLOCKS the queue.
+2. **The 2.0 m clamp fix is confirmed and retroactively convicts E12.** The outlet
+   `river_h` is **0/222 pinned at 2.0** in all 5 seeds (E12: 105/222 at exactly 2.0); with
+   the cap gone h explodes to 12–25 m (truth 2.84). So E12's "boundedness / finite
+   fixed_val_rmse 24.6" WAS the cap, not skill — as the correction predicted.
+3. **`river_q` survives un-clamping.** 4/5 seeds pooled KGE 0.83–0.89 (s01 = 0.27 is the
+   documented seed chaos, an upstream divergence — its outlet q is still fine), per-gauge q
+   NSE 0.65–0.97, q std ratios ≈1.0. No structural q regression from removing the clamp.
+4. **`river_h` is STILL degenerate at both ends — σ-floor is necessary-not-sufficient.**
+   Headwater `node48` is an **exact dead-flat 0.0** (std=0, every seed) EVEN WITH the fixed
+   smooth floor (the collapse is upstream of the floor — the decoder drives pre-floor h
+   strongly negative); downstream over-disperses and explodes (outlet std ratio 3.8–5.2).
+   `frac_gt2 = 1.0`, `river_h_nse` −5.27. The σ floors + smooth floor did NOT give h skill.
+
+**RECOMMENDATIONS:** ADOPT the σ floors (`mb_sigma_h_floor = 2.5`, `mb_sigma_q_floor =
+0.002`) + the re-autotuned LR (`lr_start ≈ 2.58e-4`, `grad_clip = 10`) as the new working
+base — §1b is DONE and the gradient landmine + clamp confound are both cleared. `river_h`
+remains the top open binding failure and needs the **MB REFORMULATION** (h not
+slaved-then-floored from q; B/C-hybrid, notes/mass_balance_formulations.md), NOT more
+scaling/floor knobs. E13b (σ-hardened depth ladder) can now read the schedule cleanly.
 
 ## E12 — MB-invasive per-node σ + smooth h-floor (TODO §1a), 5-seed — `sava_small_v081_e12_mb_pernode`
 

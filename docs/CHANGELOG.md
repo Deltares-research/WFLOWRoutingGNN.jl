@@ -81,3 +81,32 @@ This document serves as a concrete changelog of the code, summarizing briefly th
 	fixed-horizon CSV output and run `metrics.toml` summary.
 - Updated training tests for the new fixed-horizon guard histories; canonical
 	suite passes (`test/runtests.jl`: 390/390).
+
+## Pre-2026-09-04 (baseline snapshot)
+
+*This entry back-fills the foundational state that existed before the
+commit-by-commit log above began. It is a summary of already-shipped work, not a
+single commit; the full reasoning lives in [DECISIONS.md](DECISIONS.md) and the
+research notes under `docs/notes/`.*
+
+- Encode–process–decode GNN with a physics decoder; neighbour aggregation via
+	`SparseConv` cuSPARSE SpMM, with a precomputed block-diagonal adjacency
+	(`precompute_batched`) for batched training (built on CPU before `Flux.gpu`).
+- Hard mass-balance layer (`MassBalanceLayer` in [src/gnn.jl](../src/gnn.jl)):
+	decoder emits only `Δq` (`out_dim = 1`), `river_h` derived analytically from
+	the fully-implicit kinematic-wave balance each step (verified vs real Wflow,
+	median |residual| ≈ 0). Configurable `mb_theta` (default `1.0` = fully
+	implicit). Positivity floors applied in physical units inside the layer.
+- Gradient weighting `h_loss_weight = σ_h/(dt·σ_q)` to equalise `q`/`h`
+	magnitudes (runtime-derived, not persisted).
+- Custom `_topology_mul` adjoint returning `NoTangent()` for the adjacency — the
+	out-of-memory fix that avoids a dense `∂A` (~17 GB at batched `(B·N)²`) — plus
+	`Functors.@functor` field restriction and explicit `Flux.gpu`/`Flux.cpu`
+	overloads for the sparse topology matrices.
+- Rollout-length curriculum (`steps = [1,2,5,8,10]`) with an SGDR-style
+	warm-restart LR schedule (`lr_warmup_epochs`, `lr_peak_decay`) and BPTT via
+	`Zygote.checkpointed`; gradient clipping + adaptive backoff on
+	non-finite/unstable epochs.
+- Ensemble (batched) rollout path for GPU throughput (~2.5× per-member gain).
+- Autotune path (`scripts/autotune_train.jl`): horizon-1 LR range test +
+	batch-size estimator.

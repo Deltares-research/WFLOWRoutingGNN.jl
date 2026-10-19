@@ -7,6 +7,158 @@ behind a toggle so it can be A/B-tested against current behaviour.
 
 ---
 
+# Code restructuring — 4-stage pipeline + mass-balance separation
+
+See [DECISIONS.md](DECISIONS.md) → PROPOSED 19-10-2026 and the full design in
+[notes/pipeline_and_massbalance_redesign.md](notes/pipeline_and_massbalance_redesign.md).
+Split the monolithic `run_wflow_gnn` into four independently-runnable stages that
+exchange on-disk artifacts, separate MB code from the generic GNN, and prefer
+multiple dispatch over `if/else`. Do the steps **in order** (each is individually
+testable and reversible); after each, tests must stay green and a small golden run
+(`test_sava_small_v081`) must reproduce the current artifact set.
+
+## R1. Extract shared/MB code into their own files (pure code move)
+
+- [ ] New `src/sparse_ops.jl`: move `_topology_mul` + its `ChainRulesCore.rrule`
+      verbatim (included first so both `massbalance.jl` and `gnn.jl` can use it).
+      **Do not alter** — this is the top autodiff-memory optimisation.
+- [ ] New `src/massbalance.jl`: move `MassBalanceLayer` + its `@layer`/`@functor`/
+      `gpu`/`cpu` overloads, the forward operator, `mb_decoder_features`,
+      `mb_diagnostics`, `_floor_q_norm_nonnegative`, `_nonnegative_floor`, and
+      `precompute_batched(::MassBalanceLayer, …)` out of `src/gnn.jl`.
+- [ ] Move the inlined MB-construction block from `build_gnn_model`
+      ([src/run.jl](../src/run.jl)) into an MB factory `build_massbalance(...)` in
+      `src/massbalance.jl`.
+- [ ] Update `include`/`export` order in
+      [src/WflowRoutingGNN.jl](../src/WflowRoutingGNN.jl); `gnn.jl` keeps only the
+      generic `SparseConv`/`WflowGNN`/encoder-processor-decoder plumbing.
+- Touch: `src/sparse_ops.jl` (new), `src/massbalance.jl` (new), `src/gnn.jl`,
+      `src/run.jl`, `src/WflowRoutingGNN.jl`. No behaviour change; tests green.
+
+## R2. Mass-balance formulations as a dispatch hierarchy
+
+- [ ] Add `abstract type MassBalanceFormulation`; `struct NoMassBalance` (null
+      object replacing the `nothing` sentinel) and `struct ThetaKinematicWave`
+      wrapping the current `MassBalanceLayer` fields.
+- [ ] Replace the branch points with dispatch methods: `decoder_outputs(f, ms)`,
+      `apply_formulation(f, g, state, forcing, forcing_next, Δ)`,
+      `extra_decoder_features(f, g, state, forcing)` (returns `()` for
+      `NoMassBalance`), `floor_state(f, g, raw)` (identity for `NoMassBalance`).
+- [ ] Make `WflowGNN.mass_balance :: MassBalanceFormulation` (never `nothing`);
+      collapse the forward pass to encode → process → `decoder(vcat(h,
+      extra_decoder_features(...)...))` → `apply_formulation(...)`.
+- [ ] Keep the `θ == 1` fast path as a cheap inner scalar branch (do **not**
+      over-dispatch a scalar); keep it bit-identical.
+- [ ] Remove every `isnothing(mass_balance)` branch across `gnn.jl`, `run.jl`,
+      `rollout.jl`, `training.jl`.
+- [ ] Map `ModelSettings` → formulation via a `mb_formulation` key in
+      `settings_from_config` (keep `enforce_mass_balance` working for back-compat).
+- Touch: `src/massbalance.jl`, `src/gnn.jl`, `src/run.jl`, `src/rollout.jl`,
+      `src/training.jl`. Assert **bit-identical** outputs vs pre-refactor on a
+      fixed seed.
+
+## R3. Split preprocessing into its own stage + artifact
+
+- [ ] `preprocess_run(ds, ms)`: `build_wflow_graph` + `make_horizon_dataset` +
+      peak-node stats + normalized-tail diagnostics.
+- [ ] Serialize a versioned `PrepBundle` to a new `prep/` dir
+      (`preprocessed.jld2` + the existing dataset/`grid.jld2`): `norm_stats`,
+      `postscale`, `static_arr`, `dt`, graph topology (edge index, `A_routing`),
+      schema id, **and the node↔cell mapping** (`grid`) — the inverse-gather key
+      stage 4 uses. Tag with a `prep_schema` version alongside `wflow_schema`.
+- [ ] Factor `train_run(prep, ms, ts)` out of `run_wflow_gnn` so it reads only
+      `prep/` (never the raw wflow outputs) and writes the current `model/` set.
+- Touch: `src/pipeline.jl` (new) or `src/run.jl`, `src/preprocess.jl`.
+
+## R4. Split inference from analysis
+
+- [ ] `infer_run(model, prep, split, val_daterange)`: rollout (`evaluate_trajectory`)
+      + `regrid` + write NetCDF **only**. Output `<split>_pred.nc`/`<split>_true.nc`
+      as gridded `(lon,lat,time)` NetCDF matching wflow's `output.nc` layout as
+      closely as possible (grid, variable names, time axis). No metrics, no node
+      dump.
+- [ ] `analyze_run(output, prep, model-settings)`: everything currently in
+      `evaluate_and_write` **after** the rollout — spatial metrics + summary,
+      downstream timeseries (+ inset), overprediction-vs-ramp,
+      `river_q_performance_metrics`, validation movie, MB diagnostics, volume
+      budget, `metrics.toml`. Recover node arrays by gathering river cells from the
+      NetCDFs via the prep-owned node↔cell mapping (handle inactive/NaN-fill cells;
+      reproduce `ldd_to_graph` column-major node order exactly).
+- [ ] Compose `run_wflow_gnn = analyze_run ∘ infer_run ∘ train_run ∘ preprocess_run`;
+      verify artifact-set equality against a golden pre-refactor run.
+- [ ] Point `hpar_search` + checkpoint-full-eval at `infer_run`+`analyze_run`
+      instead of the fused `evaluate_and_write`.
+- Touch: `src/pipeline.jl`/`src/run.jl`, `src/postprocess.jl`, `src/hparsearch.jl`.
+
+## R5. Layer-free, post-hoc mass-balance residual diagnostic
+
+- [ ] Add `mb_residual_diagnostics` that recomputes the kinematic-wave residual
+      `r(t) = h[t+1] − h[t] − dt/(w·l)·(ΣQ_up + Q_iw − Q_out)` **from predicted
+      q/h fields** (NetCDF) + `staticmaps` constants + `ldd_to_graph` routing —
+      works for **any** model regardless of whether an MB layer was present.
+- [ ] Dispatch the existing layer-internal diagnostics (`rollout_mb_diagnostics`:
+      net_flux, h_raw-before-floor, floor fraction, stiffness) on the formulation
+      type: real method for MB formulations, no-op for `NoMassBalance`.
+- [ ] Stage 4 always runs the residual diagnostic; runs the layer-internal one
+      only for MB models. `metrics.toml` MB fields degrade gracefully (residual
+      for all; floor/stiffness only for MB).
+- Touch: `src/massbalance.jl` (or `src/analysis.jl`), `src/postprocess.jl`,
+      `src/run.jl`.
+
+## R6. Consolidate `scripts/` into `src/` + thin CLIs
+
+- [ ] Promote post-hoc helpers `resolve_staticmaps` + `load_regrid_nc` (inline in
+      [scripts/spatial_eval.jl](../scripts/spatial_eval.jl)) into the analysis
+      layer; stage 4, `spatial_eval`, and `subcatch_error_attribution` share one
+      implementation.
+- [ ] Promote the layer-free MB routing/residual core from
+      [scripts/check_mass_balance.jl](../scripts/check_mass_balance.jl)
+      (`compute_upstream_q`, 3-scheme comparison) and
+      [scripts/check_mass_balance_details.jl](../scripts/check_mass_balance_details.jl)
+      (`upstream_sum`, 9 consistency checks) into `src/` — this is the prototype
+      for R5's `mb_residual_diagnostics`; have both scripts call the promoted core.
+- [ ] Promote the LR/batch tuning toolkit (`lr_range_test`, `gradient_growth_probe`,
+      `recommend_lr`, `aggregate_lr_recommendations`, `estimate_batch_size`,
+      `autotune`) from [scripts/lr_range_test.jl](../scripts/lr_range_test.jl) +
+      [scripts/autotune_train.jl](../scripts/autotune_train.jl) into a new
+      `src/tune.jl` public API; scripts become thin CLIs.
+- [ ] Retarget thin drivers to the new stage API: `train.jl`→`train_run`,
+      `hparsearch.jl`, `spatial_eval.jl`+`regen_mb_diagnostics.jl`→"stage 4 only"
+      (`scripts/pipeline.jl analyze`).
+- [ ] Update the benchmark/profiler harnesses (`benchmark_message_passing`,
+      `benchmark_rollout`, `benchmark_inference_vs_train`, `diag_overhead`,
+      `profile_rollout`, `typecheck_forward`) to the new module/stage API so they
+      keep compiling — they are the §4/§5–7 perf acceptance gate.
+- [ ] Migrate `smoke_test_sparse.jl` into `test/test_gnn.jl` (exercises the sparse
+      batching paths the perf optimisations depend on); factor `plot_ldd.jl`'s
+      network drawing into `src/plot.jl` (reused by the timeseries network inset);
+      archive remaining one-offs under `scripts/oneoff/`.
+- Touch: `src/analysis.jl`/`src/postprocess.jl`, `src/massbalance.jl`,
+      `src/tune.jl` (new), `src/plot.jl`, `scripts/*`, `test/test_gnn.jl`.
+
+## R7. Staged CLI entry point
+
+- [ ] `scripts/pipeline.jl <stage> <config.toml>` with
+      `stage ∈ {prep, train, infer, analyze, all}`, dispatched via a `Stage` type
+      hierarchy (`run_stage(::Preprocess, cfg)` … one method per stage; `all` folds
+      over the four) — not an `if stage == …` ladder.
+- [ ] Decide `run_dir` layout: prefer **additively** introducing `prep/` over
+      renaming existing dirs, to avoid breaking evaluation/performance-agent and
+      plotting-script consumers; audit consumers first.
+- Touch: `scripts/pipeline.jl` (new), `src/pipeline.jl`.
+
+## R — performance acceptance gate (run around the whole restructuring)
+
+- [ ] Run `scripts/benchmark_message_passing.jl` + `scripts/benchmark_rollout.jl`
+      **before and after** and confirm no regression. Preserve byte-for-byte: the
+      `_topology_mul` rrule, `SparseConv` three-path dispatch + `precompute_batched`
+      (both `SparseConv` and MB), CuSPARSE CSR (`Int32` colptr) conversions,
+      zero-copy per-node `reshape` when `n_rep == 1`, explicit `gpu`/`cpu`
+      overloads with Functors restricted to trainable fields, and CPU-build of the
+      block-diagonal before `Flux.gpu`.
+
+---
+
 # Enforce non-negative predicted discharge (physics floor)
 
 From E3: the free-rollout produced **unphysical negative discharge** (daterange
@@ -35,170 +187,6 @@ River discharge cannot be negative.
   (`fixed_horizon_metrics`), a test asserting `q ≥ 0`.
 
 ---
-
-## 1. Distribution- & physics-aware feature scaling
-
-**Scope note (2026-09-15, from E4/E5 downstream pattern).** Poorer downstream
-skill has two causes: (a) **physical flux accumulation** — the MB layer routes in
-physical m³/s ([src/gnn.jl](../src/gnn.jl#L281)), so the outlet's `net_flux` is a
-small residual on a huge accumulated through-flow, and the per-step amplification
-(`amp≈12`, `mb_gain≈22`) is δ- and loss-invariant (E5). (b) **heavy-tailed statics**
-under plain z-score make the outlet a feature-space outlier. These items fix **(b)
-only** (better-conditioned downstream nodes → tighter bounded/1-step fit + NSE p10
-tail); they do **NOT** touch (a) — q/h stay linear-z-score so `amp` is unchanged
-and the **outlet rollout explosion is out of scope here** (that's E6 / q≥0 floor).
-Rescaling q/h to attack `amp` (per-node σ, or θ*=σ_h/(dt·σ_q), see
-[notes/mass_balance_stability_notes.md](notes/mass_balance_stability_notes.md) §4)
-is a separate, MB-invasive item — not below.
-
-- [x] Keep physics channels (`q`, `h`, `inwater`) on **linear z-score** (nonlinear
-      transforms would need inverting inside the MB layer).
-- [x] Area-normalise `river_inwater` like `river_q` (fold into `σ/μ_inwater`).
-- [x] `log1p`+z-score the skewed statics (`river_slope`, `width`, `depth`,
-      `length`); plain z-score for `river_manning_n`.
-- [x] Optional `log(upstream_area)` static feature.
-- [x] Fit all stats on the **training split only**.
-- [x] Add a normalized-tail diagnostic dump.
-- Touch: `src/preprocess.jl` (`VAR_SCALERS`), `src/gnn.jl`, `src/schema.jl`.
-
-## 1a. MB-invasive rescaling — Option A (per-node σ + smooth h-floor)
-
-**Why (E11 + floor-diagnostics, 2026-09-18).** E11's non-invasive scaling fixed
-`river_q` (best-in-series KGE 0.919) but left `river_h` **degenerate**: collapsed
-to a near-constant upstream (`std(pred_h) = 0.000` at headwater `node48`, all 5
-seeds) and over-dispersed downstream. Reading the persisted `mb_diagnostics.csv`
-across all 5 seeds shows the proximate mechanism: the **`max(0,·)` depth floor
-fires on ~62 % of nodes every step** (`frac_h_raw_neg` mean 0.61–0.63, max ~0.78),
-and the **median node's post-floor depth is exactly 0 in ~90–96 % of timesteps**
-(`pred_h_med = 0`). Two coupled root causes, each needing a *different* invasive
-fix:
-  - **(i) Representation.** A single global `σ_h = 24.582` under-resolves
-    headwater depth (0.2 m maps to a normalized span ~0.008 — below resolution),
-    so the decoder treats upstream h as noise. → **per-node `σ_h`/`μ_h`** (and
-    `σ_q`/`μ_q`).
-  - **(ii) Gradient dead-zone.** The hard `max(0,·)` has **zero gradient on the
-    clamped branch**, so ~62 % of the h-channel provides **no learning signal** to
-    stop the chronic physical over-drain (`net_flux_med ≈ −0.13`, median node loses
-    water every step). → **smooth (softplus-style) floor**.
-
-> **Scope / honesty (from the same analysis).** The floor lives in **physical**
-> space (`net_flux = A^⊤q_phys + I − q_phys`), so **per-node σ does NOT change how
-> often the floor fires** — it fixes representation (i), not the physical
-> over-drain. The smooth floor fixes the dead-zone (ii). Neither removes the
-> deeper "h is slaved to q via the balance" root — that is the **B/C-hybrid
-> reformulation** ([notes/mass_balance_formulations.md](notes/mass_balance_formulations.md)).
-> Option A is the **cheap, immediate** invasive step; expect it to be *necessary
-> but not sufficient*. Do NOT expect it to fix the downstream over-shoot or the
-> stiff fixed-horizon divergence (`frac_gt2 = 1.0`).
-
-- [x] **Per-node normalization stats for `q`, `h` (and `inwater`).** Replace the
-      scalar `μ`/`σ` from `standardize!` ([src/preprocess.jl](../src/preprocess.jl#L410))
-      with **per-node** `(1×n)` vectors, computed **train-split-only**, persisted
-      to `norm_stats` (scalar → vector schema change). Keep them **affine per
-      node** — additivity and the `A^⊤(·)` routing gather stay exact, so the MB
-      round-trip and conservation self-test are preserved (a nonlinear per-node
-      map would break additivity; an affine one does not).
-- [x] **Thread per-node `σ_q,μ_q,σ_h,μ_h` into `MassBalanceLayer`.** Change the
-      scalar fields to `(1×n)` vectors and reuse the **existing `postscale`
-      tiling** path ([src/gnn.jl](../src/gnn.jl#L270)) so batching / `gpu` / `cpu`
-      are unchanged. The de/renormalization
-      (`h_phys = ph·(h_norm·σ_h + μ_h)`; inverse on return) becomes per-node.
-- [x] **Smooth depth floor.** Replace the hard `h_phys_new = max.(0f0, …)`
-      ([src/gnn.jl](../src/gnn.jl#L335)) with a softplus-style non-negative map so
-      the near-dry branch carries a small gradient (kills the dead-zone) while
-      keeping `h ≥ 0`. Behind a toggle; keep the hard `max(0,·)` path for A/B.
-      Consider the same for the q floor (`_floor_q_norm_nonnegative`,
-      [src/gnn.jl](../src/gnn.jl#L344)).
-- [x] **Per-node stiffness check.** After per-node σ, the training stiffness is
-      `∂h_norm,i/∂q_norm,i = −θ·Δt·σ_q,i/σ_h,i` (was a uniform −21.95·θ). Log it
-      per node; confirm it tracks the local rating slope and that `amp`/`mb_gain`
-      drop below the current ≈7 / ≈22 (the mechanism test — if `amp` is unchanged,
-      per-node σ did not help the accumulation amp and only (i) was addressed).
-- [x] **Validation (per the E11 lesson — never trust the aggregate NSE).**
-      **DONE — E12 (`sava_small_v081_e12_mb_pernode`), 5-seed, 2026-09-18.**
-      - `std(pred_h)/std(truth_h)` per gauge: downstream **bounded but NOT fixed**
-        (outlet 5.92→1.37, node183 0.96→1.58), and the ratio is **misleading** —
-        the outlet is a rail-to-rail 0↔2 square wave (no tracking), not a match.
-        **`node48` is STILL a flatline** (ratio 0.00 all seeds). Criterion FAILED.
-      - `frac_h_raw_neg` did **NOT** drop — it ROSE (network 0.62→0.69, p90≈1.0,
-        max=1.0 at node idx 7). The smooth floor gave gradient but did not stop the
-        physical over-drain (exactly as the honesty note predicted).
-      - Pred budget residual stayed ~0 (per-node affine preserved conservation).
-      - Multi-seed (5) confirmed the above are seed-robust.
-- **Prereq diagnostic (cheap, gradient-free — do first).** [x] Persist a **per-node
-      floor fraction** so the collapse localises to specific nodes: the current CSV
-      only writes the across-nodes `frac_h_raw_neg` median
-      ([src/plot.jl](../src/plot.jl#L850)), which averages out the node48 signal.
-      Add a per-node `floor_frac` column (or a small side table) from the
-      already-computed `h_raw` matrix in `rollout_mb_diagnostics`
-      ([src/rollout.jl](../src/rollout.jl#L544)).
-      Also persist a compact `metrics.toml` summary block (`mass_balance_floor`)
-      with network/nodewise aggregates (mean/median/p90/max and max-node index)
-      for cross-run comparison without parsing CSV.
-- Touch: `src/preprocess.jl` (`standardize!` → per-node vectors, `norm_stats`
-      schema), `src/gnn.jl` (`MassBalanceLayer` fields + de/renormalize + smooth
-      floor), `src/rollout.jl` (`mb_diagnostics` per-node floor fraction),
-      `src/plot.jl` (persist it), config toggle for the smooth floor, tests for
-      the conservation self-test + `q,h ≥ 0`.
-- **VALIDATED (E11, 2026-09-18, 5-seed on the pushforward base).** Fixes **(b)** for
-  `river_q`: pooled KGE **0.919 ± 0.033** (best in series, PBIAS ≈ 0), q well-scaled at
-  every node, `amp` unchanged (6.65 ± 0.78). **But it does NOT fix `river_h`.** The
-  `river_h` spatial NSE −118 → −4.64 is a *degenerate-flatline artifact*, not skill:
-  on the free rollout `river_h` collapses to a near-constant upstream (std(pred_h)=0 at
-  the headwater, all 5 seeds) and over-shoots downstream. Since `river_h` is derived
-  analytically from q, this is a **decoder / h(q)-derivation** problem, i.e. item **(a)**
-  territory, not feature conditioning. The stiff fixed-horizon rollout also still
-  diverges (`frac_gt2 = 1.0`). See docs/EXPERIMENTS.md E11 (with correction).
-  → **Adopt the scaling for the `river_q` gain.** `river_h` + the flux-accumulation amp
-  remain the top open problem and need item **(a)** (MB-invasive q/h rescaling, §4 of
-  mass_balance_stability_notes) — separate work.
-
-- **VALIDATED (E12, 2026-09-18, 5-seed on the E11 base).** Option A (per-node σ +
-  smooth h-floor) is **necessary-but-not-sufficient — exactly as the honesty note
-  predicted.** Real wins: `river_q` KGE 0.919→**0.940** (best-in-series), outlet q RMSE
-  ~12.1→~10.7, and rollout **boundedness** — `fixed_val_rmse` 1e9→**24.6 [11.8,38.3],
-  finite all seeds**; downstream `river_h` bounded (outlet std ratio 5.92→1.37, RMSE
-  3.10→1.02). **But `river_h` is NOT fixed:** `node48` still a flatline (ratio 0.00),
-  the outlet "1.37" is a rail-to-rail 0↔2 square wave (no tracking), floor firing ROSE
-  (0.62→0.69), and `amp`/`mb_gain` did not drop (6.65→9.38, 22.9→46.25 — a per-node
-  diagnostic-definition change, not real destabilization). **Adopt per-node σ; leave the
-  smooth floor OFF until an A/B credits it. `river_h` now needs the B/C-hybrid MB
-  reformulation** ([notes/mass_balance_formulations.md](notes/mass_balance_formulations.md)),
-  the deeper root this note flagged. See docs/EXPERIMENTS.md E12.
-  > **⚠ CORRECTION (2026-09-19): the smooth-floor arm was BUGGY** — `_nonnegative_floor`
-  > hard-capped `h` at `softness·40 = 2.0 m` (the softplus overflow guard clamped the
-  > positive side), which is the 0↔2 rail. Bug fixed. E12's stability/boundedness numbers
-  > (finite fixed RMSE, bounded downstream h) are largely that cap artifact and **E12 must
-  > be re-run** with the corrected floor (or floor OFF) before crediting a stability gain.
-
-## 1b. Harden the per-node σ base (blocks E12 + E13 re-runs)
-
-**Why (E12 + E13 diagnostics, 2026-09-19).** The per-node σ scheme (§1a) is
-UNSTABLE in the h-channel. `σ_h` spans **0.031–68.9** (vs the old global 24.582;
-37 nodes below 5); the h-loss divides by `σ_h,i`, so tiny-σ_h nodes get ~`1/σ_h²`
-gradient weight (stiffness `mb_gain` up to 486 vs the old uniform ~22). Symptoms:
-E12 pre-clip `grad_norm` ~6–170× larger than E11 (masked only by `grad_clip=1.0`);
-**E13** showed the h-channel loss explodes with the dataset window length
-(`val_h_1step` 2.9 → 7.8e6 → 1.5e7 as nhorizon 11→21→31) **in phase 1** (horizon-1),
-with the deepest cell's training `grad_norm` blowing up from epoch 1 (4.5 → 143000).
-This contaminated E13 and plausibly starves the (clip-limited) step onto floored/dead
-headwater nodes — why per-node σ gave the headwater no skill.
-
-- [x] **Floor / winsorize `σ_h` per node** (e.g. `σ_h,i = max(σ_h,i, c)` for a
-      sane `c`, or clamp to a percentile band) so a 0.03 m node cannot get ~800×
-      the outlet's gradient weight. Same consideration for `σ_q`/`σ_inwater` if they
-      show a similar spread. Touch: `src/preprocess.jl` (`standardize_per_node!`).
-      Implemented as config-controlled floors: `model.mb_sigma_h_floor`,
-      `model.mb_sigma_q_floor`, `model.mb_sigma_inwater_floor`.
-- [ ] **Re-tune the LR on the new normalization.** The carried-over `1.3457e-4` was
-      autotuned on the OLD global-σ landscape via a horizon-1 teacher-forced range
-      test — stale. Re-run `scripts/lr_range_test.jl` on the per-node base (with the
-      σ_h floor applied) and adopt the new stable LR.
-- [ ] **Investigate why longer windows amplify the h-loss from phase 1** (per-node
-      σ_h × validation-window composition) — the h-channel metric should be robust to
-      `nhorizon`. Likely resolved by the σ_h floor; confirm.
-- **Then RE-RUN E12** (per-node σ, corrected smooth floor / floor OFF) and, if a clean
-  depth answer is still wanted, **RE-RUN E13** on the hardened base.
 
 ## 2b. Validation metrics — remaining items
 
@@ -272,108 +260,72 @@ supervision with a convex combination:
 - Touch: `src/strategy.jl` (`loss_function` pushforward branch), `src/training.jl`
   / `TrainingStrategy` (the weight field), config.
 
-## 3d. Make peak-weighting applicable to any loss type
-
-Currently the peak weight is entangled with Huber: `step_loss`
-([src/strategy.jl](../src/strategy.jl#L423)) forks `:huber` → peak-weighted vs
-`else` → **plain unweighted `Flux.mse`**, so peak-weighting can only be tested
-*through* Huber (confounded by the δ-tail effect that E4/E5 showed dominates). But
-the weight itself is already loss-agnostic — `_peak_weight_and_score`
-([src/strategy.jl](../src/strategy.jl#L197)) depends only on `target, u, s, λ, γ,
-w_max`; only `_huber_element` is the swappable kernel. This is a factoring, not a
-rewrite.
-
-- [x] Factor the per-element kernel out of the weighting
-      (`_element_loss(r, Val(loss_type), delta)` for `:mse` / `:huber`, extensible
-      to `:mae`/`:logcosh` later); rename `peak_weighted_huber_loss` →
-      `peak_weighted_loss` taking `loss_type` (+ `delta`, Huber-only).
-- [x] Collapse the `step_loss` `:huber`/`else` fork into one weighted path for
-      both q and h, so `loss_type` and the peak params (`λ, γ, w_max`) become two
-      **orthogonal** axes.
-- [x] **Fix the latent reduction-scale bug while here:** today `λ=0` reduces with
-      `sum` but `λ>0` normalises weights to sum 1 (weighted **mean**) — so enabling
-      peak-weighting silently rescales the loss by ~1/N. **Always normalise**
-      (weighted mean, weights sum to 1) so `λ=0` reduces *exactly* to plain
-      mean-MSE/mean-Huber (LR & `h_loss_weight` transfer unchanged) and `λ` is a
-      pure shape knob. May also explain the E5 `c_peak`/`w_mean` split at δ=1.
-- [x] No breaking config change: `loss_type` stays; `peak_lambda/gamma/w_max`
-      become applicable to any `loss_type`; document `peak_delta` as Huber-only.
-      Existing `λ=0` / `mse` configs reproduce current behaviour after the
-      normalise fix.
-- **Caveat (evidence):** peak-weighting is a **weak** lever (E5 `w_mean≈1.0005`;
-  loss-shape is orthogonal to the rollout instability). Value here is
-  **cleanliness + unblocking a clean peak-weight test on MSE** (free of the Huber
-  δ-tail confound) and three independent axes (`loss_type × peak-weight ×
-  rollout_grad`), NOT a stability fix. Do not expect peak-weighted MSE to move
-  stability.
-- Touch: `src/strategy.jl` (`_huber_element` → `_element_loss`,
-  `peak_weighted_huber_loss` → `peak_weighted_loss`, `step_loss`), any callers /
-  tests referencing `peak_weighted_huber_loss`.
-
 ---
 
 # Diagnostics & plotting
 
-## 3b. Network-graph inset on the river_q / river_h timeseries plots
+## 3e. Subcatchment error attribution (post-hoc; which subcatchments inject error)
 
-The `river_q` / `river_h` timeseries panels already carry a small inset, but it
-currently draws only a faint **scatter of active-node positions** ("node map")
-with the selected cell highlighted ([src/plot.jl](../src/plot.jl#L537)). Upgrade
-it to show the actual **river network graph** so it is obvious where in the
-catchment the plotted cell sits.
+**Why (see [DECISIONS.md](DECISIONS.md) → PROPOSED 19-10-2026 and
+[notes/subcatchment_error_attribution.md](notes/subcatchment_error_attribution.md)).**
+Tests the hypothesis that *some subcatchments contribute disproportionately to
+downstream error* and that this correlates with WFLOW subcatchment attributes.
+Raw per-outlet NSE conflates **locally injected** error with **advected** error
+(discharge accumulates), so the key quantity is the **incremental** error each
+subcatchment adds. Post-hoc like [scripts/spatial_eval.jl](../scripts/spatial_eval.jl)
+— no retraining, primary method needs no forward pass. **New analysis script**
+(e.g. `scripts/subcatch_error_attribution.jl`), reusing `resolve_staticmaps`,
+`load_regrid_nc`, `ldd_to_graph`, `river_q_performance_metrics`.
 
-- [x] Draw the LDD/river-network connectivity (edges between each node and its
-      downstream neighbour) in the inset, not just a point cloud — reuse the
-      network-drawing logic from [scripts/plot_ldd.jl](../scripts/plot_ldd.jl).
-- [x] Keep the current **marker** for the plotted cell (orangered), sized/z-ordered
-      so it reads clearly on top of the network.
-- [x] Thread the edge/connectivity info through to `plot_timeseries` via the
-      existing `inset` named tuple (extend it with the edge list / downstream
-      index) so `plot_downstream_timeseries` populates it from the graph.
-- [x] Apply to both `river_q` and `river_h` panels (loops over `state_vars`, so
-      one change covers both).
-- Touch: `src/plot.jl` (`plot_timeseries` inset block, `plot_downstream_timeseries`
-      `inset_spec`), optionally factor shared network-drawing out of
-      `scripts/plot_ldd.jl`.
-
----
-
-# Experiment tooling
-
-## Seeded repetition option (multi-seed replication)
-
-**Motivation (E7–E10).** Every recent result is **hopelessly seed-dominated** —
-the pure-pushforward base alone gave fixed-horizon RMSE ∈ {9.3, 30.7, 95, 1559}
-across four nominally-identical configs, and `frac_gt2` flips between 0.75 and 1.0
-run-to-run. No single-seed conclusion is trustworthy; EXPERIMENTS.md already owes
-a **≥3-seed confirmation** of every lever within the seed band. Make that a
-first-class, config-driven capability instead of the current manual copy-configs
-hack.
-
-- [x] **Precondition — seed control added.** `run_wflow_gnn`
-      ([src/run.jl](../src/run.jl)) now accepts `[train].seed` and applies
-      deterministic seeding at run start (CPU and CUDA RNG), so weight init,
-      shuffling, and stochastic training operations are reproducible per seed.
-- [x] **Add a `repetitions` (a.k.a. `n_seeds`) option** that runs the *same*
-      configuration `R` times with different seeds. Two candidate homes:
-      - **hparsearch box (preferred):** treat the seed as an implicit search axis
-        — expand each combination from `_box_combinations`
-        ([src/hparsearch.jl](../src/hparsearch.jl#L121)) into `R` runs with
-        `seed ∈ seeds`, reusing the existing zero-padded `run_name` suffixing so
-        each replicate writes to its own output folder. A `[hparsearch].seeds =
-        [1,2,3]` (or `repetitions = 3` → auto seeds `1:R`) key drives it.
-      - **single-run:** a top-level `repetitions` that wraps `run_wflow_gnn` in a
-        seed loop for configs that are not a search.
-- [x] **Aggregate across replicates.** Emit per-seed metrics plus a summary
-      (mean / std / min / max, or median + IQR) of the headline scalars
-      (fixed-horizon RMSE, `frac_gt2`, pooled KGE, `river_h` NSE, `amp`) so a
-      lever's effect can be read **against** the seed band, not confounded by it.
-      Write to a combined metrics table alongside the per-run outputs.
-- [x] **Default `repetitions = 1`** so existing configs are unchanged; multi-seed
-      is opt-in.
-- Touch: `src/run.jl` (seed plumbing + `Random.seed!`), `src/hparsearch.jl`
-  (`_box_combinations` seed expansion + aggregation), config templates
-  (`experiments/template*.toml`).
+- [ ] **Subcatchment definition + size filter.** Route (A, preferred): use
+      WFLOW-native `wflow_subcatch` (or a gauge-set variant) with outlets from
+      `wflow_gauges` / `idx_out`. Route (B, fallback): delineate incremental
+      catchments from the LDD tree, splitting at confluences where both branches
+      exceed an upstream-area threshold. Keep only subcatchments whose incremental
+      `wflow_uparea` (or median outlet flow) exceeds a **configurable threshold**
+      ("sufficiently large" — also dodges the dry-headwater floor regime where NSE
+      is degenerate).
+- [ ] **Subcatchment tree from LDD.** Build which subcatchment drains into which
+      (immediate upstream sub-outlets per outlet) via `ldd_to_graph`. **Verify the
+      partition is a proper tessellation** (every cell in exactly one subcatchment;
+      all non-local inflow passes through tracked sub-outlets) — the incremental
+      form below depends on it.
+- [ ] **Per-outlet skill (baseline).** Extract pred/true `q` (and `h`) at each
+      retained outlet; compute NSE / KGE(+r,α,β) / PBIAS / peak_ratio / RMSE via
+      `river_q_performance_metrics`. This is total (local+advected) error, not yet
+      an attribution.
+- [ ] **Incremental (contributed) error — the crux.** For subcatchment `S` with
+      outlet `o` and immediate upstream sub-outlets `{u_i}`,
+      `e_local(S,t) = [Q_pred(o)−Q_true(o)] − Σ_i [Q_pred(u_i)−Q_true(u_i)]`.
+      Report `rms(e_local)`, signed `mean(e_local)`, and a **specific injection**
+      (`rms(e_local)` ÷ incremental Σ inwater or incremental area) so sizes are
+      comparable. Also report the **advected-vs-local split** (`rms(Σ upstream
+      error)` vs `rms(e_local)`) per outlet.
+- [ ] **(Optional Tier-2 counterfactual — needs re-inference, still no
+      retraining.)** Re-run the trained model with *true* upstream inflow
+      substituted at `S`'s boundary; measure outlet error to isolate local skill
+      exactly. Inference-time intervention on fixed weights.
+- [ ] **Attribute aggregation (per subcatchment).** Outlet-cell value
+      (`wflow_uparea`, `wflow_streamorder`, `RiverSlope`); incremental mean/median
+      (`KsatVer`, `SoilThickness`, `M`, `f`, `PathFrac`, `WaterFrac`, `Slope`,
+      `N_River`, `RiverSlope`); presence (reservoir `ResTrapEff>0`, glacier
+      `wflow_glacierfrac>0`); nonlinearity (fraction of time `Q > qbankfull`).
+- [ ] **Attribute ranking.** Spearman rank-correlate each attribute vs the
+      local-error metric across subcatchments; scatter per attribute with ρ; rank
+      by |ρ|. Report ρ CI/p; flag low power + multiple-comparison on small basins —
+      run on **`sava_v081`** (many subcatchments) for a real test, not just
+      `sava_small`.
+- [ ] **Outputs (mirror `spatial_eval.jl`).** `metrics/<split>_subcatch_error_attribution.csv`
+      (row per subcatchment: id, outlet node, incremental area, n_cells, outlet
+      skill, `e_local` stats, specific injection, advected RMS, aggregated
+      attributes); plots: subcatchment map coloured by local injection,
+      advected-vs-local stacked bars along the main stem, attribute scatter panel.
+- **Note:** partly unblocks §2b (`wflow_gauges*`/`wflow_subcatch*` is a ready-made
+  gauge/subcatchment definition for per-gauge reporting).
+- Touch: new `scripts/subcatch_error_attribution.jl` (+ small reusable helpers if
+  `resolve_staticmaps`/`load_regrid_nc` are promoted out of
+  `scripts/spatial_eval.jl` into `src/`); no source-model change for the primary
+  method.
 
 ---
 

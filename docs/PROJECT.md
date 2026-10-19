@@ -15,6 +15,54 @@ The mass balance is enforced through a GNN layer called at the end of each forwa
 
 Experiments in the project are run by calling the appropriate Julia script from the command line with a config TOML file as argument. Template config files are provided in the `experiments` directory
 
+### Current architecture
+
+The sections below summarise the *current implemented state*. Full reasoning
+lives in [DECISIONS.md](DECISIONS.md) and the research notes under `docs/notes/`.
+
+- **Encode–process–decode GNN with a physics decoder.** Nodes are river cells,
+  edges follow the local drainage direction. Neighbour aggregation
+  `out[i] = Σ_{j→i} h[:,j]` is implemented as a sparse matrix–dense multiply
+  (`SparseConv`, cuSPARSE SpMM) rather than scatter-gather — the fastest path on
+  GPU. Batched training uses a precomputed block-diagonal adjacency
+  (`precompute_batched`, built on CPU before moving to GPU).
+- **Hard mass balance (the `MassBalanceLayer`).** The decoder predicts only the
+  discharge increment `Δq` (`out_dim = 1`); `river_h` is derived analytically
+  from the kinematic-wave water balance every step, so conservation is exact by
+  construction. The discretisation is **fully implicit** (all fluxes at `t+1`,
+  verified against real Wflow output), blended by a configurable `mb_theta`
+  (default `1.0`). The layer is a *rollout governor*: with it, rollouts stay
+  finite where the unconstrained model overflows.
+- **Normalisation.** Per-variable z-score plus a physical postscale
+  (`river_q` area-normalised to specific discharge; `river_h` scaled by `w·l/A`),
+  with statistics fit on the training split only. The MB layer evaluates physics
+  in physical units; positivity floors are applied in physical units inside the
+  layer.
+- **Training.** A rollout-length curriculum (`steps = [1,2,5,8,10]`) with a
+  warm-restart (SGDR-style) learning-rate schedule — cosine decay within each
+  phase, linear warmup and a geometrically shrinking peak at each restart —
+  and BPTT via `Zygote.checkpointed`. A custom `_topology_mul` adjoint keeps the
+  adjacency out of the backward pass (the key out-of-memory fix). Gradients flow
+  through the mass balance, re-weighted (`h_loss_weight = σ_h/(dt·σ_q)`) so the
+  `q` and `h` channels have comparable magnitude. An autotune path
+  (LR-range-test + batch-size estimator) can size the LR and batch before a run.
+- **Losses & evaluation.** MSE by default, with an optional per-node
+  peak-weighted Huber loss. Evaluation produces autoregressive rollouts, a
+  water-volume storage/budget diagnostic, longitudinal upstream timeseries, and
+  mass-balance residual diagnostics, written as gridded NetCDF + metrics TOML.
+
+### Known limitations
+
+- **Conditional rollout instability at stiff high flows.** Discharge `q` is a
+  free state in the loop; its Jacobian can amplify (`ρ(J) > 1`), so rollouts from
+  stiff high-flow anchors can still diverge even though benign starts stay
+  bounded. This is the main open stability problem (tracked in TODO.md); the
+  mass-balance redesign notes propose Muskingum / continuity-readout formulations
+  that remove `q` from the loop.
+- **Manning rating is only loosely valid at daily resolution** and is therefore
+  **not** used as a hard constraint (daily-averaging a nonlinear law breaks under
+  unsteady / overbank flow).
+
 ## Project structure
 
 ### Code & Data

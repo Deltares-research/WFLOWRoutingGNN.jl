@@ -5,6 +5,95 @@ note that holds the full reasoning. Newest at the top.
 
 ---
 
+# PROPOSED 19-10-2026
+
+## Four-stage pipeline + mass-balance code separation
+
+- **Restructure the monolithic `run_wflow_gnn` into four independently runnable
+  stages** — (1) preprocess, (2) train, (3) infer, (4) analyze — that exchange
+  **on-disk artifacts**, composed back-to-back to reproduce every artifact
+  produced today. Full methodology in
+  [notes/pipeline_and_massbalance_redesign.md](notes/pipeline_and_massbalance_redesign.md);
+  implementation checklist in [TODO.md](TODO.md) → "Code restructuring".
+- **Why.** Today preprocessing products live in memory only and inference +
+  analysis are fused inside `evaluate_and_write`, so analysis cannot be re-run
+  without re-inference, nor inference without the in-memory preprocessing state.
+  Clean stage boundaries make each re-runnable from its predecessor's artifacts
+  (the post-hoc pattern `spatial_eval.jl` already proves works).
+- **Stage contract.** Preprocess owns the serialized bundle
+  (`norm_stats`/`postscale`/`static_arr`/topology) **and the node↔cell mapping**
+  (a pure function of staticmaps/LDD + node ordering). Inference produces **only**
+  gridded `(lon,lat,time)` NetCDF matching wflow's `output.nc` as closely as
+  possible. Analysis recovers node arrays by gathering river cells via the
+  prep-owned mapping — no per-split node dump, no ordering drift.
+- **Mass-balance separation.** Move all MB code out of `gnn.jl` into
+  `src/massbalance.jl`; model formulations as a `MassBalanceFormulation` dispatch
+  hierarchy (`NoMassBalance` null object replaces the `nothing` sentinel;
+  `ThetaKinematicWave` wraps today's layer). The forward pass collapses to a
+  three-line dispatch, removing every `isnothing(mass_balance)` branch across
+  `gnn.jl`/`run.jl`/`rollout.jl`/`training.jl`. Adding a new formulation = one
+  struct + a few dispatch methods + a factory + a settings enum value, with **no**
+  edits to the generic GNN forward. Prefer multiple dispatch over `if/else`
+  ladders throughout.
+- **Layer-free MB analysis.** Add a post-hoc `mb_residual_diagnostics` that
+  recomputes the kinematic-wave residual **from predicted q/h fields**, so
+  mass-balance analysis works on **any** trained model (MB or not). The existing
+  layer-internal diagnostics (floor fraction, stiffness) remain, dispatched on the
+  formulation type and run only when a layer is present.
+- **Scripts consolidation.** Promote reusable logic from `scripts/` into `src/`:
+  the post-hoc helpers (`resolve_staticmaps`/`load_regrid_nc`), the layer-free MB
+  routing/residual (prototyped by `check_mass_balance*.jl`), and the LR/batch
+  tuning toolkit (`lr_range_test`/`autotune_train`). Thin drivers + benchmarks
+  stay in `scripts/`; `smoke_test_sparse.jl` migrates into the test suite;
+  `plot_ldd.jl`'s network drawing factors into `src/plot.jl`.
+- **Performance invariants preserved (non-negotiable).** The `_topology_mul`
+  rrule, `SparseConv` three-path dispatch + `precompute_batched`, CuSPARSE CSR
+  conversions, zero-copy per-node reshape, and CPU-build-before-`gpu` ordering
+  must be byte-for-byte preserved; `benchmark_message_passing`/`benchmark_rollout`
+  are the before/after acceptance gate.
+- **Migration** is a 7-step, individually-testable, reversible sequence;
+  equivalence is checked by diffing the artifact set of a small golden run
+  (`test_sava_small_v081`).
+
+---
+
+# PROPOSED 19-10-2026
+
+## Subcatchment error-attribution diagnostic (post-hoc)
+
+- **Add a post-hoc analysis that attributes downstream error to the subcatchments
+  that inject it**, testing the hypothesis that *some subcatchments contribute
+  disproportionately to downstream error* and that this correlates with WFLOW
+  subcatchment attributes (stream order, slope, soil, reservoir presence, …).
+  Full methodology in
+  [notes/subcatchment_error_attribution.md](notes/subcatchment_error_attribution.md);
+  implementation checklist in [TODO.md](TODO.md) §3e.
+- **Why incremental, not raw outlet NSE.** Discharge accumulates downstream, so a
+  per-outlet metric conflates *locally injected* error with *advected* error. The
+  decisive quantity is the **incremental** error a subcatchment adds on top of
+  what it receives:
+  `e_local(S,t) = [Q_pred(o)−Q_true(o)] − Σ_i [Q_pred(u_i)−Q_true(u_i)]`
+  for outlet `o` and immediate upstream sub-outlets `{u_i}`, plus an
+  advected-vs-local split and a size-normalised specific-injection metric.
+- **Post-hoc, like every analysis in the repo.** Consumes only the artifacts
+  `run_wflow_gnn` already writes (`output/<split>_{pred,true}.nc`) plus
+  `staticmaps.nc` (`wflow_subcatch*`, `wflow_gauges*`, `wflow_ldd`,
+  `wflow_streamorder`, `wflow_uparea`, channel/soil/reservoir attributes) — no
+  retraining; the primary difference-of-errors method needs no forward pass
+  (mirrors `scripts/spatial_eval.jl`). Only an optional Tier-2 boundary-forced
+  counterfactual re-runs inference on the fixed weights.
+- **Subcatchment definition.** Prefer WFLOW-native `wflow_subcatch` + `wflow_gauges`
+  outlets (attributes map one-to-one); fall back to LDD-derived incremental
+  catchments split at above-threshold confluences when the gauge set is too
+  sparse. A configurable size threshold enforces "sufficiently large" and avoids
+  the degenerate dry-headwater/floor regime.
+- **Scope / open items.** Depends on a verified subcatchment **tessellation** for
+  the incremental form; reservoirs/lakes break simple routing and are flagged;
+  the test is under-powered on `sava_small` and should be run on `sava_v081`
+  (many subcatchments). Partly unblocks the TODO §2b "no gauge concept" item.
+
+---
+
 # IMPLEMENTED 08-09-2026 (shipped 2026-09-11)
 
 ## System water-volume and longitudinal upstream validation diagnostics
@@ -145,6 +234,13 @@ status logs; it back-fills decisions made before 27-08-2026.*
   [notes/mass_balance_stability_notes.md](notes/mass_balance_stability_notes.md).
 - **Confirmed empirically:** the hard constraint is a *rollout governor* — MB-off
   diverges to Float32 overflow while MB-on stays finite over 1906 steps.
+- **Manning rating is NOT used as a hard constraint.** Tested against Wflow over
+  8.1M cell-steps, the daily-averaged rating holds only qualitatively (~15–23% of
+  samples within ±25% even in the best wet/quasi-steady/in-bank regime; worse
+  under unsteady / overbank flow). Daily-averaging a nonlinear law (Jensen +
+  rising/falling-limb hysteresis) is the dominant error, not calibration. At most
+  a one-sided soft cap on over-prediction; never a hard constraint. See
+  [notes/mass_balance_stability_notes.md](notes/mass_balance_stability_notes.md).
 
 ## Normalisation & features
 
@@ -164,3 +260,21 @@ status logs; it back-fills decisions made before 27-08-2026.*
   with a curriculum LR schedule and BPTT via `Zygote.checkpointed`; gradient
   clipping + adaptive backoff on non-finite/unstable epochs.
 - **Ensemble rollout path** for GPU throughput (~2.5× per-member gain).
+- **Batched training uses a precomputed block-diagonal SpMM**, ~2× faster than
+  the reshape trick at batch size 16 on GPU (a single cuSPARSE call parallelises
+  across all batch elements). `precompute_batched(model, B)` must be called on
+  CPU **before** `Flux.gpu`, and re-synced whenever `B` changes. On CPU the
+  reshape-trick fallback wins. See
+  [notes/message_passing_notes.md](notes/message_passing_notes.md).
+- **Curriculum LR schedule = SGDR-style warm restarts.** Monotone decay fails
+  because each curriculum depth increase opens a *new, harder* objective; instead
+  cosine decay within each phase, a linear warmup (`lr_warmup_epochs`) at each
+  restart, and a geometrically shrinking peak (`lr_peak_decay`) per phase, with
+  phase boundaries driven by `strategy.durations`. Batch↔LR follows **sqrt**
+  scaling (Adam), not linear. Watch `grad_norm` at phase restarts as the
+  overheating signal. See
+  [notes/training_tuning_notes.md](notes/training_tuning_notes.md).
+- **Autotune infrastructure** (`scripts/autotune_train.jl`): a horizon-1 LR
+  range test (Leslie Smith) plus a batch-size estimator size the LR and batch
+  before launch. The range test is teacher-forced / horizon-1 and blind to
+  multi-step rollout collapse, so the autotuned LR is treated as an upper bound.
