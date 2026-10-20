@@ -36,7 +36,11 @@ export TrainSettings, save_train_settings, load_train_settings, train_model!,
        peak_epoch_diagnostics
 
 include("pipeline.jl")
-export PrepBundle, PREP_SCHEMA_VERSION, preprocess_run, train_run, save_prep, load_prep
+export PrepBundle, PREP_SCHEMA_VERSION, preprocess_run, train_run, save_prep, load_prep,
+       infer_run, load_model, load_train_summary
+
+include("analysis.jl")
+export analyze_run
 
 include("run.jl")
 export run_wflow_gnn, run_wflow_gnn_from_toml, parse_run_config, build_gnn_model
@@ -55,7 +59,7 @@ export rollout, evaluate_trajectory, rollout_mb_diagnostics, rollout_ensemble,
     volume_budget_diagnostics
 
 include("postprocess.jl")
-export regrid, write_regrid_to_netcdf,
+export regrid, write_regrid_to_netcdf, gather_nodes,
        spatial_error_metrics, write_spatial_metrics_to_netcdf, overprediction_vs_ramp,
        spatial_metric_summary, write_spatial_metrics_to_csv,
        kge_metrics, mae_metric, pbias, event_peak_metrics, event_detection_metrics,

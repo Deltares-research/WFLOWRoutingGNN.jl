@@ -293,24 +293,28 @@ function _log_gpu_memory(label::AbstractString)
 end
 
 """
-    train_run(prep, ds, ms, ts) -> (; model, losses, train_duration_s)
+    train_run(prep, ds, ms, ts) -> (; model, losses, train_duration_s, n_params)
 
 Stage 2 of the pipeline. Builds the model from `prep` ([`build_gnn_model`](@ref)),
 trains it with [`train_model!`](@ref) and writes the training artefacts under
 `<ds.runs_dir>/<ds.run_name>/`:
 
     model/    data_settings.toml, model_settings.toml, train_settings.toml,
-              norm_stats.toml, model.jld2
+              norm_stats.toml, model.jld2, train_summary.jld2
     metrics/  losses.csv, amplification.csv, fixed_horizon*.csv
     plots/    losses.png, amplification.png, fixed_horizon.png
 
+`train_summary.jld2` (keys `losses`, `train_duration_s`, `n_params`) lets
+[`analyze_run`](@ref) write `metrics.toml` without the in-memory training state.
+
 Reads only `prep` — never the raw wflow outputs — except that the periodic
-full-evaluation checkpoint hook (`ts.checkpoint_full_eval`) still goes through
-the fused [`evaluate_and_write`](@ref). `prep` must have been built with the
+full-evaluation checkpoint hook (`ts.checkpoint_full_eval`) runs
+[`infer_run`](@ref) + [`analyze_run`](@ref), which read the raw wflow file paths
+stored in `prep` (coordinates only). `prep` must have been built with the
 curriculum's window length (`prep.nhorizon == maximum(ts.strategy.steps) + 1`).
 
-Returns the trained `model` (on `ts.device`), the `losses` history and the
-wall-clock seconds spent in `train_model!`.
+Returns the trained `model` (on `ts.device`), the `losses` history, the
+wall-clock seconds spent in `train_model!` and the trainable parameter count.
 """
 function train_run(prep::PrepBundle, ds::DataSettings, ms::ModelSettings, ts::TrainSettings)
     prep.domain == ms.domain ||
@@ -372,8 +376,7 @@ function train_run(prep::PrepBundle, ds::DataSettings, ms::ModelSettings, ts::Tr
                                           n_anchors = ts.eval_anchors)
 
     # Periodic checkpoint hook: save weights every `checkpoint_every` epochs and,
-    # when requested, run the same full evaluation used at the end of training.
-    schema = load_schema(prep.wflow_schema)
+    # when requested, run the same inference + analysis stages used at the end.
     checkpoint_callback = ts.checkpoint_every > 0 ?
         function (m, epoch)
             ckpt_dir     = joinpath(dirs.model, "checkpoints", @sprintf("epoch_%04d", epoch))
@@ -391,9 +394,9 @@ function train_run(prep::PrepBundle, ds::DataSettings, ms::ModelSettings, ts::Tr
             @info "Saved checkpoint (epoch $epoch) → $ckpt_dir"
             if ts.checkpoint_full_eval
                 @info "Running full evaluation for checkpoint epoch $epoch"
-                evaluate_and_write(m, dataset, norm_stats, prep.grid, postscale,
-                                   static_arr, ms, ts, prep.output_file, prep.staticmaps_file,
-                                   prep.times, schema, ckpt_output, ckpt_plots, ckpt_metrics)
+                ckpt_dirs = (; output = ckpt_output, plots = ckpt_plots, metrics = ckpt_metrics)
+                infer_run(m, prep, ms, ts; dirs = ckpt_dirs)
+                analyze_run(prep, ms, ts; dirs = ckpt_dirs, model = m, metrics_toml = false)
             end
         end : nothing
 
@@ -470,5 +473,150 @@ function train_run(prep::PrepBundle, ds::DataSettings, ms::ModelSettings, ts::Tr
         end
     end
 
-    return (; model, losses, train_duration_s = train_duration)
+    # Training summary for stage 4 (`metrics.toml`) when it runs without the
+    # in-memory training state.
+    n_params = sum(length, Flux.trainables(Flux.cpu(model)))
+    JLD2.jldsave(joinpath(dirs.model, "train_summary.jld2");
+                 losses = losses, train_duration_s = train_duration, n_params = n_params)
+
+    return (; model, losses, train_duration_s = train_duration, n_params)
+end
+
+"""
+    load_train_summary(model_dir) -> (; losses, train_duration_s, n_params)
+
+Load the training summary written by [`train_run`](@ref) from
+`<model_dir>/train_summary.jld2`.
+"""
+function load_train_summary(model_dir::AbstractString)
+    file = joinpath(model_dir, "train_summary.jld2")
+    isfile(file) ||
+        throw(ArgumentError("no training summary at $file (run train_run first)"))
+    d = JLD2.load(file)
+    return (losses = d["losses"], train_duration_s = d["train_duration_s"],
+            n_params = d["n_params"])
+end
+
+"""
+    load_model(prep, ms, model_dir; batch_size = 1) -> WflowGNN
+
+Rebuild the model for `ms` on the topology/statistics in `prep` (see
+[`build_gnn_model`](@ref)) and load the trained weights from
+`<model_dir>/model.jld2` (written by [`train_run`](@ref)). The returned model is
+on the CPU; move it with `Flux.gpu` for GPU inference. This is how stages 3 and 4
+run on an already-trained run without retraining.
+"""
+function load_model(prep::PrepBundle, ms::ModelSettings, model_dir::AbstractString;
+                    batch_size::Int = 1)
+    file = joinpath(model_dir, "model.jld2")
+    isfile(file) || throw(ArgumentError("no model weights at $file (run train_run first)"))
+    model = build_gnn_model(ms, prep, batch_size)
+    Flux.loadmodel!(model, JLD2.load(file, "model_state"))
+    return model
+end
+
+# Timestamps of the `n_frames` predicted frames of a split whose first graph sits
+# at index `offset + 1` of the full series (frame i is graph `offset + 1 + i`).
+_split_frame_times(all_times, offset::Int, n_frames::Int) =
+    [all_times[clamp(offset + 1 + i, 1, length(all_times))] for i in 1:n_frames]
+
+"""
+    infer_run(model, prep, ms, ts; dirs, splits = (:train, :val)) -> (; val_rollout_duration_s, val_n_timesteps)
+
+Stage 3 of the pipeline: pure forward model. For every split in `splits`, run the
+autoregressive trajectory rollout ([`evaluate_trajectory`](@ref)) on `model`
+(on `ts.device`), scatter it back onto the raster ([`regrid`](@ref)) and write
+
+    <dirs.output>/<split>_pred.nc, <split>_true.nc
+
+as gridded `(lon, lat, time)` NetCDF in the layout of wflow's `output.nc`
+(`lon`/`lat` from `prep.staticmaps_file`, `time` axis from `prep.times`). No
+metrics or plots are produced; [`analyze_run`](@ref) reads these files back.
+
+When `:val ∈ splits` and `ts.val_daterange` is set, the validation windows that
+fall inside the range are additionally rolled out and written as
+`val_daterange_pred.nc` / `val_daterange_true.nc`.
+
+`dirs` is any value with an `output` field (e.g. `_run_dirs(ds)`). Returns the
+wall-clock seconds and frame count of the validation rollout (`0.0` / `0` when
+`:val ∉ splits`).
+"""
+function infer_run(model, prep::PrepBundle, ms::ModelSettings, ts::TrainSettings;
+                   dirs, splits = (:train, :val))
+    mkpath(dirs.output)
+    schema   = load_schema(prep.wflow_schema)
+    dataset  = prep.dataset
+    n_train  = length(dataset.train)
+    offsets  = (train = 0, val = n_train, test = n_train + length(dataset.val))
+
+    val_rollout_duration = 0.0
+    val_n_timesteps      = 0
+
+    for split in splits
+        split in keys(offsets) ||
+            throw(ArgumentError("unknown split $(repr(split)); expected one of $(keys(offsets))"))
+        split_data = getfield(dataset, split)
+
+        t0 = time_ns()
+        p_states, t_states = evaluate_trajectory(
+            model, split_data, prep.norm_stats, ms.domain, prep.static_arr;
+            device = ts.device, postscale = prep.postscale)
+        if split == :val
+            val_rollout_duration = (time_ns() - t0) / 1e9
+            val_n_timesteps      = size(p_states, 3)
+        end
+        p_grids = regrid(p_states, prep.grid, ms.domain)
+        t_grids = regrid(t_states, prep.grid, ms.domain)
+
+        split_times = _split_frame_times(prep.times, offsets[split], size(p_states, 3))
+
+        write_regrid_to_netcdf(p_grids, prep.staticmaps_file, split_times,
+                               joinpath(dirs.output, "$(split)_pred.nc"); schema)
+        write_regrid_to_netcdf(t_grids, prep.staticmaps_file, split_times,
+                               joinpath(dirs.output, "$(split)_true.nc"); schema)
+    end
+
+    if :val in splits && !isnothing(ts.val_daterange)
+        _infer_val_daterange(model, prep, ms, ts, dirs.output, schema)
+    end
+
+    return (; val_rollout_duration_s = val_rollout_duration, val_n_timesteps)
+end
+
+# Optional date-range rollout on the validation split → `val_daterange_{pred,true}.nc`.
+function _infer_val_daterange(model, prep::PrepBundle, ms::ModelSettings, ts::TrainSettings,
+                              output_dir::AbstractString, schema)
+    dr_start, dr_stop = ts.val_daterange
+    all_times  = prep.times
+    split_data = prep.dataset.val
+    n_train_w  = length(prep.dataset.train)
+
+    # Find which val-split windows fall within the date range. The window
+    # starting at split index `w` has its initial-condition graph at
+    # `val_graph_times[w]`; take the first window whose initial-state time is
+    # ≥ dr_start and run until the last one ≤ dr_stop.
+    val_graph_times = [all_times[clamp(n_train_w + i, 1, length(all_times))]
+                       for i in 1:length(split_data)]
+    w_start = findfirst(t -> t ≥ dr_start, val_graph_times)
+    w_stop  = findlast( t -> t ≤ dr_stop,  val_graph_times)
+
+    if isnothing(w_start) || isnothing(w_stop) || w_start > w_stop
+        @warn "val_daterange $dr_start – $dr_stop does not overlap the val split; skipping"
+        return false
+    end
+
+    dr_p_states, dr_t_states = evaluate_trajectory(
+        model, split_data[w_start:w_stop], prep.norm_stats, ms.domain, prep.static_arr;
+        device = ts.device, postscale = prep.postscale)
+
+    # evaluate_trajectory flattens windows into a consecutive sequence and returns
+    # nhorizon + n_windows - 2 frames — more than n_windows — so derive the
+    # timestamps from the series for the exact frame count.
+    dr_times = _split_frame_times(all_times, n_train_w + w_start - 1, size(dr_p_states, 3))
+
+    write_regrid_to_netcdf(regrid(dr_p_states, prep.grid, ms.domain), prep.staticmaps_file,
+                           dr_times, joinpath(output_dir, "val_daterange_pred.nc"); schema)
+    write_regrid_to_netcdf(regrid(dr_t_states, prep.grid, ms.domain), prep.staticmaps_file,
+                           dr_times, joinpath(output_dir, "val_daterange_true.nc"); schema)
+    return true
 end

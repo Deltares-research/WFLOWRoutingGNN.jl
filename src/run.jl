@@ -358,210 +358,6 @@ function _mb_stiffness_summary(mb::ThetaKinematicWave)
 end
 
 """
-    evaluate_and_write(cpu_model, dataset, norm_stats, grid, postscale, static_arr,
-                       ms, ts, output_file, staticmaps_file, all_times, schema, run_dir)
-        -> (val_rollout_duration_s, val_n_timesteps)
-
-Run the full post-training evaluation for `cpu_model` and write all artefacts to
-`run_dir`: per-split autoregressive trajectory rollouts, predicted/true NetCDF,
-the validation movie, downstream timeseries, spatial-error maps, the Q
-overprediction-vs-ramp diagnostic, mass-balance diagnostics (when applicable) and
-the optional `val_daterange` rollout. `cpu_model` must already be on the CPU.
-
-Shared by [`run_wflow_gnn`](@ref) for the final model and, when
-`ts.checkpoint_full_eval` is set, for each periodic checkpoint.
-
-Returns a `NamedTuple` `(; val_rollout_duration, val_n_timesteps,
-spatial_summary, ramp, river_q_perf, volume_budget, mb_floor, mb_stiffness)`; the last six feed the per-run
-`metrics.toml` summary (`spatial_summary` from [`spatial_metric_summary`](@ref),
-`ramp` from [`overprediction_vs_ramp`](@ref), `river_q_perf` from
-[`river_q_performance_metrics`](@ref), `volume_budget` from
-[`volume_budget_diagnostics`](@ref), and `mb_floor` from validation
-mass-balance diagnostics, plus `mb_stiffness` from per-node MB gain diagnostics)
-and are `nothing` when not applicable.
-"""
-function evaluate_and_write(model, dataset, norm_stats, grid, postscale,
-                            static_arr, ms::ModelSettings, ts::TrainSettings,
-                            output_file, staticmaps_file, all_times, schema,
-                            output_dir, plots_dir, metrics_dir)
-
-    eval_device = ts.device
-
-    val_rollout_duration = 0.0
-    val_n_timesteps      = 0
-    spatial_summary      = nothing
-    ramp_summary         = nothing
-    river_q_perf         = nothing
-    volume_budget_summary = nothing
-    mb_floor_summary     = nothing
-    mb_stiffness_summary = nothing
-
-    for (split_name, split_data, t_offset) in (
-            ("train", dataset.train, 0),
-            ("val",   dataset.val,   length(dataset.train)))
-
-        t0 = time_ns()
-        p_states, t_states = evaluate_trajectory(
-            model, split_data, norm_stats, ms.domain, static_arr;
-            device = eval_device, postscale)
-        if split_name == "val"
-            val_rollout_duration = (time_ns() - t0) / 1e9
-            val_n_timesteps      = size(p_states, 3)
-        end
-        p_grids = regrid(p_states, grid, ms.domain)
-        t_grids = regrid(t_states, grid, ms.domain)
-
-        n_frames    = size(p_states, 3)
-        split_times = [all_times[clamp(t_offset + 1 + i, 1, length(all_times))]
-                       for i in 1:n_frames]
-
-        write_regrid_to_netcdf(p_grids, staticmaps_file, split_times,
-                       joinpath(output_dir, "$(split_name)_pred.nc"); schema)
-        write_regrid_to_netcdf(t_grids, staticmaps_file, split_times,
-                       joinpath(output_dir, "$(split_name)_true.nc"); schema)
-
-        if split_name == "val"
-            g_inset = split_data[1][1]
-            edge_sources, edge_targets = edge_index(g_inset)
-
-            plot_validation_movie(p_grids, t_grids, ms.domain;
-                                  path       = joinpath(plots_dir, "validation.mp4"),
-                                  framerate  = 10,
-                                  timestamps = split_times)
-
-            plot_downstream_timeseries(p_grids, t_grids, ms.domain, grid,
-                                       postscale["river_q"];  # upstream area per node
-                                       path       = joinpath(plots_dir, "downstream_timeseries.png"),
-                                       upstream_points = ts.upstream_points,
-                                       edge_sources = edge_sources,
-                                       edge_targets = edge_targets,
-                                       timestamps = split_times,
-                                       csv_path   = joinpath(metrics_dir, "downstream_timeseries.csv"))
-
-            # Spatial performance: per-cell error maps + Q overprediction vs ramp
-            sp_metrics = spatial_error_metrics(p_grids, t_grids, ms.domain)
-            write_spatial_metrics_to_netcdf(sp_metrics, staticmaps_file,
-                                joinpath(output_dir, "spatial_metrics.nc"); schema)
-            write_spatial_metrics_to_csv(sp_metrics,
-                             joinpath(metrics_dir, "spatial_metrics.csv"))
-            plot_spatial_metrics(sp_metrics, ms.domain;
-                         path = joinpath(plots_dir, "spatial_metrics.png"))
-            spatial_summary = spatial_metric_summary(sp_metrics)
-            if "river_q" in DOMAIN_VARS[ms.domain]["state"]
-                ramp = overprediction_vs_ramp(p_grids, t_grids)
-                @info "Q overprediction vs ramp: Pearson(e,g)=$(round(ramp.pearson_e_g; digits=3)) " *
-                      "Spearman=$(round(ramp.spearman_e_g; digits=3)) over $(ramp.n) (cell,step) pairs"
-                plot_overprediction_vs_ramp(ramp;
-                    path     = joinpath(plots_dir, "q_overprediction_vs_ramp.png"),
-                    csv_path = joinpath(metrics_dir, "q_overprediction_vs_ramp.csv"))
-                ramp_summary = ramp
-
-                qi = findfirst(==("river_q"), DOMAIN_VARS[ms.domain]["state"])
-                river_q_perf = river_q_performance_metrics(
-                    p_states[qi, :, :], t_states[qi, :, :], postscale["river_q"])
-                @info "River q performance — pooled: KGE=$(round(river_q_perf.pooled.kge; digits=3)) " *
-                      "MAE=$(round(river_q_perf.pooled.mae; digits=3))  |  " *
-                      "outlet gauge (node $(river_q_perf.gauge.outlet_idx)): " *
-                      "KGE=$(round(river_q_perf.gauge.kge; digits=3)) MAE=$(round(river_q_perf.gauge.mae; digits=3))"
-            end
-
-            if has_mass_balance(model.mass_balance)
-                @info "Computing mass balance diagnostics on validation split"
-                cpu_model = Flux.cpu(model)
-                mb_diags = rollout_mb_diagnostics(cpu_model, split_data, static_arr)
-                plot_mb_diagnostics(mb_diags;
-                                    path       = joinpath(plots_dir, "mb_diagnostics.png"),
-                                    timestamps = split_times,
-                                    csv_path   = joinpath(metrics_dir, "mb_diagnostics.csv"))
-                _write_mb_floor_fraction_by_node(
-                    joinpath(metrics_dir, "mb_floor_fraction_by_node.csv"),
-                    mb_diags.frac_h_raw_neg_node,
-                    mb_diags.n_valid_h_raw_node,
-                )
-                mb_floor_summary = _mb_floor_summary(mb_diags)
-                _write_mb_stiffness_by_node(
-                    joinpath(metrics_dir, "mb_stiffness_by_node.csv"),
-                    cpu_model.mass_balance,
-                )
-                mb_stiffness_summary = _mb_stiffness_summary(cpu_model.mass_balance)
-
-                volume_budget_summary = volume_budget_diagnostics(
-                    mb_diags;
-                    postscale_q = cpu_model.mass_balance.postscale_q,
-                    postscale_h = cpu_model.mass_balance.postscale_h,
-                    dt = cpu_model.mass_balance.dt,
-                    upstream_area = postscale["river_q"])
-                plot_volume_budget(volume_budget_summary;
-                                   path       = joinpath(plots_dir, "volume_budget.png"),
-                                   timestamps = split_times,
-                                   csv_path   = joinpath(metrics_dir, "volume_budget.csv"))
-                    @info "Volume budget: outlet=$(volume_budget_summary.outlet_idx) " *
-                        "pbias=$(round(volume_budget_summary.volume_pbias; digits=3))% " *
-                        "drift=$(round(volume_budget_summary.volume_drift; digits=3)) m^3/step"
-            end
-
-            # Optional date-range rollout on the validation split
-            if !isnothing(ts.val_daterange)
-                dr_start, dr_stop = ts.val_daterange
-
-                # Find which val-split windows fall within the date range.
-                # split_times[i] is the timestamp of predicted frame i (graph t+1
-                # of the split). The initial condition graph is split_data[1][1],
-                # so the window starting at split index `w` covers times starting
-                # at split_times[w]. We want the first window whose initial-state
-                # time is ≥ dr_start, and we run until the last frame ≤ dr_stop.
-                n_train_w = length(dataset.train)
-                # all_times index of the first val graph (the initial condition)
-                val_graph_times = [all_times[clamp(n_train_w + i, 1, length(all_times))]
-                                   for i in 1:length(split_data)]
-
-                # Window w uses split_data[w] as initial condition at val_graph_times[w]
-                w_start = findfirst(t -> t ≥ dr_start, val_graph_times)
-                w_stop  = findlast( t -> t ≤ dr_stop,  val_graph_times)
-
-                if isnothing(w_start) || isnothing(w_stop) || w_start > w_stop
-                    @warn "val_daterange $dr_start – $dr_stop does not overlap the val split; skipping"
-                else
-                    dr_split = split_data[w_start:w_stop]
-
-                    dr_p_states, dr_t_states = evaluate_trajectory(
-                        model, dr_split, norm_stats, ms.domain, static_arr;
-                        device = eval_device, postscale)
-                    dr_p_grids = regrid(dr_p_states, grid, ms.domain)
-                    dr_t_grids = regrid(dr_t_states, grid, ms.domain)
-
-                    # evaluate_trajectory flattens windows into a consecutive sequence
-                    # and returns nhorizon + n_windows - 2 frames — more than n_windows.
-                    # Derive timestamps directly from all_times for the exact frame count.
-                    n_dr_frames   = size(dr_p_states, 3)
-                    dr_pred_times = [all_times[clamp(n_train_w + w_start + i, 1, length(all_times))]
-                                     for i in 1:n_dr_frames]
-
-                    plot_validation_movie(dr_p_grids, dr_t_grids, ms.domain;
-                                          path       = joinpath(plots_dir, "validation_daterange.mp4"),
-                                          framerate  = 10,
-                                          timestamps = dr_pred_times)
-
-                    plot_downstream_timeseries(dr_p_grids, dr_t_grids, ms.domain, grid,
-                                               postscale["river_q"];
-                                               path       = joinpath(plots_dir, "downstream_timeseries_daterange.png"),
-                                               upstream_points = ts.upstream_points,
-                                               edge_sources = edge_sources,
-                                               edge_targets = edge_targets,
-                                               timestamps = dr_pred_times,
-                                               csv_path   = joinpath(metrics_dir, "downstream_timeseries_daterange.csv"))
-                end
-            end
-        end
-    end
-
-    return (; val_rollout_duration, val_n_timesteps, spatial_summary, ramp = ramp_summary,
-            river_q_perf, volume_budget = volume_budget_summary,
-            mb_floor = mb_floor_summary,
-            mb_stiffness = mb_stiffness_summary)
-end
-
-"""
     write_run_metrics_toml(path, losses, ts, run_meta, spatial_summary, ramp,
                            river_q_perf, volume_budget, mb_floor, mb_stiffness) -> path
 
@@ -754,7 +550,9 @@ Steps:
    `ds.train_frac` / `ds.val_frac`, and persist the [`PrepBundle`](@ref).
 2. [`train_run`](@ref): build a `WflowGNN` from `ms` and the bundle and train it
    with `train_model!`.
-3. Evaluate the final model (`evaluate_and_write`) and write `metrics.toml`.
+3. [`infer_run`](@ref): roll the final model out on train/val and write the
+   gridded `<split>_pred.nc` / `<split>_true.nc`.
+4. [`analyze_run`](@ref): metrics, plots and `metrics.toml` from those NetCDFs.
 
 All artefacts go under `<ds.runs_dir>/<ds.run_name>/`:
        prep/
@@ -765,6 +563,7 @@ All artefacts go under `<ds.runs_dir>/<ds.run_name>/`:
            train_settings.toml
            norm_stats.toml
            model.jld2
+           train_summary.jld2
        metrics/
            metrics.toml
            *.csv
@@ -803,37 +602,20 @@ function run_wflow_gnn(ds::DataSettings, ms::ModelSettings, ts::TrainSettings)
 
     dirs = _run_dirs(ds)
 
-    # --- Evaluate train and val trajectories (each once) ---
+    # --- Stage 3: infer → output/<split>_{pred,true}.nc ---
     @info "Evaluating train and val trajectories"
-    cpu_model = Flux.cpu(model)
-    n_params  = sum(length, Flux.trainables(cpu_model))
+    inf = infer_run(model, prep, ms, ts; dirs)
 
-    eval_out = evaluate_and_write(
-        model, prep.dataset, prep.norm_stats, prep.grid, prep.postscale, prep.static_arr,
-        ms, ts, prep.output_file, prep.staticmaps_file, prep.times,
-        load_schema(prep.wflow_schema), dirs.output, dirs.plots, dirs.metrics)
-    val_rollout_duration = eval_out.val_rollout_duration
-    val_n_timesteps      = eval_out.val_n_timesteps
-
-    # Scalar per-run summary (token-cheap single file for evaluation agents):
-    # final/best training-history metrics + aggregated spatial-error and
-    # overprediction-vs-ramp diagnostics, so no CSV/NetCDF parsing is needed.
-    write_run_metrics_toml(joinpath(dirs.metrics, "metrics.toml"), losses, ts,
-                           (; n_params,
-                              train_duration_s       = train_duration,
-                              val_rollout_duration_s = val_rollout_duration,
-                              val_n_timesteps        = val_n_timesteps),
-                                    eval_out.spatial_summary, eval_out.ramp,
-                            eval_out.river_q_perf, eval_out.volume_budget,
-                                    eval_out.mb_floor, eval_out.mb_stiffness)
+    # --- Stage 4: analyze → metrics/, plots/, output/spatial_metrics.nc ---
+    analyze_run(prep, ms, ts; dirs, model, train_summary = tr, infer = inf)
 
     metrics = (
         final_train_loss           = last(train_rollout),
         final_val_loss             = last(val_rollout),
-        n_params                   = n_params,
+        n_params                   = tr.n_params,
         train_duration_s           = train_duration,
-        val_rollout_duration_s     = val_rollout_duration,
-        val_n_timesteps            = val_n_timesteps,
+        val_rollout_duration_s     = inf.val_rollout_duration_s,
+        val_n_timesteps            = inf.val_n_timesteps,
     )
     return model, metrics
 end

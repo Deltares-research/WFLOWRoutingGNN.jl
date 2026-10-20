@@ -103,28 +103,45 @@ testable and reversible); after each, tests must stay green and a small golden r
       Notes: `A_routing` is not stored; it is rebuilt from the stored edge index
       (`prep.edge_src/edge_tgt`) in `build_gnn_model`. Dataset splits and
       `grid.jld2` stay under `output/data/` (additive change). `train_run` only
-      reads `prep`, except the optional `checkpoint_full_eval` hook, which still
-      calls the fused `evaluate_and_write` (goes away with R4).
+      reads `prep`, except the optional `checkpoint_full_eval` hook, which
+      (since R4) runs `infer_run` + `analyze_run`.
 
 ## R4. Split inference from analysis
 
-- [ ] `infer_run(model, prep, split, val_daterange)`: rollout (`evaluate_trajectory`)
+- [x] `infer_run(model, prep, split, val_daterange)`: rollout (`evaluate_trajectory`)
       + `regrid` + write NetCDF **only**. Output `<split>_pred.nc`/`<split>_true.nc`
       as gridded `(lon,lat,time)` NetCDF matching wflow's `output.nc` layout as
       closely as possible (grid, variable names, time axis). No metrics, no node
       dump.
-- [ ] `analyze_run(output, prep, model-settings)`: everything currently in
+- [x] `analyze_run(output, prep, model-settings)`: everything currently in
       `evaluate_and_write` **after** the rollout — spatial metrics + summary,
       downstream timeseries (+ inset), overprediction-vs-ramp,
       `river_q_performance_metrics`, validation movie, MB diagnostics, volume
       budget, `metrics.toml`. Recover node arrays by gathering river cells from the
       NetCDFs via the prep-owned node↔cell mapping (handle inactive/NaN-fill cells;
       reproduce `ldd_to_graph` column-major node order exactly).
-- [ ] Compose `run_wflow_gnn = analyze_run ∘ infer_run ∘ train_run ∘ preprocess_run`;
+- [x] Compose `run_wflow_gnn = analyze_run ∘ infer_run ∘ train_run ∘ preprocess_run`;
       verify artifact-set equality against a golden pre-refactor run.
-- [ ] Point `hpar_search` + checkpoint-full-eval at `infer_run`+`analyze_run`
+- [x] Point `hpar_search` + checkpoint-full-eval at `infer_run`+`analyze_run`
       instead of the fused `evaluate_and_write`.
 - Touch: `src/pipeline.jl`/`src/run.jl`, `src/postprocess.jl`, `src/hparsearch.jl`.
+- [x] R4 validation (2026-10-20): `test/test_pipeline.jl` extended (`gather_nodes`
+      inverts `regrid` bit-for-bit incl. NaN cells, `infer_run` NetCDFs equal a
+      direct `evaluate_trajectory`, time axis round trip, `load_model`
+      reproduces predictions, standalone `analyze_run` without a model,
+      `val_daterange` path, `metrics_toml = false`). Golden run
+      (`sava_small_v081`, seed 42, 5 epochs, CPU and GPU) vs. `HEAD` (R3,
+      fused `evaluate_and_write`): every artifact identical (weights, NetCDF
+      contents, CSV/TOML, spatial metrics) except timing fields and `run_name`;
+      the only new artifact is `model/train_summary.jld2`.
+      Notes: `hpar_search` goes through `run_wflow_gnn`, so it picks up the split
+      without changes. Checkpoint evaluation calls `infer_run` + `analyze_run(...;
+      metrics_toml = false)`. `analyze_run` still needs the model for the
+      layer-internal mass-balance diagnostics (`rollout_mb_diagnostics`, floor,
+      stiffness, volume budget); they are skipped when no model is passed
+      (made post-hoc in R5). `load_regrid_nc` is not exported yet (R6 promotes
+      the copy in `scripts/spatial_eval.jl`). `infer_run` writes
+      `val_daterange_{pred,true}.nc` when `val_daterange` is set (additive).
 
 ## R5. Layer-free, post-hoc mass-balance residual diagnostic
 

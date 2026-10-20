@@ -118,6 +118,76 @@ function write_regrid_to_netcdf(
     end
 end
 
+"""
+    load_regrid_nc(path, state_vars) -> Dict{String, Array{Float32,3}}
+
+Read the gridded state variables `state_vars` from a NetCDF written by
+[`write_regrid_to_netcdf`](@ref) back into `(lon, lat, time)` `Float32` arrays,
+with `NaN32` at `missing` (inactive) cells. Exact inverse of the write: every
+stored value is reproduced bit-for-bit. Throws if a variable is absent.
+"""
+function load_regrid_nc(path::AbstractString, state_vars::AbstractVector{<:AbstractString})
+    grids = Dict{String, Array{Float32,3}}()
+    NCDataset(path, "r") do ds
+        for v in state_vars
+            haskey(ds, v) ||
+                throw(ArgumentError("$path has no variable \"$v\""))
+            raw = ds[v][:, :, :]                       # (lon, lat, time), may hold `missing`
+            grids[v] = Float32.(coalesce.(raw, NaN32))
+        end
+    end
+    return grids
+end
+
+"""
+    load_regrid_times(path) -> Vector{DateTime}
+
+Read the `time` axis of a NetCDF written by [`write_regrid_to_netcdf`](@ref).
+"""
+function load_regrid_times(path::AbstractString)
+    return NCDataset(path, "r") do ds
+        collect(ds["time"][:])
+    end
+end
+
+"""
+    gather_nodes(grids, grid, domain) -> Array{Float32,3}
+
+Inverse of [`regrid`](@ref): collect the active-cell values of the gridded state
+variables `grids` (each `(nrows, ncols, T)`) back into node order, returning an
+array of shape `(n_state, n_nodes, T)` in `DOMAIN_VARS[domain]["state"]` order.
+
+`grid` is the node↔cell mapping `(rows, cols, nrows, ncols)` owned by the
+preprocessing stage ([`PrepBundle`](@ref)); because the node order and the mapping
+come from the same `build_wflow_graph` call, the gather is exact:
+`gather_nodes(regrid(x, grid, domain), grid, domain) == x`. Cells outside the
+mapping (inactive / `NaN`-filled) are ignored.
+"""
+function gather_nodes(grids::AbstractDict{String, <:AbstractArray{Float32,3}},
+                      grid::NamedTuple, domain::String)
+    state_vars = DOMAIN_VARS[domain]["state"]
+    for vname in state_vars
+        haskey(grids, vname) ||
+            throw(ArgumentError("grids has no variable \"$vname\" (domain \"$domain\")"))
+    end
+    n_nodes = length(grid.rows)
+    T       = size(grids[first(state_vars)], 3)
+
+    states = Array{Float32}(undef, length(state_vars), n_nodes, T)
+    for (vi, vname) in enumerate(state_vars)
+        raster = grids[vname]
+        (size(raster, 1) == grid.nrows && size(raster, 2) == grid.ncols) ||
+            throw(ArgumentError("grid \"$vname\" has size $(size(raster)[1:2]) but the " *
+                                "node mapping expects ($(grid.nrows), $(grid.ncols))"))
+        size(raster, 3) == T ||
+            throw(ArgumentError("grid \"$vname\" has $(size(raster, 3)) timesteps, expected $T"))
+        for (ni, (r, c)) in enumerate(zip(grid.rows, grid.cols))
+            states[vi, ni, :] = raster[r, c, :]
+        end
+    end
+    return states
+end
+
 # List of per-cell metric names produced by `spatial_error_metrics`, in a
 # stable order (used for NetCDF variable naming and plot panel layout).
 const SPATIAL_METRIC_NAMES = ["rmse", "bias", "relbias", "overpred_freq",
