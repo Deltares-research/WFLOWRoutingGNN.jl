@@ -83,16 +83,28 @@ testable and reversible); after each, tests must stay green and a small golden r
 
 ## R3. Split preprocessing into its own stage + artifact
 
-- [ ] `preprocess_run(ds, ms)`: `build_wflow_graph` + `make_horizon_dataset` +
+- [x] `preprocess_run(ds, ms)`: `build_wflow_graph` + `make_horizon_dataset` +
       peak-node stats + normalized-tail diagnostics.
-- [ ] Serialize a versioned `PrepBundle` to a new `prep/` dir
+- [x] Serialize a versioned `PrepBundle` to a new `prep/` dir
       (`preprocessed.jld2` + the existing dataset/`grid.jld2`): `norm_stats`,
       `postscale`, `static_arr`, `dt`, graph topology (edge index, `A_routing`),
       schema id, **and the node↔cell mapping** (`grid`) — the inverse-gather key
       stage 4 uses. Tag with a `prep_schema` version alongside `wflow_schema`.
-- [ ] Factor `train_run(prep, ms, ts)` out of `run_wflow_gnn` so it reads only
+- [x] Factor `train_run(prep, ms, ts)` out of `run_wflow_gnn` so it reads only
       `prep/` (never the raw wflow outputs) and writes the current `model/` set.
 - Touch: `src/pipeline.jl` (new) or `src/run.jl`, `src/preprocess.jl`.
+- [x] R3 validation (2026-10-19): full test suite 4575/4575 pass (60 new in
+      `test/test_pipeline.jl`: bundle round trip, `prep_schema` version check,
+      peak stats follow the loss, `train_run` from a loaded bundle, rejection of
+      mismatched horizon/domain). Golden run (`sava_small_v081`, seed 42, 5
+      epochs, CPU and GPU) vs. the pre-R2/R3 `HEAD`: every file identical (weights,
+      predictions, datasets, CSV/TOML, NetCDF) except timing fields and `run_name`;
+      the only new artifact is `prep/preprocessed.jld2`.
+      Notes: `A_routing` is not stored; it is rebuilt from the stored edge index
+      (`prep.edge_src/edge_tgt`) in `build_gnn_model`. Dataset splits and
+      `grid.jld2` stay under `output/data/` (additive change). `train_run` only
+      reads `prep`, except the optional `checkpoint_full_eval` hook, which still
+      calls the fused `evaluate_and_write` (goes away with R4).
 
 ## R4. Split inference from analysis
 

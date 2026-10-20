@@ -35,6 +35,9 @@ include("training.jl")
 export TrainSettings, save_train_settings, load_train_settings, train_model!,
        peak_epoch_diagnostics
 
+include("pipeline.jl")
+export PrepBundle, PREP_SCHEMA_VERSION, preprocess_run, train_run, save_prep, load_prep
+
 include("run.jl")
 export run_wflow_gnn, run_wflow_gnn_from_toml, parse_run_config, build_gnn_model
 

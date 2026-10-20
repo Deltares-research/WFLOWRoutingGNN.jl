@@ -8,4 +8,5 @@ using WflowRoutingGNN
     include("test_strategy.jl")
     include("test_lr_autotune.jl")
     include("test_training.jl")
+    include("test_pipeline.jl")
 end

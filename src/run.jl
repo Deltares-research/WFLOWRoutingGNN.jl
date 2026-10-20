@@ -190,25 +190,44 @@ builds the mass-balance formulation (see [`mb_formulation_kind`](@ref)) and, whe
   and removes the stiff gradient amplification of the hard mass-balance decoder
   (at the cost of weaker h-supervision once discharge is well fit).
 
-Shared by [`run_wflow_gnn`](@ref) and standalone tuning scripts so the model is
+A second method, `build_gnn_model(ms, prep::PrepBundle, batch_size; strategy,
+h_loss_scale)`, takes the topology, statistics and timestep from a
+[`PrepBundle`](@ref) (stage 2 of the pipeline: no raw wflow files are read).
+
+Shared by [`train_run`](@ref) and standalone tuning scripts so the model is
 built identically everywhere.
 """
 function build_gnn_model(ms::ModelSettings, graphs, norm_stats, postscale,
                          output_file::AbstractString, batch_size::Int;
                          strategy::Union{Nothing,TrainingStrategy} = nothing,
                          h_loss_scale::Symbol = :absolute)
-    g0      = graphs[1]
-    n_nodes = g0.num_nodes
+    g0 = graphs[1]
+    src_edges, tgt_edges = edge_index(g0)
+    return _build_gnn_model(ms, g0.num_nodes, src_edges, tgt_edges, norm_stats,
+                            postscale, get_timestep(output_file), batch_size;
+                            strategy, h_loss_scale)
+end
 
+function build_gnn_model(ms::ModelSettings, prep::PrepBundle, batch_size::Int;
+                         strategy::Union{Nothing,TrainingStrategy} = nothing,
+                         h_loss_scale::Symbol = :absolute)
+    return _build_gnn_model(ms, prep.n_nodes, prep.edge_src, prep.edge_tgt,
+                            prep.norm_stats, prep.postscale, prep.dt, batch_size;
+                            strategy, h_loss_scale)
+end
+
+function _build_gnn_model(ms::ModelSettings, n_nodes::Int, src_edges, tgt_edges,
+                          norm_stats, postscale, dt::Real, batch_size::Int;
+                          strategy::Union{Nothing,TrainingStrategy},
+                          h_loss_scale::Symbol)
     # Sparse adjacency with self-loops: A[i,j]=1 means node j is an upstream
     # neighbour of node i (each node also aggregates its own state).
-    src_edges, tgt_edges = edge_index(g0)
     all_src  = vcat(src_edges, collect(1:n_nodes))
     all_tgt  = vcat(tgt_edges, collect(1:n_nodes))
     A_sparse = sparse(all_tgt, all_src, ones(Float32, length(all_src)), n_nodes, n_nodes)
 
     mb = _build_mb_formulation(Val(mb_formulation_kind(ms)), ms, norm_stats, postscale,
-                               src_edges, tgt_edges, output_file)
+                               src_edges, tgt_edges, dt)
     h_weight = mb_h_loss_weight(mb, h_loss_scale)
     (strategy === nothing || h_weight === nothing) || (strategy.h_loss_weight = h_weight)
     model = WflowGNN(ms, mb, A_sparse)
@@ -220,7 +239,7 @@ end
 
 # Build the mass-balance formulation selected by `mb_formulation_kind(ms)`.
 _build_mb_formulation(::Val{:none}, ms, norm_stats, postscale,
-                      src_edges, tgt_edges, output_file) = begin
+                      src_edges, tgt_edges, dt) = begin
     if ms.domain == "river"
         @info "Mass balance DISABLED: river_q and river_h are predicted " *
               "independently (decoder out_dim = " *
@@ -230,9 +249,8 @@ _build_mb_formulation(::Val{:none}, ms, norm_stats, postscale,
 end
 
 _build_mb_formulation(::Val{:theta_kinematic_wave}, ms, norm_stats, postscale,
-                      src_edges, tgt_edges, output_file) =
-    build_massbalance(norm_stats, postscale, src_edges, tgt_edges,
-                      get_timestep(output_file);
+                      src_edges, tgt_edges, dt) =
+    build_massbalance(norm_stats, postscale, src_edges, tgt_edges, dt;
                       θ = ms.mb_theta,
                       smooth_h_floor = ms.mb_smooth_h_floor,
                       h_floor_softness = ms.mb_h_floor_softness)
@@ -729,12 +747,18 @@ end
 Execute the full training workflow and save all artefacts.
 
 Steps:
-1. Build the `GNNGraph` time series from `ds.wflow_model_path`
-   (`staticmaps.nc` + `run_default/output.nc`) for domain `ms.domain`.
-2. Create sliding-window samples with horizon `maximum(ts.strategy.steps) + 1`
-   and split into train / val / test using `ds.train_frac` / `ds.val_frac`.
-3. Build a `WflowGNN` from `ms` and train it with `train_model!`.
-4. Save all artefacts under `<ds.runs_dir>/<ds.run_name>/`:
+1. [`preprocess_run`](@ref): build the `GNNGraph` time series from
+   `ds.wflow_model_path` (`staticmaps.nc` + `run_default/output.nc`) for domain
+   `ms.domain`, create sliding-window samples with horizon
+   `maximum(ts.strategy.steps) + 1`, split into train / val / test using
+   `ds.train_frac` / `ds.val_frac`, and persist the [`PrepBundle`](@ref).
+2. [`train_run`](@ref): build a `WflowGNN` from `ms` and the bundle and train it
+   with `train_model!`.
+3. Evaluate the final model (`evaluate_and_write`) and write `metrics.toml`.
+
+All artefacts go under `<ds.runs_dir>/<ds.run_name>/`:
+       prep/
+           preprocessed.jld2      (versioned `PrepBundle`, see `prep_schema`)
        model/
            data_settings.toml
            model_settings.toml
@@ -766,273 +790,35 @@ Returns `(model, metrics)` where `metrics` is a `NamedTuple` with fields:
 """
 function run_wflow_gnn(ds::DataSettings, ms::ModelSettings, ts::TrainSettings)
 
-    # Reproducibility toggle: when a seed is configured, seed both CPU and GPU
-    # RNGs before any stochastic run component (init, shuffling, injected noise).
-    if !isnothing(ts.seed)
-        Random.seed!(ts.seed)
-        if CUDA.functional()
-            CUDA.seed!(UInt64(ts.seed))
-        end
-        @info "Using fixed RNG seed $(ts.seed)"
-    end
+    # --- Stage 1: preprocess → prep/ ---
+    prep = preprocess_run(ds, ms, ts)
 
-    # --- 1. Build time-series graphs ---
-    staticmaps_file = joinpath(ds.wflow_model_path, "staticmaps.nc")
-    output_file     = joinpath(ds.wflow_model_path, ds.output_run_dir, "output.nc")
+    # --- Stage 2: train → model/ ---
+    tr = train_run(prep, ds, ms, ts)
+    model          = tr.model
+    losses         = tr.losses
+    train_duration = tr.train_duration_s
+    train_rollout  = losses.train_rollout
+    val_rollout    = losses.val_rollout
 
-    @info "Building Graph"
-    schema = load_schema(ds.wflow_schema)
-    graphs, norm_stats, grid, postscale, static_arr = build_wflow_graph(
-        staticmaps_file, output_file, ms.domain;
-        schema,
-        stats_frac = ds.train_frac,
-        include_log_upstream_area = ms.include_log_upstream_area,
-        sigma_floor_h = ms.mb_sigma_h_floor,
-        sigma_floor_q = ms.mb_sigma_q_floor,
-        sigma_floor_inwater = ms.mb_sigma_inwater_floor)
+    dirs = _run_dirs(ds)
 
-    g0        = graphs[1]
-    n_nodes   = g0.num_nodes
-    n_edges   = g0.num_edges
-    n_times   = length(graphs)
-    @info @sprintf("Graph: %d nodes  %d edges  %d timesteps", n_nodes, n_edges, n_times)
-
-    # --- 2. Sliding-window horizon dataset ---
-    @info "Building datasets"
-    nhorizon = maximum(ts.strategy.steps) + 1
-    dataset  = make_horizon_dataset(graphs, nhorizon; at = (ds.train_frac, ds.val_frac))
-
-    n_train_windows = length(dataset.train)
-    n_val_windows   = length(dataset.val)
-    n_test_windows  = length(dataset.test)
-    n_state   = size(g0.ndata.state,   1)
-    n_forcing = size(g0.ndata.forcing, 1)
-    n_static  = size(static_arr, 1)
-    bytes_per_window = nhorizon * n_nodes * (n_state + n_forcing) * sizeof(Float32)
-    @info @sprintf("Dataset: %d train windows  %d val windows  %d test windows  (horizon=%d)",
-                   n_train_windows, n_val_windows, n_test_windows, nhorizon)
-    @info @sprintf("Window size: %d steps × %d nodes × (%d state + %d forcing) = %.1f KB  [%d static features shared]",
-                   nhorizon, n_nodes, n_state, n_forcing, bytes_per_window / 1024, n_static)
-
-    # --- 2b. Per-node peak-loss stats (Huber loss only) ---
-    # Precomputed once from the training-period slice of `graphs` only (never
-    # val/test) — the `u_i`/`s_i` design notes call for. `loss_function`
-    # hardcodes state row 1 = q, row 2 = h (same convention already used by the
-    # mass-balance decoder), so only domains with >= 2 state variables are
-    # supported; other domains keep the coarse per-batch fallback threshold.
-    peak_stats = nothing
-    state_vars = DOMAIN_VARS[ms.domain]["state"]
-    if ts.strategy.loss_type == :huber && length(state_vars) >= 2
-        node_stats = peak_node_stats(graphs, ms.domain; frac_train = ds.train_frac)
-        peak_stats = (q = node_stats[state_vars[1]], h = node_stats[state_vars[2]])
-    end
-
-    # --- 3. DataLoaders ---
-    train_loader = DataLoader(dataset.train;
-                              batchsize = min(ts.batch_size, length(dataset.train)),
-                              shuffle   = true,
-                              collate   = true,
-                              parallel  = true)
-    val_loader   = DataLoader(dataset.val;
-                              batchsize = min(ts.batch_size, length(dataset.val)),
-                              shuffle   = false,
-                              collate   = true,
-                              parallel  = true)
-
-    # --- 4. Build model and train ---
-    @info "Training model"
-    dev_fn  = ts.device == :gpu ? Flux.gpu : identity
-
-    train_batch_size = min(ts.batch_size, length(dataset.train))
-    model = build_gnn_model(ms, graphs, norm_stats, postscale, output_file,
-                            train_batch_size; strategy = ts.strategy,
-                            h_loss_scale = ts.h_loss_scale)
-
-    n_params = sum(length, Flux.params(model))
-    @info @sprintf("Model: %d MP layers  hidden_dim=%d  mlp_layers=%d  trainable params=%s",
-                   ms.nlayers, ms.hidden_dim, ms.mlp_layers,
-                   replace(string(n_params), r"(?<=\d)(?=(\d{3})+$)" => "_"))
-
-    model = dev_fn(model)
-
-    if CUDA.functional()
-        mi = CUDA.MemoryInfo()
-        used_b  = mi.total_bytes - mi.free_bytes
-        pool_str = isnothing(mi.pool_used_bytes) ? "" :
-            @sprintf("  |  pool: %.3f GiB used  %.3f GiB reserved",
-                     mi.pool_used_bytes    / 2^30,
-                     mi.pool_reserved_bytes / 2^30)
-        @info @sprintf("GPU memory after model load: %.3f GiB used / %.3f GiB total%s",
-                       used_b / 2^30, mi.total_bytes / 2^30, pool_str)
-    end
-
-    # Timestamps of the full output series (needed both for per-checkpoint eval
-    # during training and the final evaluation).
-    all_times = NCDataset(output_file, "r") do dsx; dsx["time"][:]; end
-
-    run_dir = joinpath(ds.runs_dir, ds.run_name)
-    mkpath(run_dir)
-    model_dir   = joinpath(run_dir, "model")
-    metrics_dir = joinpath(run_dir, "metrics")
-    plots_dir   = joinpath(run_dir, "plots")
-    output_dir  = joinpath(run_dir, "output")
-    mkpath(model_dir)
-    mkpath(metrics_dir)
-    mkpath(plots_dir)
-    mkpath(output_dir)
-
-    # Lightweight normalized-tail dump for train/val/test/static z-scored
-    # features. Helps detect heavy-tail outliers after feature scaling.
-    tail_diag = normalized_tail_diagnostics(
-        graphs, static_arr, ms.domain;
-        frac_train = ds.train_frac,
-        frac_val = ds.val_frac)
-    write_normalized_tail_diagnostics(
-        joinpath(metrics_dir, "normalized_tail_diagnostics.toml"), tail_diag)
-
-    # Fixed-horizon validation metric (constant-length rollout from anchors),
-    # comparable epoch-to-epoch and used for early stopping when enabled.
-    fixed_eval = build_fixed_horizon_eval(dataset.val, static_arr, norm_stats,
-                                          ms.domain, postscale;
-                                          horizon   = ts.eval_horizon,
-                                          n_anchors = ts.eval_anchors)
-
-    # Periodic checkpoint hook: save weights every `checkpoint_every` epochs and,
-    # when requested, run the same full evaluation used at the end of training.
-    checkpoint_callback = ts.checkpoint_every > 0 ?
-        function (m, epoch)
-            ckpt_dir     = joinpath(model_dir, "checkpoints", @sprintf("epoch_%04d", epoch))
-            ckpt_model   = joinpath(ckpt_dir, "model")
-            ckpt_metrics = joinpath(ckpt_dir, "metrics")
-            ckpt_plots   = joinpath(ckpt_dir, "plots")
-            ckpt_output  = joinpath(ckpt_dir, "output")
-            mkpath(ckpt_model)
-            mkpath(ckpt_metrics)
-            mkpath(ckpt_plots)
-            mkpath(ckpt_output)
-            cpu_ckpt = Flux.cpu(m)
-            JLD2.jldsave(joinpath(ckpt_model, "model.jld2");
-                         model_state = Flux.state(cpu_ckpt))
-            @info "Saved checkpoint (epoch $epoch) → $ckpt_dir"
-            if ts.checkpoint_full_eval
-                @info "Running full evaluation for checkpoint epoch $epoch"
-                evaluate_and_write(m, dataset, norm_stats, grid, postscale,
-                                   static_arr, ms, ts, output_file, staticmaps_file,
-                                   all_times, schema, ckpt_output, ckpt_plots, ckpt_metrics)
-            end
-        end : nothing
-
-    train_duration = @elapsed begin
-        losses = train_model!(model, train_loader, val_loader, ts, static_arr;
-                              fixed_eval          = fixed_eval,
-                              checkpoint_callback = checkpoint_callback,
-                              peak_stats          = peak_stats)
-    end
-
-    if CUDA.functional()
-        mi = CUDA.MemoryInfo()
-        used_b  = mi.total_bytes - mi.free_bytes
-        pool_str = isnothing(mi.pool_used_bytes) ? "" :
-            @sprintf("  |  pool: %.3f GiB used  %.3f GiB reserved",
-                     mi.pool_used_bytes    / 2^30,
-                     mi.pool_reserved_bytes / 2^30)
-        @info @sprintf("GPU memory after training:   %.3f GiB used / %.3f GiB total%s",
-                       used_b / 2^30, mi.total_bytes / 2^30, pool_str)
-    end
-    train_rollout = losses.train_rollout
-    val_rollout   = losses.val_rollout
-    train_1step   = losses.train_1step
-    val_1step     = losses.val_1step
-
-    # --- 5. Persist artefacts ---
-    @info "Saving artefacts to $(run_dir)"
-    data_dir = joinpath(output_dir, "data")
-    mkpath(data_dir)
-
-    save_data_settings( joinpath(model_dir, "data_settings.toml"),  ds)
-    save_model_settings(joinpath(model_dir, "model_settings.toml"), ms)
-    save_train_settings(joinpath(model_dir, "train_settings.toml"), ts)
-
-    # Normalisation statistics
-    encode_stat(x) = x isa AbstractVector ? Float64.(x) : Float64(x)
-    stats_dict = Dict(
-        var => Dict("mean" => encode_stat(s.mean), "std" => encode_stat(s.std))
-        for (var, s) in norm_stats
-    )
-    open(joinpath(model_dir, "norm_stats.toml"), "w") do io
-        TOML.print(io, stats_dict)
-    end
-
-    # Model weights (always saved on CPU)
-    JLD2.jldsave(joinpath(model_dir, "model.jld2");
-                 model_state = Flux.state(Flux.cpu(model)))
-
-    # Training loss curves
-    plot_losses(train_rollout, val_rollout, train_1step, val_1step;
-                train_q_1step = losses.train_q_1step,
-                val_q_1step   = losses.val_q_1step,
-                train_h_1step = losses.train_h_1step,
-                val_h_1step   = losses.val_h_1step,
-                grad_norm = get(losses, :grad_norm, nothing),
-                lr        = get(losses, :lr, nothing),
-                steps     = get(losses, :steps, nothing),
-                path     = joinpath(plots_dir, "losses.png"),
-                csv_path = joinpath(metrics_dir, "losses.csv"))
-
-    # Q→H error amplification diagnostic (mass-balance runs only)
-    if haskey(losses, :train_amp) && any(isfinite, losses.train_amp)
-        plot_amplification(losses.train_amp, losses.val_amp;
-                           mb_gain = get(losses, :mb_gain, nothing),
-                           path     = joinpath(plots_dir, "amplification.png"),
-                           csv_path = joinpath(metrics_dir, "amplification.csv"))
-    end
-
-    # Fixed-horizon validation metric (discharge RMSE + peak ratio per epoch)
-    if haskey(losses, :val_fixed_rmse) && any(isfinite, losses.val_fixed_rmse)
-        plot_fixed_horizon(losses.val_fixed_rmse, losses.val_peak_ratio;
-                           val_peak_ratio_frac_gt2 = get(losses, :val_peak_ratio_frac_gt2, nothing),
-                           val_fixed_rmse_highflow = get(losses, :val_fixed_rmse_highflow, nothing),
-                           horizon  = ts.eval_horizon,
-                           path     = joinpath(plots_dir, "fixed_horizon.png"),
-                           csv_path = joinpath(metrics_dir, "fixed_horizon.csv"))
-
-        if fixed_eval !== nothing
-            fh_final = fixed_horizon_metrics(model, fixed_eval; device = ts.device)
-            write_fixed_horizon_anchor_table(
-                joinpath(metrics_dir, "fixed_horizon_anchors.csv"),
-                fixed_eval,
-                fh_final.rmse_q_anchor,
-                fh_final.peak_ratio_anchor)
-        end
-    end
-
-    # Grid lookup table (node index → raster position)
-    JLD2.jldsave(joinpath(data_dir, "grid.jld2");
-                 rows  = grid.rows,
-                 cols  = grid.cols,
-                 nrows = grid.nrows,
-                 ncols = grid.ncols)
-
-    # Dataset splits
-    JLD2.jldsave(joinpath(data_dir, "train.jld2"); data = dataset.train)
-    JLD2.jldsave(joinpath(data_dir, "val.jld2");   data = dataset.val)
-    JLD2.jldsave(joinpath(data_dir, "test.jld2");  data = dataset.test)
-
-    # --- 6. Evaluate train and val trajectories (each once) ---
+    # --- Evaluate train and val trajectories (each once) ---
     @info "Evaluating train and val trajectories"
     cpu_model = Flux.cpu(model)
     n_params  = sum(length, Flux.trainables(cpu_model))
 
     eval_out = evaluate_and_write(
-        model, dataset, norm_stats, grid, postscale, static_arr, ms, ts,
-        output_file, staticmaps_file, all_times, schema, output_dir, plots_dir, metrics_dir)
+        model, prep.dataset, prep.norm_stats, prep.grid, prep.postscale, prep.static_arr,
+        ms, ts, prep.output_file, prep.staticmaps_file, prep.times,
+        load_schema(prep.wflow_schema), dirs.output, dirs.plots, dirs.metrics)
     val_rollout_duration = eval_out.val_rollout_duration
     val_n_timesteps      = eval_out.val_n_timesteps
 
     # Scalar per-run summary (token-cheap single file for evaluation agents):
     # final/best training-history metrics + aggregated spatial-error and
     # overprediction-vs-ramp diagnostics, so no CSV/NetCDF parsing is needed.
-    write_run_metrics_toml(joinpath(metrics_dir, "metrics.toml"), losses, ts,
+    write_run_metrics_toml(joinpath(dirs.metrics, "metrics.toml"), losses, ts,
                            (; n_params,
                               train_duration_s       = train_duration,
                               val_rollout_duration_s = val_rollout_duration,
