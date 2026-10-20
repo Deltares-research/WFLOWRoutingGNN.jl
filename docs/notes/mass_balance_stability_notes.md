@@ -18,8 +18,8 @@ Source touchpoints: [src/gnn.jl](../src/gnn.jl) (`MassBalanceLayer`,
 [src/run.jl](../src/run.jl) (`build_gnn_model`, weight derivation),
 [src/strategy.jl](../src/strategy.jl) (loss). Empirical basis:
 `experiments/sava_small_v081_mb_sweep` (the MB on/off A/B) and the regime
-analysis in [scripts/regime_analysis.jl](../scripts/regime_analysis.jl) +
-[scripts/network_diameter.jl](../scripts/network_diameter.jl) (§6), run on both
+analysis in [scripts/oneoff/regime_analysis.jl](../scripts/oneoff/regime_analysis.jl) +
+[scripts/oneoff/network_diameter.jl](../scripts/oneoff/network_diameter.jl) (§6), run on both
 `models/sava_small_v081` and the full `models/sava_v081`.
 
 ---
@@ -276,10 +276,10 @@ Everything above assumes the daily update behaves like a **stiff, quasi-steady
 routing relaxation**. This section tests that assumption against the wflow_sbm
 reference runs for two catchments of very different size, because the conclusions
 about receptive field and the multi-hop / global accumulation option depend on
-it. Numbers from [scripts/regime_analysis.jl](../scripts/regime_analysis.jl)
+it. Numbers from [scripts/oneoff/regime_analysis.jl](../scripts/oneoff/regime_analysis.jl)
 (streamed over the 11.6 GB `sava_v081` output in 500-step blocks; validated by
 exactly reproducing the small-catchment figures) and
-[scripts/network_diameter.jl](../scripts/network_diameter.jl).
+[scripts/oneoff/network_diameter.jl](../scripts/oneoff/network_diameter.jl).
 
 ### 6.1 The three diagnostics
 
@@ -493,9 +493,9 @@ constrained and does **not** wash out by re-calibrating $n$ or $S$.
 - Manning, *On the flow of water in open channels and pipes*, Trans. Inst. Civ.
   Eng. Ireland 20 (1891) — the $Q = \tfrac1n w H^{5/3}\sqrt S$ rating used as the
   discharge–depth prior in §7.
-- Regime analysis scripts: [scripts/regime_analysis.jl](../scripts/regime_analysis.jl)
+- Regime analysis scripts: [scripts/oneoff/regime_analysis.jl](../scripts/oneoff/regime_analysis.jl)
   (CFL, quasi-steady ratio, flood-front & wet/dry split — streaming),
-  [scripts/network_diameter.jl](../scripts/network_diameter.jl) (DAG diameter) and
+  [scripts/oneoff/network_diameter.jl](../scripts/oneoff/network_diameter.jl) (DAG diameter) and
   [scripts/rating_curve_test.jl](../scripts/rating_curve_test.jl) (Manning
   rating-curve validity, §7).
 - Companion: [docs/mass_balance_notes.md](mass_balance_notes.md),

@@ -613,7 +613,7 @@ Test whether **discharge overprediction correlates with steep rises in Q**.
 For every active river cell and timestep `t ≥ 2` it pairs the prediction error
 `e = pred − truth` with the *true* normalised ramp rate
 `g = (Qₜ − Qₜ₋₁) / max(Qₜ, eps)` (the same rise metric as
-`scripts/regime_analysis.jl`). Computed in a single streaming pass.
+`scripts/oneoff/regime_analysis.jl`). Computed in a single streaming pass.
 
 Returns a `NamedTuple`:
 - `n`               : number of (cell, timestep) pairs
@@ -757,4 +757,131 @@ function _tiedranks(x::AbstractVector)
         i = j + 1
     end
     return r
+end
+
+# ---------------------------------------------------------------------------
+# Layer-free kinematic-wave mass-balance residual (post-hoc)
+# ---------------------------------------------------------------------------
+
+"""
+    mb_residual_diagnostics(q, h, inwater; edge_src, edge_tgt, wl, dt, θ = 1)
+        -> NamedTuple
+
+Layer-free, post-hoc kinematic-wave storage residual of *any* `(q, h)` trajectory,
+in physical units, independent of whether the model that produced it had a
+mass-balance layer. For every step `k → k+1` and node `i`
+
+    r[i,k] = h[i,k+1] − h[i,k]
+             − dt/wl[i] · ( θ·(U[i,k+1] + iw[i,k+1] − q[i,k+1])
+                          + (1−θ)·(U[i,k]   + iw[i,k]   − q[i,k]) )
+
+with `U[:,k] = Σ_{j→i} q[j,k]` the same-timestep sum of upstream discharge over the
+routing edges (`edge_src[e] → edge_tgt[e]`) and `wl = w·l` the node channel area.
+`θ = 1` is the fully-implicit scheme (the historical default of
+[`ThetaKinematicWave`](@ref)); `r` is the *un-floored* residual, so a hard `h ≥ 0`
+floor shows up as `r > 0` at dry nodes. `r ≈ 0` means the trajectory conserves
+channel volume; applied to wflow's own output it gives the reference level the
+data itself achieves.
+
+Arguments (all physical units, time-aligned: column `k` is the same instant):
+- `q`       : `(n_nodes, T)` discharge [m³/s].
+- `h`       : `(n_nodes, T)` water depth [m].
+- `inwater` : `(n_nodes, T)` lateral inflow [m³/s].
+- `edge_src`, `edge_tgt` : routing edges over node indices (`prep.edge_src/edge_tgt`).
+- `wl`      : length-`n_nodes` channel area `w·l` [m²] (`postscale["river_q"] ./
+              postscale["river_h"]`); non-finite or non-positive entries give `NaN`.
+- `dt`      : timestep [s].
+- `θ`       : implicitness weight in `[0, 1]`.
+
+Returns `(; residual, volume_residual, rms_node, n_valid_node, summary)`:
+- `residual`        : `(n_nodes, T-1)` residual [m].
+- `volume_residual` : length `T-1` network-integrated residual `Σ_i r·wl` [m³].
+- `rms_node`        : per-node RMS residual over time [m] (`NaN` if no finite sample).
+- `n_valid_node`    : per-node count of finite residual samples.
+- `summary`         : scalars — `n` (finite samples), `bias`, `rms`, `median_abs`,
+                      `p95_abs`, `max_abs` [m]; `rms_rel` (`rms` over the RMS of the
+                      observed `Δh`); `volume_residual_rms` [m³] and
+                      `volume_residual_cum` (summed over steps, [m³]).
+"""
+function mb_residual_diagnostics(q::AbstractMatrix, h::AbstractMatrix, inwater::AbstractMatrix;
+                                 edge_src::AbstractVector{<:Integer},
+                                 edge_tgt::AbstractVector{<:Integer},
+                                 wl::AbstractVector,
+                                 dt::Real,
+                                 θ::Real = 1)
+    n, T = size(q)
+    size(h) == (n, T) || throw(ArgumentError("h has size $(size(h)), expected $((n, T))"))
+    size(inwater) == (n, T) ||
+        throw(ArgumentError("inwater has size $(size(inwater)), expected $((n, T))"))
+    length(wl) == n || throw(ArgumentError("wl has length $(length(wl)), expected $n"))
+    length(edge_src) == length(edge_tgt) ||
+        throw(ArgumentError("edge_src and edge_tgt must have equal length"))
+    T >= 2 || throw(ArgumentError("need at least 2 timesteps, got $T"))
+    0 <= θ <= 1 || throw(ArgumentError("θ must lie in [0, 1], got $θ"))
+
+    qf  = Float32.(q)
+    hf  = Float32.(h)
+    iwf = Float32.(inwater)
+    θf  = Float32(θ)
+    dtf = Float32(dt)
+
+    # Same-timestep upstream sum  U = A·q,  A[i,j] = 1 iff j flows into i.
+    A = sparse(Int.(edge_tgt), Int.(edge_src), ones(Float32, length(edge_src)), n, n)
+    net = A * qf .+ iwf .- qf                       # (n, T): U + iw − q at each instant
+
+    # dt / wl, NaN where the channel area is unusable.
+    inv_wl = Float32[(isfinite(w) && w > 0) ? dtf / Float32(w) : NaN32 for w in wl]
+
+    flux_dh = if θf == 1f0
+        net[:, 2:T]
+    else
+        θf .* net[:, 2:T] .+ (1f0 - θf) .* net[:, 1:T-1]
+    end
+    dh_obs   = hf[:, 2:T] .- hf[:, 1:T-1]
+    residual = dh_obs .- inv_wl .* flux_dh          # (n, T-1)
+
+    wlf = Float32[(isfinite(w) && w > 0) ? Float32(w) : NaN32 for w in wl]
+    volume_residual = Float32[
+        let s = 0f0, any_ = false
+            for i in 1:n
+                r = residual[i, k]
+                if isfinite(r) && isfinite(wlf[i])
+                    s += r * wlf[i]; any_ = true
+                end
+            end
+            any_ ? s : NaN32
+        end for k in 1:T-1]
+
+    rms_node = Vector{Float32}(undef, n)
+    n_valid_node = Vector{Int}(undef, n)
+    for i in 1:n
+        vals = filter(isfinite, @view residual[i, :])
+        n_valid_node[i] = length(vals)
+        rms_node[i] = isempty(vals) ? NaN32 : Float32(sqrt(mean(abs2, vals)))
+    end
+
+    fin = filter(isfinite, vec(residual))
+    fin_dh = filter(isfinite, vec(dh_obs))
+    vfin = filter(isfinite, volume_residual)
+    summary = if isempty(fin)
+        (; n = 0, bias = NaN32, rms = NaN32, median_abs = NaN32, p95_abs = NaN32,
+           max_abs = NaN32, rms_rel = NaN32,
+           volume_residual_rms = NaN32, volume_residual_cum = NaN32)
+    else
+        rms = Float32(sqrt(mean(abs2, fin)))
+        rms_dh = isempty(fin_dh) ? NaN32 : Float32(sqrt(mean(abs2, fin_dh)))
+        absr = abs.(fin)
+        (; n = length(fin),
+           bias = Float32(mean(fin)),
+           rms,
+           median_abs = Float32(median(absr)),
+           p95_abs = Float32(quantile(absr, 0.95)),
+           max_abs = Float32(maximum(absr)),
+           rms_rel = (isfinite(rms_dh) && rms_dh > 0f0) ? rms / rms_dh : NaN32,
+           volume_residual_rms = isempty(vfin) ? NaN32 :
+                                 Float32(sqrt(mean(abs2, vfin))),
+           volume_residual_cum = isempty(vfin) ? NaN32 : Float32(sum(vfin)))
+    end
+
+    return (; residual, volume_residual, rms_node, n_valid_node, summary)
 end

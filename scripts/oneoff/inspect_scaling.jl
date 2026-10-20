@@ -1,5 +1,5 @@
 #!/usr/bin/env julia
-# scripts/inspect_scaling.jl
+# scripts/oneoff/inspect_scaling.jl
 #
 # Plot histograms of river_q, river_h, and river_inwater at three stages:
 #   1. Raw (physical units straight from output.nc)
@@ -10,11 +10,11 @@
 #   3. After z-score normalisation of the custom-scaled values
 #
 # Usage:
-#   julia --project=<repo_root> scripts/inspect_scaling.jl \
+#   julia --project=<repo_root> scripts/oneoff/inspect_scaling.jl \
 #       <staticmaps.nc> <output.nc> [output.png]
 
 if length(ARGS) < 2
-    println(stderr, "Usage: julia --project=<repo_root> scripts/inspect_scaling.jl " *
+    println(stderr, "Usage: julia --project=<repo_root> scripts/oneoff/inspect_scaling.jl " *
                     "<staticmaps.nc> <output.nc> [out.png]")
     exit(1)
 end
@@ -27,7 +27,7 @@ isfile(staticmaps_file) || (println(stderr, "Not found: $staticmaps_file"); exit
 isfile(output_file)     || (println(stderr, "Not found: $output_file");     exit(1))
 
 import Pkg
-Pkg.activate(joinpath(@__DIR__, ".."); io = devnull)
+Pkg.activate(joinpath(@__DIR__, "..", ".."); io = devnull)
 
 using NCDatasets
 using Statistics

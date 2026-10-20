@@ -9,7 +9,7 @@
 # Also reports the rectangular-section form (R = wH/(w+2H)) as a secondary check.
 #
 # Streaming (block over time) so it runs on the 11.6 GB sava_v081 output.
-# Usage: julia --project=. scripts/rating_curve_test.jl <catchment_dir> [block]
+# Usage: julia --project=. scripts/oneoff/rating_curve_test.jl <catchment_dir> [block]
 
 using NCDatasets, Statistics, Printf
 

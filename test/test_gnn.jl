@@ -367,3 +367,77 @@ end
     end
 
 end
+
+
+# ── SparseConv + precompute_batched on a real (small) river graph ──────────
+# (migrated from scripts/smoke_test_sparse.jl; GPU part runs only if CUDA works)
+import CUDA, MLUtils
+
+@testset "SparseConv batched / device round-trip on test_model" begin
+    sm  = joinpath(@__DIR__, "..", "test_data", "test_model", "staticmaps.nc")
+    out = joinpath(@__DIR__, "..", "test_data", "test_model", "run_default", "output.nc")
+    graphs, norm_stats, _, postscale, static_arr = build_wflow_graph(sm, out, "river")
+    g0 = graphs[1]
+    n  = g0.num_nodes
+    s, t = edge_index(g0)
+    A         = sparse(vcat(t, collect(1:n)), vcat(s, collect(1:n)),
+                       ones(Float32, length(s) + n), n, n)
+    A_routing = sparse(t, s, ones(Float32, length(s)), n, n)
+
+    ms = ModelSettings(domain = "river")
+    mb = ThetaKinematicWave(
+        postscale["river_q"], postscale["river_h"],
+        postscale["river_h"] ./ postscale["river_q"],
+        Float32.(norm_stats["river_q"].mean),  Float32.(norm_stats["river_q"].std),
+        Float32.(norm_stats["river_h"].mean),  Float32.(norm_stats["river_h"].std),
+        Float32.(norm_stats["river_inwater"].mean), Float32.(norm_stats["river_inwater"].std),
+        Float32(get_timestep(out)), A_routing, nothing, 0, 1.0f0, false, 0.05f0)
+    model = WflowGNN(ms, mb, A)
+
+    B = 4
+    model_pre = precompute_batched(model, B)
+    l1 = model_pre.processor.layers[1]
+    @test l1.A_batched isa SparseMatrixCSC
+    @test size(l1.A_batched) == (B * n, B * n)
+    @test l1.batch_size == B
+    @test model_pre.mass_balance.batch_size == B
+
+    n_state   = size(g0.ndata.state, 1)
+    n_forcing = size(g0.ndata.forcing, 1)
+    n_static  = size(static_arr, 1)
+
+    @testset "CPU batched processor path" begin
+        gb = MLUtils.batch(fill(g0, B))
+        X  = randn(Float32, n_state + n_forcing + n_static, n * B)
+        h  = model_pre.encoder(X)
+        o  = model_pre.processor(gb, h)
+        @test size(o) == (ms.hidden_dim, n * B)
+        @test all(isfinite, o)
+    end
+
+    @testset "CPU single-graph path" begin
+        o = model(g0, g0.ndata.state, g0.ndata.forcing, static_arr, g0.ndata.forcing)
+        @test size(o) == (n_state, n)
+        @test all(isfinite, o)
+    end
+
+    if CUDA.functional()
+        @testset "GPU round-trip and forward" begin
+            m_gpu = Flux.gpu(model_pre)
+            @test m_gpu.processor.layers[1].A_batched isa CUDA.CUSPARSE.CuSparseMatrixCSR
+            m_cpu = Flux.cpu(m_gpu)
+            @test m_cpu.processor.layers[1].A_batched isa SparseMatrixCSC
+
+            gb = Flux.gpu(MLUtils.batch(fill(g0, B)))
+            Xb = Flux.gpu(randn(Float32, n_state + n_forcing + n_static, n * B))
+            o  = m_gpu.processor(gb, m_gpu.encoder(Xb))
+            @test size(o) == (ms.hidden_dim, n * B)
+
+            g_gpu = Flux.gpu(g0)
+            o1 = m_gpu(g_gpu, g_gpu.ndata.state, g_gpu.ndata.forcing,
+                       Flux.gpu(static_arr), g_gpu.ndata.forcing)
+            @test size(o1) == (n_state, n)
+            @test all(isfinite, Array(o1))
+        end
+    end
+end

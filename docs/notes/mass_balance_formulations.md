@@ -16,8 +16,8 @@ decision is taken.
 Source touchpoints for the **implemented** option: [src/gnn.jl](../src/gnn.jl)
 (`MassBalanceLayer`, forward pass, `mb_diagnostics`). Empirical basis: the MB
 on/off sweep (`experiments/sava_small_v081_mb_sweep`) and the regime analysis
-([scripts/regime_analysis.jl](../scripts/regime_analysis.jl),
-[scripts/network_diameter.jl](../scripts/network_diameter.jl)).
+([scripts/oneoff/regime_analysis.jl](../scripts/oneoff/regime_analysis.jl),
+[scripts/oneoff/network_diameter.jl](../scripts/oneoff/network_diameter.jl)).
 
 > **Design constraints assumed throughout** (from the design thread):
 > 1. `(q, h)` must be the network **input** and the network **output**; the

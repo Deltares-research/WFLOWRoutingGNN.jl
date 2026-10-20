@@ -7,7 +7,7 @@
 # Percentiles for r are estimated from a fine log-spaced histogram (exact storage
 # of ~10^8 samples is avoided). Per-cell CFL stats are exact (only ~10^4 cells).
 #
-# Usage: julia --project=. scripts/regime_analysis.jl <catchment_dir> [block]
+# Usage: julia --project=. scripts/oneoff/regime_analysis.jl <catchment_dir> [block]
 
 using NCDatasets, Statistics, Printf
 

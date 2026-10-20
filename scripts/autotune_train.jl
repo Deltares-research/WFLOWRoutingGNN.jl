@@ -18,9 +18,9 @@
 #   4. Writes an updated config (batch_size, lr_start, lr_peak_decay, lr_final)
 #      and launches the full training run on it.
 #
-# All heavy lifting reuses the helpers from lr_range_test.jl (graph building,
-# model/loader construction, range test, batch estimator) and run.jl
-# (parse_run_config, build_gnn_model, run_wflow_gnn_from_toml).
+# All heavy lifting is the `autotune` function of src/tune.jl (batch estimator,
+# range test, gradient-growth probe, config writer); this script is the CLI.
+# training goes through `run_wflow_gnn_from_toml` (src/run.jl).
 #
 # -----------------------------------------------------------------------------
 # Usage:
@@ -58,15 +58,16 @@
 # Example:
 #   julia --project=. scripts/autotune_train.jl experiments/test_sava_v081/config.toml
 # =============================================================================
-
 import Pkg
 Pkg.activate(joinpath(@__DIR__, ".."); io = devnull)
 
-# Reuse every helper (graph build, model/loader, range test, batch estimator).
-# The guard in lr_range_test.jl prevents its `main()` from firing on include.
-include(joinpath(@__DIR__, "lr_range_test.jl"))
-
+using WflowRoutingGNN
+using WflowRoutingGNN: parse_run_config
 using Printf
+
+# Thin CLI over `autotune` (src/tune.jl). CLI parsing helpers (`optget`) are shared
+# with lr_range_test.jl; its guard keeps its `main()` from firing on include.
+include(joinpath(@__DIR__, "lr_range_test.jl"))
 
 # ---------------------------------------------------------------------------
 # CLI parsing (flag-aware: some options are boolean switches, not value pairs)
@@ -101,260 +102,37 @@ function parse_autotune_cli(argv)
     return config, opts
 end
 
-# ---------------------------------------------------------------------------
-# Config editing (text-based, so comments in the original file survive)
-# ---------------------------------------------------------------------------
-
-# Format a value for TOML: ints stay ints, everything else is a Float64 literal.
-_toml_val(x::Integer) = string(x)
-_toml_val(x::Real)    = string(Float64(x))
-
-# Update (or insert) `key = value` pairs inside the [train] table of `text`,
-# preserving all comments elsewhere. `updates` maps key => already-formatted
-# TOML value string. Returns the modified text.
-function update_train_table(text::AbstractString, updates::AbstractDict)
-    lines = collect(split(text, '\n'))
-
-    ti = findfirst(l -> occursin(r"^\s*\[train\]\s*$", l), lines)
-    ti === nothing && error("No [train] table found in config")
-
-    # The [train] table ends at the next table header (e.g. [train.strategy]).
-    te = findnext(l -> occursin(r"^\s*\[", l), lines, ti + 1)
-    te = te === nothing ? length(lines) + 1 : te
-
-    remaining = Set(keys(updates))
-    for i in (ti + 1):(te - 1)
-        for k in collect(remaining)
-            if occursin(Regex("^\\s*" * k * "\\s*="), lines[i])
-                m = match(r"(#.*)$", lines[i])                # preserve trailing comment
-                comment = m === nothing ? "" : "  " * m.captures[1]
-                lines[i] = "$k = $(updates[k])$comment"
-                delete!(remaining, k)
-            end
-        end
-    end
-
-    if !isempty(remaining)
-        ins = te - 1                                          # insert after last table line
-        while ins > ti && strip(lines[ins]) == ""
-            ins -= 1
-        end
-        newlines = String["$k = $(updates[k])" for k in keys(updates) if k in remaining]
-        lines = vcat(lines[1:ins], newlines, lines[(ins + 1):end])
-    end
-
-    return join(lines, '\n')
-end
-
-# ---------------------------------------------------------------------------
-# Tuning driver
-# ---------------------------------------------------------------------------
-
-function autotune(config::AbstractString, opts::AbstractDict)
-    isfile(config) || error("Config not found: $config")
-
-    ds, ms, ts = parse_run_config(config)
-
-    num_steps     = parse(Int,     optget(opts, "num-steps", "100"))
-    lr_min        = parse(Float64, optget(opts, "lr-min", "1e-7"))
-    lr_max        = parse(Float64, optget(opts, "lr-max", "1.0"))
-    mem_fraction  = parse(Float64, optget(opts, "mem-fraction", "0.9"))
-    final_divisor = parse(Float64, optget(opts, "lr-final-divisor", "100"))
-    clip_mult     = parse(Float64, optget(opts, "grad-clip-mult", "5.0"))
-    clip_min      = parse(Float64, optget(opts, "grad-clip-min", "0.1"))
-    clip_max      = parse(Float64, optget(opts, "grad-clip-max", "10.0"))
-    base_seed     = parse(Int,     optget(opts, "seed", "42"))
-    range_inits   = parse(Int,     optget(opts, "range-inits", "3"))
-    probe_steps   = parse(Int,     optget(opts, "probe-steps", "12"))
-    decay_min     = parse(Float64, optget(opts, "peak-decay-min", "0.3"))
-    decay_max     = parse(Float64, optget(opts, "peak-decay-max", "0.9"))
-    candidates    = [parse(Int, strip(s)) for s in
-                     split(optget(opts, "candidates", "1,2,4,8,16,32,64"), ',')]
-
-    deep_horizon = maximum(ts.strategy.steps)
-
-    # The LR range test runs on an UNTRAINED model. At a DEEP horizon an untrained
-    # free-running rollout diverges on its own, so its ramped-LR curve reflects
-    # rollout blow-up rather than the structural stiffness that survives real
-    # training — an unreliable basis for an absolute LR. We therefore measure the
-    # absolute `lr_start` ONLY at horizon 1 (trustworthy, no rollout compounding)
-    # and handle the deep-horizon sensitivity RELATIVELY via `lr_peak_decay`
-    # (gradient-growth probe below) plus the runtime `phase_backoff_factor`.
-    # `--range-horizon N` overrides the range-test horizon with an explicit value.
-    requested_range_h = haskey(opts, "range-horizon") ?
-        parse(Int, opts["range-horizon"]) : 1
-    shallow_horizon = ts.strategy.steps[1]
-    range_horizon = min(requested_range_h, shallow_horizon)
-    if requested_range_h != range_horizon
-        @warn @sprintf("Capping range-horizon %d -> %d to avoid untrained deep-rollout instability in LR range test.",
-                       requested_range_h, range_horizon)
-    end
-
-    @info "Auto-tune config: $config"
-    @info "Device=$(ts.device)  curriculum steps=$(ts.strategy.steps)  deepest horizon=$deep_horizon"
-    @info "Probe seed=$base_seed  range_inits=$range_inits"
-
-    @info "Building graph time series (once)"
-    gd = load_graphs(ds, ms)
-
-    # --- 1. Batch size ------------------------------------------------------
-    local batch_size
-    if haskey(opts, "batch-size")
-        batch_size = parse(Int, opts["batch-size"])
-        @info "Using user-supplied batch_size=$batch_size (skipping probe)."
-    else
-        fit = estimate_batch_size(gd, ds, ms, ts; horizon = deep_horizon,
-                                  candidates = candidates, mem_fraction = mem_fraction)
-        fit > 0 || error("Batch-size probe found no batch that fits (even B=1).")
-        batch_size = gpu_active() ? max(1, fit ÷ 2) : fit
-        @info "Selected batch_size=$batch_size (largest fit=$fit)."
-    end
-
-    # --- 2. Peak learning rate + gradient clip (at horizon 1) --------------
-    local lr_start
-    local grad_clip
-    if haskey(opts, "lr-start")
-        lr_start  = parse(Float64, opts["lr-start"])
-        grad_clip = parse(Float64, optget(opts, "grad-clip", "0.0"))
-        @info "Using user-supplied lr_start=$lr_start (skipping range test)."
-    else
-        @info @sprintf("LR range test: %d steps  lr %.1e -> %.1e  horizon=%d  batch=%d  inits=%d",
-                       num_steps, lr_min, lr_max, range_horizon, batch_size, range_inits)
-
-        recs = NamedTuple[]
-        valid_batches = Int[]
-        for i in 1:max(1, range_inits)
-            seed_i = base_seed + i - 1
-            setup = make_model_loader(gd, ds, ms, ts;
-                                      horizon = range_horizon,
-                                      batch_size = batch_size,
-                                      seed = seed_i,
-                                      shuffle = false)
-            @info "Range test init $i effective loss: loss_type=$(setup.strategy.loss_type) " *
-                "peak_delta=$(setup.strategy.peak_delta) peak_lambda=$(setup.strategy.peak_lambda) " *
-                "peak_gamma=$(setup.strategy.peak_gamma) peak_w_max=$(setup.strategy.peak_w_max)"
-            lrs, losses, gnorms = lr_range_test(setup; num_steps = num_steps,
-                                                lr_min = lr_min, lr_max = lr_max)
-            print_curve(lrs, losses, gnorms)
-            csv = joinpath(dirname(abspath(config)),
-                           @sprintf("lr_range_test_h%d_b%d_s%d_i%d.csv",
-                                    range_horizon, setup.batch_size, seed_i, i))
-            write_csv(csv, lrs, losses, gnorms)
-
-            rec = recommend_lr(lrs, losses, gnorms)
-            push!(recs, rec)
-            push!(valid_batches, setup.batch_size)
-            @info @sprintf(
-                "  init %d (seed=%d): safe=%.3e  steep=%.3e  min/10=%.3e  gnorm_cap=%.3e  gnorm_ref=%.3e  near_floor=%s",
-                i, seed_i, rec.safe, rec.steep, rec.min_over_10, rec.gnorm_cap, rec.gnorm_ref,
-                string(rec.near_lr_floor))
-            free_gpu!()
-        end
-
-        agg = aggregate_lr_recommendations(recs)
-        isfinite(agg.safe) || error("LR range test produced no robust finite recommendation across inits.")
-        agg.safe <= 10.0 * lr_min && error(@sprintf(
-            "Robust LR recommendation %.3e is within one decade of lr_min %.3e; range test likely failed across inits. Re-run with explicit --lr-start or inspect curves.",
-            agg.safe, lr_min))
-        agg.used_fallback && @warn "All conservative safe picks were near-floor; using median min_over_10 fallback across inits."
-
-        lr_start = agg.safe
-        # Clip the global grad norm to a few× the healthy (pre-blow-up) norm so a
-        # transient spike at a curriculum restart is tamed without throttling
-        # normal updates. Clamp to a sane range so spikes cannot inflate the
-        # recommendation into a no-op clip threshold. `--grad-clip X` overrides.
-        grad_clip = isfinite(agg.gnorm_ref) ? clamp(clip_mult * agg.gnorm_ref, clip_min, clip_max) : clip_max
-        haskey(opts, "grad-clip") && (grad_clip = parse(Float64, opts["grad-clip"]))
-        @info @sprintf("Range test (robust median over %d/%d valid inits) → lr_start=%.3e (horizon %d)  grad_clip=%.3e",
-                       agg.n_valid, agg.n_total, lr_start, range_horizon, grad_clip)
-        free_gpu!()
-    end
-
-    # --- 3. Curriculum peak decay (gradient-growth probe) ------------------
-    # BPTT inflates gradients as the rollout horizon grows, so each warm-restart
-    # phase needs a smaller peak LR. We cannot get a trustworthy ABSOLUTE deep-
-    # horizon LR offline (untrained rollout blow-up), but the RELATIVE growth of
-    # the gradient norm from the shallow to the deep phase — measured at a fixed
-    # tiny LR so the rollout is not driven unstable — gives the geometric per-
-    # phase shrink factor. A deeper phase over-reports growth on an untrained
-    # model, so this biases the peak smaller (the safe direction).
-    # `--lr-peak-decay X` overrides the probe.
-    local peak_decay
-    n_phases = length(ts.strategy.steps)
-    if haskey(opts, "lr-peak-decay")
-        peak_decay = parse(Float64, opts["lr-peak-decay"])
-        @info @sprintf("Using user-supplied lr_peak_decay=%.3g (skipping probe).", peak_decay)
-    elseif n_phases <= 1
-        peak_decay = 1.0
-        @info "Single curriculum phase → lr_peak_decay=1.0 (no decay)."
-    else
-        shallow_h = ts.strategy.steps[1]
-        deep_h    = ts.strategy.steps[end]
-        s_shallow = make_model_loader(gd, ds, ms, ts;
-                          horizon = shallow_h,
-                          batch_size = batch_size,
-                          seed = base_seed + 10_000,
-                          shuffle = false)
-        g_shallow = gradient_growth_probe(s_shallow; num_steps = probe_steps)
-        free_gpu!()
-        s_deep = make_model_loader(gd, ds, ms, ts;
-                       horizon = deep_h,
-                       batch_size = batch_size,
-                       seed = base_seed + 20_000,
-                       shuffle = false)
-        g_deep = gradient_growth_probe(s_deep; num_steps = probe_steps)
-        free_gpu!()
-        if isfinite(g_shallow) && isfinite(g_deep) && g_deep > 0 && g_shallow > 0
-            ratio      = min(g_shallow / g_deep, 1.0)   # deep grads are larger → ratio ≤ 1
-            peak_decay = clamp(ratio ^ (1 / (n_phases - 1)), decay_min, decay_max)
-            @info @sprintf(
-                "Gradient-growth probe: g(h=%d)=%.3e  g(h=%d)=%.3e  ratio=%.3g → lr_peak_decay=%.3g",
-                shallow_h, g_shallow, deep_h, g_deep, ratio, peak_decay)
-        else
-            peak_decay = decay_min
-            @warn @sprintf("Gradient-growth probe non-finite (g_shallow=%.3e g_deep=%.3e); using lr_peak_decay=%.3g",
-                           g_shallow, g_deep, peak_decay)
-        end
-    end
-
-    # --- 4. Remaining curriculum knobs -------------------------------------
-    lr_final = lr_start / final_divisor
-    @info @sprintf("Curriculum knobs: lr_peak_decay=%.3g  lr_final=lr_start/%.3g=%.3e",
-                   peak_decay, final_divisor, lr_final)
-
-    updates = Dict(
-        "batch_size"    => _toml_val(batch_size),
-        "lr_start"      => _toml_val(lr_start),
-        "lr_final"      => _toml_val(lr_final),
-        "lr_peak_decay" => _toml_val(peak_decay),
-        "grad_clip"     => _toml_val(grad_clip),
+# Map CLI options onto `autotune` keyword arguments.
+function autotune_kwargs(opts::AbstractDict)
+    kw = Dict{Symbol,Any}(
+        :num_steps     => parse(Int,     optget(opts, "num-steps", "100")),
+        :lr_min        => parse(Float64, optget(opts, "lr-min", "1e-7")),
+        :lr_max        => parse(Float64, optget(opts, "lr-max", "1.0")),
+        :mem_fraction  => parse(Float64, optget(opts, "mem-fraction", "0.9")),
+        :final_divisor => parse(Float64, optget(opts, "lr-final-divisor", "100")),
+        :clip_mult     => parse(Float64, optget(opts, "grad-clip-mult", "5.0")),
+        :clip_min      => parse(Float64, optget(opts, "grad-clip-min", "0.1")),
+        :clip_max      => parse(Float64, optget(opts, "grad-clip-max", "10.0")),
+        :seed          => parse(Int,     optget(opts, "seed", "42")),
+        :range_inits   => parse(Int,     optget(opts, "range-inits", "3")),
+        :probe_steps   => parse(Int,     optget(opts, "probe-steps", "12")),
+        :decay_min     => parse(Float64, optget(opts, "peak-decay-min", "0.3")),
+        :decay_max     => parse(Float64, optget(opts, "peak-decay-max", "0.9")),
+        :candidates    => [parse(Int, strip(s)) for s in
+                           split(optget(opts, "candidates", "1,2,4,8,16,32,64"), ',')],
+        :in_place      => haskey(opts, "in-place"),
     )
-
-    # --- 5. Write the tuned config -----------------------------------------
-    text = read(config, String)
-    tuned_text = update_train_table(text, updates)
-
-    if haskey(opts, "in-place")
-        cp(config, config * ".bak"; force = true)
-        write(config, tuned_text)
-        @info "Updated config in place (backup: $(config).bak)"
-        return config
-    else
-        base, ext = splitext(config)
-        out = base * "_autotuned" * ext
-        write(out, tuned_text)
-        @info "Wrote tuned config to $out"
-        return out
-    end
+    haskey(opts, "range-horizon")  && (kw[:range_horizon]  = parse(Int,     opts["range-horizon"]))
+    haskey(opts, "batch-size")     && (kw[:batch_size]     = parse(Int,     opts["batch-size"]))
+    haskey(opts, "lr-start")       && (kw[:lr_start]       = parse(Float64, opts["lr-start"]))
+    haskey(opts, "grad-clip")      && (kw[:grad_clip]      = parse(Float64, opts["grad-clip"]))
+    haskey(opts, "lr-peak-decay")  && (kw[:lr_peak_decay]  = parse(Float64, opts["lr-peak-decay"]))
+    return kw
 end
-
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
 
 function autotune_main()
     config, opts = parse_autotune_cli(ARGS)
-    tuned_config = autotune(config, opts)
+    tuned_config = autotune(config; autotune_kwargs(opts)...)
 
     if haskey(opts, "dry-run")
         @info "Dry run: skipping training. Train with:"

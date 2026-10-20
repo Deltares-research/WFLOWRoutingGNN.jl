@@ -541,13 +541,16 @@ Returns a NamedTuple with matrices of shape `(n_nodes, T)`:
 Also returns per-node floor diagnostics:
 - `frac_h_raw_neg_node` [-]: fraction of valid timesteps with `h_raw < 0` per node
 - `n_valid_h_raw_node`   [-]: number of finite `h_raw` samples per node
+
+Returns `nothing` when the model has no mass-balance layer (`NoMassBalance`).
 """
 function rollout_mb_diagnostics(model::WflowGNN, split, static::AbstractMatrix{Float32})
     return _rollout_mb_diagnostics(model.mass_balance, model, split, static)
 end
 
-_rollout_mb_diagnostics(::NoMassBalance, model, split, static) =
-    throw(ArgumentError("rollout_mb_diagnostics requires a mass-balance formulation (got NoMassBalance)"))
+# No layer, nothing to record: the layer-free residual (`mb_residual_diagnostics`)
+# covers such models.
+_rollout_mb_diagnostics(::NoMassBalance, model, split, static) = nothing
 
 function _rollout_mb_diagnostics(mb::ThetaKinematicWave, model, split, static)
 

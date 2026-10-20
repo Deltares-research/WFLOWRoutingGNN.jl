@@ -145,49 +145,113 @@ testable and reversible); after each, tests must stay green and a small golden r
 
 ## R5. Layer-free, post-hoc mass-balance residual diagnostic
 
-- [ ] Add `mb_residual_diagnostics` that recomputes the kinematic-wave residual
+- [x] Add `mb_residual_diagnostics` that recomputes the kinematic-wave residual
       `r(t) = h[t+1] − h[t] − dt/(w·l)·(ΣQ_up + Q_iw − Q_out)` **from predicted
       q/h fields** (NetCDF) + `staticmaps` constants + `ldd_to_graph` routing —
       works for **any** model regardless of whether an MB layer was present.
-- [ ] Dispatch the existing layer-internal diagnostics (`rollout_mb_diagnostics`:
+- [x] Dispatch the existing layer-internal diagnostics (`rollout_mb_diagnostics`:
       net_flux, h_raw-before-floor, floor fraction, stiffness) on the formulation
       type: real method for MB formulations, no-op for `NoMassBalance`.
-- [ ] Stage 4 always runs the residual diagnostic; runs the layer-internal one
+- [x] Stage 4 always runs the residual diagnostic; runs the layer-internal one
       only for MB models. `metrics.toml` MB fields degrade gracefully (residual
       for all; floor/stiffness only for MB).
 - Touch: `src/massbalance.jl` (or `src/analysis.jl`), `src/postprocess.jl`,
       `src/run.jl`.
+- [x] R5 validation (2026-10-20): `mb_residual_diagnostics` in
+      [src/postprocess.jl](../src/postprocess.jl) (pure function on physical
+      q/h/inwater, `θ`-weighted, un-floored), `layer_mb_analysis` dispatch in
+      [src/analysis.jl](../src/analysis.jl) (`NoMassBalance` → `nothing`;
+      `rollout_mb_diagnostics` also returns `nothing` instead of throwing).
+      Additive artifacts: `metrics/mb_residual.csv`, `metrics/mb_residual_by_node.csv`,
+      `[mass_balance_residual]` (`pred` / `reference`) in `metrics.toml`.
+      Tests: synthetic chain recursion for θ ∈ {1, ½, 0}, perturbation
+      response, NaN `wl`, `analyze_run` without a model, MB model (residual of the
+      predicted fields equals `pred_h − h_raw` of the layer), `mb_formulation =
+      "none"` (residual only). Full suite 4673/4673. Golden run (`sava_small_v081`,
+      seed 42, 5 epochs, CPU and GPU) vs. `HEAD` (R4): all 46 existing artifacts
+      identical except timing fields/`run_name`; new: the two CSVs and the
+      `metrics.toml` section.
+      Findings: (1) the lateral inflow must be un-scaled by
+      `postscale["river_inwater"]` (upstream area) to physical m³/s; on the small
+      test model wflow's own residual is then ~1e-5 m (θ = 1), confirming the
+      scheme. (2) `ThetaKinematicWave` forms `inwater_phys = forcing·σ + μ`
+      **without** that area factor (src/massbalance.jl, forward and
+      `mb_diagnostics`), so the layer's lateral inflow is off by the per-node
+      upstream area; its `h_raw` / volume budget are affected. Not changed here
+      (no-behaviour-change refactor); to be checked. (3) on `sava_small_v081` the
+      wflow reference residual is not ~0 (rms 0.033 m, max 2.7 m) — to be
+      investigated (floored/dry nodes, lakes, or a different inflow definition).
+
+## R5b. Investigate the lateral-inflow (inwater) scaling in `ThetaKinematicWave`
+
+Behaviour-changing, so kept out of the restructuring steps; do it as a separate,
+A/B-tested change (retrain needed, results will shift).
+
+- [ ] Confirm the discrepancy: `inwater_phys = forcing·σ_iw + μ_iw` in
+      [src/massbalance.jl](../src/massbalance.jl) (forward, `mb_diagnostics`)
+      lacks the `postscale["river_inwater"]` (upstream area `a`) factor, whereas
+      preprocessing divides inwater by `a` before z-scoring. Check on the layer's
+      own `h_raw` vs. wflow `river_h` using true q and physical inwater (expect
+      residual ~1e-5 m only with the factor; ~9 m without).
+- [ ] Decide where the factor lives: pass per-node `a` (or `wl`/`postscale`) into
+      the layer at construction (`build_massbalance`), so `ThetaKinematicWave`
+      un-scales to physical m³/s itself; keep `_val_inwater_physical` in
+      [src/analysis.jl](../src/analysis.jl) consistent.
+- [ ] Check the effect on the learned model: does the layer's lateral inflow now
+      matter (it was effectively ~0 before)? Compare val metrics, the volume
+      budget and floor fraction before/after; guard behind a toggle.
+- [ ] Explain the non-zero residual of the wflow reference on `sava_small_v081`
+      (rms 0.033 m, max 2.7 m; `[mass_balance_residual.reference]`): dry/floored
+      nodes, lakes/reservoirs, or a different inflow definition (e.g. `inwater`
+      vs. `inwater + runoff`); inspect `metrics/mb_residual_by_node.csv`.
+- Touch: `src/massbalance.jl`, `src/analysis.jl`, `src/preprocess.jl` (only if
+      the scale must be exposed), tests in `test/test_pipeline.jl`.
 
 ## R6. Consolidate `scripts/` into `src/` + thin CLIs
 
-- [ ] Promote post-hoc helpers `resolve_staticmaps` + `load_regrid_nc` (inline in
-      [scripts/spatial_eval.jl](../scripts/spatial_eval.jl)) into the analysis
-      layer; stage 4, `spatial_eval`, and `subcatch_error_attribution` share one
-      implementation.
-- [ ] Promote the layer-free MB routing/residual core from
-      [scripts/check_mass_balance.jl](../scripts/check_mass_balance.jl)
-      (`compute_upstream_q`, 3-scheme comparison) and
-      [scripts/check_mass_balance_details.jl](../scripts/check_mass_balance_details.jl)
-      (`upstream_sum`, 9 consistency checks) into `src/` — this is the prototype
-      for R5's `mb_residual_diagnostics`; have both scripts call the promoted core.
-- [ ] Promote the LR/batch tuning toolkit (`lr_range_test`, `gradient_growth_probe`,
-      `recommend_lr`, `aggregate_lr_recommendations`, `estimate_batch_size`,
-      `autotune`) from [scripts/lr_range_test.jl](../scripts/lr_range_test.jl) +
-      [scripts/autotune_train.jl](../scripts/autotune_train.jl) into a new
-      `src/tune.jl` public API; scripts become thin CLIs.
-- [ ] Retarget thin drivers to the new stage API: `train.jl`→`train_run`,
-      `hparsearch.jl`, `spatial_eval.jl`+`regen_mb_diagnostics.jl`→"stage 4 only"
-      (`scripts/pipeline.jl analyze`).
-- [ ] Update the benchmark/profiler harnesses (`benchmark_message_passing`,
+- [x] Promote post-hoc helpers `resolve_staticmaps` + `load_regrid_nc` into the
+      analysis layer ([src/analysis.jl](../src/analysis.jl),
+      [src/postprocess.jl](../src/postprocess.jl)); stage 4 and `spatial_eval_run`
+      share one implementation. (`subcatch_error_attribution` does not exist in
+      the tree; nothing to share.)
+- [x] Promote the layer-free MB routing/residual core of `check_mass_balance*.jl`
+      into the new [src/consistency.jl](../src/consistency.jl) (`upstream_sum`,
+      `MB_SCHEMES`/`mb_scheme_residuals`, `graph_topology_checks`,
+      `river_mask_consistency`, `wflow_output_consistency`); both scripts are thin.
+- [x] Promote the LR/batch tuning toolkit into [src/tune.jl](../src/tune.jl)
+      (`lr_range_test`, `gradient_growth_probe`, `recommend_lr`,
+      `aggregate_lr_recommendations`, `estimate_batch_size`, `autotune`, ...);
+      `lr_range_test.jl` and `autotune_train.jl` are thin CLIs.
+- [x] Retarget thin drivers: `train.jl` → `run_wflow_gnn_from_toml`,
+      `hparsearch.jl` → `hpar_search`, `spatial_eval.jl` → `spatial_eval_run`,
+      `regen_mb_diagnostics.jl` → `regen_mb_diagnostics` (stage 4 only on an
+      existing run dir). The `scripts/pipeline.jl <stage>` entry point is R7.
+- [x] Benchmark/profiler harnesses (`benchmark_message_passing`,
       `benchmark_rollout`, `benchmark_inference_vs_train`, `diag_overhead`,
-      `profile_rollout`, `typecheck_forward`) to the new module/stage API so they
-      keep compiling — they are the §4/§5–7 perf acceptance gate.
-- [ ] Migrate `smoke_test_sparse.jl` into `test/test_gnn.jl` (exercises the sparse
-      batching paths the perf optimisations depend on); factor `plot_ldd.jl`'s
-      network drawing into `src/plot.jl` (reused by the timeseries network inset);
-      archive remaining one-offs under `scripts/oneoff/`.
-- Touch: `src/analysis.jl`/`src/postprocess.jl`, `src/massbalance.jl`,
-      `src/tune.jl` (new), `src/plot.jl`, `scripts/*`, `test/test_gnn.jl`.
+      `profile_rollout`, `typecheck_forward`) parse and every imported name
+      resolves against the module; `benchmark_rollout` run end to end (CPU+GPU,
+      single+ensemble) on a freshly trained run.
+- [x] `smoke_test_sparse.jl` migrated into `test/test_gnn.jl` (CPU batched /
+      single-graph paths always, GPU round trip under `CUDA.functional()`) and
+      deleted; `plot_ldd` promoted to [src/plot.jl](../src/plot.jl) (`scripts/plot_ldd.jl`
+      is a thin CLI); `inspect_scaling`, `network_diameter`, `rating_curve_test`,
+      `regime_analysis` archived under `scripts/oneoff/`.
+- Touch: `src/analysis.jl`/`src/postprocess.jl`, `src/consistency.jl` (new),
+      `src/tune.jl` (new), `src/plot.jl`, `scripts/*`, `test/test_gnn.jl`,
+      `test/test_consistency.jl` (new), `test/test_analysis.jl` (new).
+- [x] R6 validation (2026-10-20): new tests `test_lr_autotune` (52),
+      `test_consistency` (66), `test_analysis` + `test_gnn` (130); old vs. new
+      `check_mass_balance*.jl` output identical on `test_data/test_model`. Golden
+      run (`sava_small_v081`, seed 42, 5 epochs, CPU and GPU) vs. `HEAD` (R5): all
+      46 common artifacts identical except timing fields/`run_name`; nothing
+      new. No hot path touched.
+      Notes: `spatial_eval.jl` now takes a run dir (`<run_dir> [split]`) and
+      `regen_mb_diagnostics.jl` needs `prep/preprocessed.jld2` (re-run
+      `preprocess_run` for pre-R4 runs). `load_regrid_nc`/`load_regrid_times`
+      are exported. Old flat-layout checkpoints from before the `augment_mb`
+      field (e.g. `experiments/sava_small_v081_increment/model.jld2`) no longer
+      load via `benchmark_rollout` (`loadmodel!` structure mismatch); not caused
+      by R6.
 
 ## R7. Staged CLI entry point
 

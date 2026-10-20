@@ -1109,3 +1109,47 @@ function plot_overprediction_vs_ramp(ramp; path = nothing, csv = true, csv_path 
 
     return fig
 end
+
+
+# Compass names of the PCRaster LDD codes labelled by `plot_ldd`.
+const _LDD_NAMES = Dict(1 => "SW", 2 => "S", 3 => "SE", 4 => "W", 5 => "pit",
+                        6 => "E",  7 => "NW", 8 => "N", 9 => "NE")
+
+"""
+    plot_ldd(staticmaps_file; path = nothing) -> Figure
+
+Plot the local drainage direction (PCRaster/wflow code 1-9; 5 = pit/outlet) of every
+cell inside `river_mask`, read from `staticmaps_file`. The axes are the first two
+dimensions of `river_mask` (lon, lat). Saves to `path` when given. Handy for
+checking the routing graph that [`ldd_to_graph`](@ref) builds.
+"""
+function plot_ldd(staticmaps_file::AbstractString; path = nothing)
+    ldd_grid, mask_grid, lons, lats = NCDataset(staticmaps_file, "r") do ds
+        dim_names = dimnames(ds["river_mask"])
+        (ds["local_drain_direction"][:, :], ds["river_mask"][:, :],
+         Float64.(ds[dim_names[1]][:]), Float64.(ds[dim_names[2]][:]))
+    end
+
+    # NaN outside river_mask, LDD code inside
+    plot_grid = fill(NaN32, size(ldd_grid))
+    for idx in eachindex(ldd_grid)
+        m, l = mask_grid[idx], ldd_grid[idx]
+        if !ismissing(m) && m != 0 && !ismissing(l)
+            plot_grid[idx] = Float32(l)
+        end
+    end
+
+    ldd_colors = [Makie.ColorSchemes.colorschemes[:tableau_10].colors[i] for i in 1:9]
+    fig = Figure(size = (900, 700))
+    ax  = Axis(fig[1, 1];
+               title  = "Local Drainage Direction – river cells only",
+               xlabel = "Longitude (°E)", ylabel = "Latitude (°N)", aspect = DataAspect())
+    hm = heatmap!(ax, lons, lats, plot_grid;
+                  colormap = ldd_colors, colorrange = (0.5, 9.5),
+                  lowclip = :transparent, nan_color = :transparent)
+    Colorbar(fig[1, 2], hm; label = "LDD value",
+             ticks = (1:9, [string(v, " (", _LDD_NAMES[v], ")") for v in 1:9]), ticksize = 6)
+
+    isnothing(path) || save(path, fig; px_per_unit = 2)
+    return fig
+end

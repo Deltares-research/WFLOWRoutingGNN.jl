@@ -40,10 +40,14 @@ export PrepBundle, PREP_SCHEMA_VERSION, preprocess_run, train_run, save_prep, lo
        infer_run, load_model, load_train_summary
 
 include("analysis.jl")
-export analyze_run
-
+export analyze_run, resolve_staticmaps, spatial_eval_run, regen_mb_diagnostics
 include("run.jl")
 export run_wflow_gnn, run_wflow_gnn_from_toml, parse_run_config, build_gnn_model
+
+include("tune.jl")
+export load_tuning_data, make_model_loader, probe_training_strategy,
+       lr_range_test, gradient_growth_probe, recommend_lr, aggregate_lr_recommendations,
+       estimate_batch_size, print_lr_curve, write_lr_curve_csv, update_train_table, autotune
 
 include("hparsearch.jl")
 export HParSearchSettings, save_hpar_search_settings, load_hpar_search_settings, hpar_search
@@ -51,7 +55,7 @@ export HParSearchSettings, save_hpar_search_settings, load_hpar_search_settings,
 include("plot.jl")
 export plot_losses, plot_validation_movie, plot_timeseries, plot_downstream_timeseries,
        plot_mb_diagnostics, plot_amplification, plot_spatial_metrics, plot_overprediction_vs_ramp,
-    plot_fixed_horizon, plot_volume_budget
+    plot_fixed_horizon, plot_volume_budget, plot_ldd
 
 include("rollout.jl")
 export rollout, evaluate_trajectory, rollout_mb_diagnostics, rollout_ensemble,
@@ -59,11 +63,17 @@ export rollout, evaluate_trajectory, rollout_mb_diagnostics, rollout_ensemble,
     volume_budget_diagnostics
 
 include("postprocess.jl")
-export regrid, write_regrid_to_netcdf, gather_nodes,
+export regrid, write_regrid_to_netcdf, load_regrid_nc, load_regrid_times,
+       gather_nodes, mb_residual_diagnostics,
        spatial_error_metrics, write_spatial_metrics_to_netcdf, overprediction_vs_ramp,
        spatial_metric_summary, write_spatial_metrics_to_csv,
        kge_metrics, mae_metric, pbias, event_peak_metrics, event_detection_metrics,
        river_q_performance_metrics,
        SPATIAL_METRIC_NAMES, RAMP_LABELS, RAMP_EDGES
+
+include("consistency.jl")
+export river_layout, read_river_series, upstream_sum, MB_SCHEMES, mb_scheme_residuals,
+       residual_summary, graph_topology_checks, river_mask_consistency,
+       WFLOW_CONSISTENCY_VARS, wflow_output_consistency
 
 end # module WflowRoutingGNN

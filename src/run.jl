@@ -359,7 +359,8 @@ end
 
 """
     write_run_metrics_toml(path, losses, ts, run_meta, spatial_summary, ramp,
-                           river_q_perf, volume_budget, mb_floor, mb_stiffness) -> path
+                           river_q_perf, volume_budget, mb_floor, mb_stiffness,
+                           mb_residual) -> path
 
 Write a compact scalar summary of a completed run to `path` as TOML: the final
 (and best) values of the per-epoch training history, run metadata (`run_meta`),
@@ -369,7 +370,9 @@ metrics (`river_q_perf` from [`river_q_performance_metrics`](@ref)) and, when
 available, the system volume-budget diagnostics (`volume_budget` from
 [`volume_budget_diagnostics`](@ref)); the mass-balance floor diagnostics summary
 (`mb_floor`, derived from validation `h_raw`); the per-node MB stiffness summary
-(`mb_stiffness`, from `θ·dt·σ_q/σ_h`); and, when `losses.loss_type == :huber`, the Tier-1 peak-loss diagnostics from
+(`mb_stiffness`, from `θ·dt·σ_q/σ_h`); the layer-free kinematic-wave residual
+summary of the predicted and wflow trajectories (`mb_residual`, from
+[`mb_residual_diagnostics`](@ref); written for every model); and, when `losses.loss_type == :huber`, the Tier-1 peak-loss diagnostics from
 [`peak_epoch_diagnostics`](@ref). Non-finite values are omitted so the file
 stays a valid, parser-friendly TOML of plain numbers — a token-cheap single-file
 entry point for downstream evaluation agents.
@@ -377,7 +380,8 @@ entry point for downstream evaluation agents.
 function write_run_metrics_toml(path::AbstractString, losses, ts::TrainSettings,
                                 run_meta, spatial_summary, ramp,
                                 river_q_perf = nothing, volume_budget = nothing,
-                                mb_floor = nothing, mb_stiffness = nothing)
+                                mb_floor = nothing, mb_stiffness = nothing,
+                                mb_residual = nothing)
     function putf!(d, k, v)
         v === nothing && return
         if v isa Integer
@@ -514,6 +518,20 @@ function write_run_metrics_toml(path::AbstractString, losses, ts::TrainSettings,
         putf!(mbs_t, "gain_max", mb_stiffness.gain_max)
         putf!(mbs_t, "gain_max_idx", mb_stiffness.gain_max_idx)
         root["mass_balance_stiffness"] = mbs_t
+    end
+
+    if mb_residual !== nothing
+        mbr_t = Dict{String, Any}()
+        putf!(mbr_t, "theta", mb_residual.theta)
+        for (key, s) in (("pred", mb_residual.pred), ("reference", mb_residual.reference))
+            st = Dict{String, Any}()
+            for f in (:n, :bias, :rms, :median_abs, :p95_abs, :max_abs, :rms_rel,
+                      :volume_residual_rms, :volume_residual_cum)
+                putf!(st, string(f), getproperty(s, f))
+            end
+            mbr_t[key] = st
+        end
+        root["mass_balance_residual"] = mbr_t
     end
 
     if any(isfinite, get(losses, :peak_c_peak, Float32[]))

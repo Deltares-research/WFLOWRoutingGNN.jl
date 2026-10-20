@@ -227,3 +227,124 @@ end
         @test_throws ArgumentError analyze_run(prep, ms, ts; dirs = empty)
     end
 end
+
+@testset "mb_residual_diagnostics (layer-free)" begin
+    # Chain 1 → 2 → 3 with lateral inflow; h built exactly by the θ recursion.
+    n, T = 3, 6
+    src, tgt = [1, 2], [2, 3]
+    wl = Float32[100, 200, 400]
+    dt = 10f0
+    q  = Float32[1 2 3 4 3 2; 2 3 5 6 5 4; 3 4 6 9 8 6]
+    iw = Float32[0.5 0.5 1 1 0.5 0.5; 0 0.2 0.2 0.4 0.4 0; 0.1 0.1 0.1 0.3 0.3 0.1]
+    A  = [0 0 0; 1 0 0; 0 1 0]
+    net = Float32.(A) * q .+ iw .- q
+    for θ in (1f0, 0.5f0, 0f0)
+        h = zeros(Float32, n, T)
+        h[:, 1] .= 1f0
+        for k in 2:T
+            h[:, k] = h[:, k-1] .+ dt ./ wl .* (θ .* net[:, k] .+ (1f0 - θ) .* net[:, k-1])
+        end
+        r = mb_residual_diagnostics(q, h, iw; edge_src = src, edge_tgt = tgt, wl, dt, θ)
+        @test size(r.residual) == (n, T - 1)
+        @test maximum(abs, r.residual) < 1f-5
+        @test r.summary.n == n * (T - 1)
+        @test all(abs.(r.volume_residual) .< 1f-3)
+
+        # A perturbation of h[2, 3] appears as -δ at step 2 and +δ at step 3.
+        hp = copy(h); hp[2, 3] += 0.25f0
+        rp = mb_residual_diagnostics(q, hp, iw; edge_src = src, edge_tgt = tgt, wl, dt, θ)
+        @test rp.residual[2, 2] ≈ 0.25f0 atol = 1f-5
+        @test rp.residual[2, 3] ≈ -0.25f0 atol = 1f-5
+        @test rp.residual[[1, 3], :] ≈ r.residual[[1, 3], :] atol = 1f-5
+        @test rp.volume_residual[2] ≈ 0.25f0 * wl[2] atol = 1f-3
+        @test rp.rms_node[2] > rp.rms_node[1]
+    end
+
+    # Invalid channel area -> NaN residual for that node, counted as not valid.
+    h0 = ones(Float32, n, T)
+    r = mb_residual_diagnostics(q, h0, iw; edge_src = src, edge_tgt = tgt,
+                                wl = Float32[100, NaN, 0], dt, θ = 1f0)
+    @test all(isnan, r.residual[2:3, :])
+    @test r.n_valid_node == [T - 1, 0, 0]
+    @test isnan(r.rms_node[2])
+
+    @test_throws ArgumentError mb_residual_diagnostics(q, h0[:, 1:3], iw;
+        edge_src = src, edge_tgt = tgt, wl, dt)
+    @test_throws ArgumentError mb_residual_diagnostics(q, h0, iw;
+        edge_src = src, edge_tgt = tgt, wl, dt, θ = 1.5f0)
+    @test_throws ArgumentError mb_residual_diagnostics(q[:, 1:1], h0[:, 1:1], iw[:, 1:1];
+        edge_src = src, edge_tgt = tgt, wl, dt)
+end
+
+@testset "analyze_run: residual for every model, layer diagnostics by formulation" begin
+    mktempdir() do tmp
+        ds, ms, ts = pl_settings(tmp)
+        run_dir = joinpath(tmp, "pl")
+        prep = preprocess_run(ds, ms, ts)
+        tr   = train_run(prep, ds, ms, ts)
+        inf  = infer_run(tr.model, prep, ms, ts; dirs = (; output = joinpath(run_dir, "output")))
+        dirs = (; output = joinpath(run_dir, "output"), plots = joinpath(run_dir, "plots"),
+                  metrics = joinpath(run_dir, "metrics"), model = joinpath(run_dir, "model"))
+        vars = WflowRoutingGNN.DOMAIN_VARS[ms.domain]["state"]
+        qi, hi = findfirst(==("river_q"), vars), findfirst(==("river_h"), vars)
+
+        # No model supplied: the residual is still produced, layer diagnostics are not.
+        res = analyze_run(prep, ms, ts; dirs, infer = inf)
+        @test res.mb_residual !== nothing
+        @test res.mb_floor === nothing && res.mb_stiffness === nothing
+        @test isfile(joinpath(dirs.metrics, "mb_residual.csv"))
+        @test isfile(joinpath(dirs.metrics, "mb_residual_by_node.csv"))
+        @test !isfile(joinpath(dirs.metrics, "mb_floor_fraction_by_node.csv"))
+        toml = TOML.parsefile(joinpath(dirs.metrics, "metrics.toml"))
+        @test haskey(toml, "mass_balance_residual")
+        @test haskey(toml["mass_balance_residual"]["pred"], "rms")
+        @test haskey(toml["mass_balance_residual"]["reference"], "rms")
+        @test !haskey(toml, "mass_balance_floor")
+        rows = readlines(joinpath(dirs.metrics, "mb_residual.csv"))
+        @test length(rows) == inf.val_n_timesteps          # header + (T-1) steps
+        @test length(readlines(joinpath(dirs.metrics, "mb_residual_by_node.csv"))) ==
+              prep.n_nodes + 1
+
+        # With the MB model: the layer-free residual of the predicted fields agrees
+        # with the layer-internal h_raw (pred_h − h_raw is the floor correction only).
+        res_m = analyze_run(prep, ms, ts; dirs, model = tr.model, infer = inf)
+        @test res_m.mb_floor !== nothing && res_m.volume_budget !== nothing
+        @test res_m.mb_residual.pred.rms ≈ res.mb_residual.pred.rms
+        toml_m = TOML.parsefile(joinpath(dirs.metrics, "metrics.toml"))
+        @test haskey(toml_m, "mass_balance_floor")
+        @test haskey(toml_m, "mass_balance_stiffness")
+        @test haskey(toml_m, "volume_budget")
+
+        diags = rollout_mb_diagnostics(tr.model, prep.dataset.val, prep.static_arr)
+        p_states = gather_nodes(WflowRoutingGNN.load_regrid_nc(
+            joinpath(dirs.output, "val_pred.nc"), vars), prep.grid, ms.domain)
+        # Feed the layer's own lateral-inflow series so only the equation is compared.
+        iw = diags.inwater
+        wl = prep.postscale["river_q"] ./ prep.postscale["river_h"]
+        r = mb_residual_diagnostics(p_states[qi, :, :], p_states[hi, :, :], iw;
+                                    edge_src = prep.edge_src, edge_tgt = prep.edge_tgt,
+                                    wl, dt = prep.dt, θ = ms.mb_theta)
+        # Frame t of the diagnostics is frame t of the NetCDF; the residual of step
+        # t-1 -> t equals h[t] - h_raw[t] up to the roundoff of the two evaluation orders.
+        expected = diags.pred_h[:, 2:end] .- diags.h_raw[:, 2:end]
+        ok = isfinite.(expected) .& isfinite.(r.residual)
+        scale = max(1f0, maximum(abs, diags.pred_h[isfinite.(diags.pred_h)]))
+        @test maximum(abs.(r.residual[ok] .- expected[ok])) < 1f-3 * scale
+
+        # A model without a mass-balance layer: residual only.
+        ms_none = ModelSettings(domain = "river", hidden_dim = 8, nlayers = 1,
+                                mb_formulation = "none")
+        tr_none = train_run(prep, ds, ms_none, ts)
+        @test !WflowRoutingGNN.has_mass_balance(tr_none.model.mass_balance)
+        @test rollout_mb_diagnostics(tr_none.model, prep.dataset.val, prep.static_arr) === nothing
+        inf_n = infer_run(tr_none.model, prep, ms_none, ts; dirs = (; output = dirs.output))
+        res_n = analyze_run(prep, ms_none, ts; dirs, model = tr_none.model, infer = inf_n)
+        @test res_n.mb_residual !== nothing && isfinite(res_n.mb_residual.pred.rms)
+        @test res_n.mb_floor === nothing && res_n.mb_stiffness === nothing &&
+              res_n.volume_budget === nothing
+        toml_n = TOML.parsefile(joinpath(dirs.metrics, "metrics.toml"))
+        @test haskey(toml_n, "mass_balance_residual")
+        @test !haskey(toml_n, "mass_balance_floor")
+        @test !haskey(toml_n, "volume_budget")
+    end
+end

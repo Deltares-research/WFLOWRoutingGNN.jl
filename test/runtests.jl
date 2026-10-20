@@ -7,6 +7,8 @@ using WflowRoutingGNN
     include("test_hparsearch.jl")
     include("test_strategy.jl")
     include("test_lr_autotune.jl")
+    include("test_consistency.jl")
     include("test_training.jl")
     include("test_pipeline.jl")
+    include("test_analysis.jl")
 end
