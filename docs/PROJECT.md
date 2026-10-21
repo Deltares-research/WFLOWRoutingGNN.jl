@@ -78,6 +78,45 @@ lives in [DECISIONS.md](DECISIONS.md) and the research notes under `docs/notes/`
   **not** used as a hard constraint (daily-averaging a nonlinear law breaks under
   unsteady / overbank flow).
 
+## Evaluation Metrics
+
+Plots are written to a run's `plots/` directory (metrics CSV/NetCDF alongside in
+`metrics/`/`output/`). The **train** stage writes training-curve diagnostics; the
+**analyze** stage writes rollout/skill diagnostics.
+
+Train stage (`pipeline.jl`):
+
+- `losses.png` — training vs validation loss curves (1-step and rollout, with grad-norm / LR / curriculum-step overlays).
+- `amplification.png` — the per-epoch `q→h` error amplification factor (mass-balance runs only), tracking how `q` error propagates into `h`.
+- `fixed_horizon.png` — per-epoch fixed-horizon validation discharge RMSE and peak ratio (overall and high-flow), a stable rollout-skill signal across epochs.
+
+Analyze stage (`analysis.jl`):
+
+- `validation.mp4` — animated predicted-vs-true gridded `river_q`/`river_h` fields over the split (and `validation_daterange.mp4` for the optional date-range window).
+- `downstream_timeseries.png` — predicted vs true discharge timeseries at successive downstream points along the main stem (and `downstream_timeseries_daterange.png` for the date-range window).
+- `spatial_metrics.png` — per-cell maps of rollout error metrics across the domain, one row per state variable with these panels:
+  - `rmse` — per-cell root-mean-square error over the rollout.
+  - `bias` — mean signed error (pred − truth); positive = over-prediction.
+  - `overpred_freq` — fraction of timesteps the cell over-predicts.
+  - `peak_err` — difference between the predicted and true series maxima (peak over/under-estimation).
+  - `peak_lag` — cross-correlation lag (in Δt) of best alignment, i.e. timing error of the peak/signal.
+  - `nbias` — bias normalised by the truth's standard deviation (dimensionless, cross-cell comparable).
+  - `nse` — Nash–Sutcliffe efficiency of the per-cell timeseries.
+- `q_overprediction_vs_ramp.png` — scatter of discharge over-prediction against the rising-limb ramp rate, testing whether error grows with how fast flow is rising.
+- `mb_diagnostics.png` — mass-balance residual / depth-floor diagnostics over the rollout (mass-balance models).
+- `volume_budget.png` — the domain water-volume storage and budget (inflow − outflow − storage change) over time, with its drift/PBIAS.
+
+Spatial-evaluation helper (`spatial_eval`, per split):
+
+- `<split>_spatial_metrics.png` — the per-cell error maps above, computed for a named split.
+- `<split>_q_overpred_vs_ramp.png` — the over-prediction-vs-ramp scatter for a named split.
+
+Subcatchment error attribution (`attribution.jl`, per split):
+
+- `<split>_subcatch_error_map.png` — maps of each subcatchment's specific local error and its local share of the outlet error (injected vs advected).
+- `<split>_subcatch_mainstem.png` — advected vs locally injected RMS error along the main stem, showing where error enters vs compounds.
+- `<split>_subcatch_attributes.png` — the strongest Spearman rank correlations between subcatchment attributes and local error injection.
+
 ## Project structure
 
 ### Code & Data

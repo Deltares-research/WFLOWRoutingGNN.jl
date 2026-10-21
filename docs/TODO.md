@@ -242,6 +242,48 @@ reusing the now-promoted `resolve_staticmaps` / `load_regrid_nc` plus
   `scripts/subcatch_error_attribution.jl` CLI (`resolve_staticmaps`/`load_regrid_nc`
   are already in `src/`); no source-model change for the primary method.
 
+## 3f. Outlet timeseries at the attribution outlets (in the analyze stage)
+
+**Why.** The longitudinal `downstream_timeseries.png` nodes come from
+`_upstream_percentile_nodes` (an upstream-area percentile ladder in
+[src/plot.jl](../src/plot.jl)), which is chosen on a *different* criterion than the
+subcatchment error-attribution outlets (confluence/gauge-defined in
+[src/attribution.jl](../src/attribution.jl)). Only the single most-downstream node
+(largest upstream area = attribution tree root) is guaranteed to coincide; the rest
+differ in count and location. Plotting pred-vs-true discharge at **exactly** the
+attribution outlets (plus the whole-basin outlet) lets the timeseries be read
+cell-for-cell against the attribution eval.
+
+- [ ] **Explicit-node plotting.** Give `plot_downstream_timeseries` a `nodes`
+      kwarg (graph-node indices) that bypasses `_upstream_percentile_nodes` and
+      plots the given nodes in order. `upstream_area` then only labels. Existing
+      callers (percentile ladder) keep the current default when `nodes === nothing`.
+- [ ] **Cell→node mapping.** Attribution stores outlets as **linear (column-major)
+      cell indices** (`(col-1)*nrows+row`), the plotter works in **graph nodes**.
+      Add a small inverse LUT (e.g. near `gather_nodes` in
+      [src/postprocess.jl](../src/postprocess.jl) or in `src/analysis.jl`):
+      `nodes_for_cells(grid, cells)` dropping cells with no active node.
+- [ ] **Cheap outlet derivation.** Add a `rank = false` kwarg to
+      `subcatch_error_attribution` so the tree/outlets/decomposition are returned
+      without the (5000-shuffle) permutation ranking — the analyze stage only needs
+      the outlet set, not the attribute ranking.
+- [ ] **Wire into `analyze_run` by default.** Derive the retained attribution
+      outlets + the largest-area basin root (`parent_id == 0`, listed first,
+      de-duplicated), map to nodes, and write `<split>_outlet_timeseries*.png`/`.csv`.
+      Make it **best-effort**: wrap in try/catch and skip with a notice when
+      `river_q` is absent, `wflow_uparea` is missing (network route), or the rollout
+      diverged — the analyze stage must not crash on it. Document the new output in
+      the `analyze_run` docstring and [PROJECT.md](PROJECT.md) Evaluation Metrics.
+- [ ] **Open choices for the engineer.** (a) Expose `gauge_var`/`min_area_km2` from
+      run config so the analyze-stage outlets can use Route A / a non-default size
+      filter (default otherwise: network route, 100 km²). (b) Optionally cap to the
+      main-stem outlets (`mainstem(tree)`) when the retained set is large (16 on
+      `sava_small_v081`) to limit the number of figures. (c) Also emit for the
+      optional date-range split.
+- Touch: `src/plot.jl` (`nodes` kwarg), `src/attribution.jl` (`rank` kwarg),
+  `src/analysis.jl` (`nodes_for_cells` + outlet-timeseries call in `analyze_run`);
+  docstring + `docs/PROJECT.md`. No model-source change.
+
 ---
 
 # Computational performance

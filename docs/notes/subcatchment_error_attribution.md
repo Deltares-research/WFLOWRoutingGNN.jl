@@ -147,9 +147,10 @@ diameter, many subcatchments) than on `sava_small`.
   id, outlet node, incremental area, n_cells, outlet {NSE, KGE, PBIAS,
   peak_ratio, RMSE}, `rms(e_local)`, signed `mean(e_local)`, specific injection,
   advected RMS, + all aggregated attributes.
-- Plots: (a) subcatchment map coloured by local error injection; (b)
-  advected-vs-local stacked bars along the main stem (outlet → headwater); (c)
-  attribute scatter panel vs local error with Spearman ρ.
+- `metrics/<split>_subcatch_attribute_ranking.csv` — Spearman ρ (with n, p, CI)
+  of every attribute against each target (`rms_local_per_km2`, `rel_local`).
+- Plots: `<split>_subcatch_error_map.png`, `<split>_subcatch_mainstem.png`,
+  `<split>_subcatch_attributes.png` (see §7 for how to read each).
 
 ---
 
@@ -198,9 +199,70 @@ counterfactual re-runs inference (still fixed weights).
 - **First results (`sava_small_v081_e13b_depth_floored_hps01_s01`, Route B, 16
   retained regions).** Headwater regions are fully local (rms_adv = 0); the
   largest absolute local errors sit in the lower main stem (cumulative area
-  > 2000 km2). The strongest rank correlations with el_local are river slope
+  > 2000 km2). The strongest rank correlations with 
+el_local are river slope
   and  (rho ~ -0.7), but none survive Bonferroni at n = 16, so treat the
   rankings as hypotheses.
 - **Not yet validated statistically on `sava_v081`**: the local full-Sava runs have
   diverged predictions, and the run now warns when max |Q_pred| exceeds 1e3 times
   max |Q_true|.
+
+---
+
+## 7. Reading the plots
+
+All three plots build on the per-outlet decomposition of the discharge error
+`ΔQ = Q_pred − Q_true`: `rms_total = rms(ΔQ(o))` (total outlet error),
+`rms_adv = rms(Σ ΔQ(inlets))` (**advected** in, 0 for a headwater), and
+`rms_local = rms(e_local)` with `e_local = ΔQ(o) − Σ ΔQ(inlets)` (**injected**
+here). The whole point is to separate injected from advected error, which a raw
+outlet NSE/RMSE cannot do because discharge accumulates downstream.
+
+### `<split>_subcatch_error_map.png` — two maps
+
+Red dots are outlets; gray cells are non-river / not-retained.
+
+- **Left — specific local error** `rms(e_local)/area` [m³/s/km²]. Size-normalised
+  injection: "how much error per km² does this region create". Bright cells are
+  the subcatchments that *generate* error irrespective of their size — the
+  headline "culprit" map.
+- **Right — local share** `rms(e_local)/rms(ΔQ outlet)` ∈ [0,1]. Of the error
+  *at that outlet*, the fraction that is locally injected vs advected. **≈1** =
+  born here; **≈0** = the region mostly passes through (and sometimes partly
+  cancels) upstream error.
+
+Read together: bright on **both** = a genuine self-contained error source. Bright
+left but low right = it injects error but its outlet is swamped by even larger
+advected error.
+
+### `<split>_subcatch_mainstem.png` — bars along the main stem
+
+Highest-cumulative-area path, headwater (left) → basin outlet (right); x-ticks are
+cumulative area in km². Blue = `rms_adv`, red = `rms_local`, black line =
+`rms_total`. Shows how error accumulates down the trunk:
+
+- Tall red bar = the reach where new error enters.
+- Black line climbing while red bars stay small = error is mostly **advected and
+  compounding** — consistent with the `amp≈7` flux-accumulation pattern.
+- Black line *below* the incoming blue bar = the reach partially cancels upstream
+  error.
+
+### `<split>_subcatch_attributes.png` — up to 6 scatter panels
+
+The 6 strongest rank correlations with specific local error. Each panel: x = a
+WFLOW attribute per subcatchment, y = `rms(e_local)/area`; title is
+`ρ (Spearman), n, p`. Sign of ρ = whether injection rises (+) or falls (−) with
+the attribute; |ρ| = strength; `p` = permutation p-value. Full ranked list with
+CIs is in `<split>_subcatch_attribute_ranking.csv`.
+
+### Caveats before over-reading
+
+1. **Underpowered on small basins** — only subcatchments with
+   `inc_area_km2 ≥ min_area_km2` (default 100) are coloured/ranked; on
+   `sava_small` that is a handful of regions, so ρ/p are suggestive only.
+2. **Same-time attribution** — `e_local` ignores the inlet→outlet routing lag,
+   so a travelling error can appear local.
+3. **Divergence makes it meaningless** — if the run warned that
+   |Q_pred| ≫ |Q_true|, the rollout diverged and the plots are untrustworthy.
+4. **Sign of `mean_local`** (CSV, not plotted) disambiguates a bright cell:
+   positive = the model *creates* excess water in that region.
