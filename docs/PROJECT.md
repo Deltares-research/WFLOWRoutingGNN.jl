@@ -94,6 +94,7 @@ Analyze stage (`analysis.jl`):
 
 - `validation.mp4` — animated predicted-vs-true gridded `river_q`/`river_h` fields over the split (and `validation_daterange.mp4` for the optional date-range window).
 - `downstream_timeseries.png` — predicted vs true discharge timeseries at successive downstream points along the main stem (and `downstream_timeseries_daterange.png` for the date-range window).
+- `outlet_timeseries*.png` (+ `metrics/outlet_timeseries*.csv`) — predicted vs true discharge at the subcatchment-attribution outlets (whole-basin outlet first, then the retained outlets by decreasing area; one file per outlet, suffixed `_node<idx>_r<rank>`; `_daterange` variants for the date-range window). Written best-effort: skipped when there is no `river_q` state, the rollout is diverged, or `staticmaps.nc` cannot supply the outlets.
 - `spatial_metrics.png` — per-cell maps of rollout error metrics across the domain, one row per state variable with these panels:
   - `rmse` — per-cell root-mean-square error over the rollout.
   - `bias` — mean signed error (pred − truth); positive = over-prediction.

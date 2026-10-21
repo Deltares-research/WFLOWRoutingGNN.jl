@@ -66,7 +66,7 @@ export rollout, evaluate_trajectory, rollout_mb_diagnostics, rollout_ensemble,
 
 include("postprocess.jl")
 export regrid, write_regrid_to_netcdf, load_regrid_nc, load_regrid_times,
-       gather_nodes, mb_residual_diagnostics,
+       gather_nodes, nodes_for_cells, mb_residual_diagnostics,
        spatial_error_metrics, write_spatial_metrics_to_netcdf, overprediction_vs_ramp,
        spatial_metric_summary, write_spatial_metrics_to_csv,
        kge_metrics, mae_metric, pbias, event_peak_metrics, event_detection_metrics,
@@ -81,6 +81,6 @@ export river_layout, read_river_series, upstream_sum, MB_SCHEMES, mb_scheme_resi
 include("attribution.jl")
 export subcatch_error_attribution_run, subcatch_error_attribution, build_subcatchment_tree,
        network_outlets, gauge_outlets, subcatch_error_decomposition, spearman_test,
-       plot_subcatch_error_attribution
+       plot_subcatch_error_attribution, attribution_outlet_cells
 
 end # module WflowRoutingGNN

@@ -2,6 +2,15 @@ This document serves as a concrete changelog of the code, summarizing briefly th
 
 ## 2026-10-21
 
+- **Outlet timeseries at the attribution outlets (TODO §3f).** `analyze_run` now also
+	writes `plots/outlet_timeseries*.png` and `metrics/outlet_timeseries*.csv`
+	(and `_daterange` variants): predicted vs true discharge at the whole-basin outlet
+	and the retained subcatchment-attribution outlets, best effort (skipped with a notice
+	for no `river_q`, a diverged rollout or missing `staticmaps.nc` inputs).
+	`plot_downstream_timeseries` gained a `nodes` kwarg, `subcatch_error_attribution` a
+	`rank = false` kwarg; new helpers `nodes_for_cells`, `attribution_outlet_cells`,
+	`rollout_diverged`; `analyze_run` gained `outlet_gauge_var` / `outlet_min_area_km2`.
+
 - **Subcatchment error attribution (TODO §3e).** New post-hoc diagnostic
 	[src/attribution.jl](../src/attribution.jl) with CLI
 	[scripts/subcatch_error_attribution.jl](../scripts/subcatch_error_attribution.jl):

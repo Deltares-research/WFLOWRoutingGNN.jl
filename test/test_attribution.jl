@@ -145,4 +145,75 @@ const _AT_UPAREA = Float64[1, 3, 7, 8, 3, 2, 1, 1, 1]
         rk2 = WflowRoutingGNN.rank_attributes(["a" => x, "flat" => 2000.0 .- 1e-4 .* x], x .^ 2)
         @test [r.attribute for r in rk2] == ["a"]
     end
+
+    @testset "nodes_for_cells" begin
+        grid = (rows = [1, 2, 3], cols = [1, 1, 2], nrows = 3, ncols = 2)
+        # cell ids (col-1)*nrows+row: node 1 -> 1, node 2 -> 2, node 3 -> 6
+        @test nodes_for_cells(grid, [6, 1]) == [3, 1]
+        @test nodes_for_cells(grid, [4, 2, 5]) == [2]       # cells without a node dropped
+        @test isempty(nodes_for_cells(grid, Int[]))
+    end
+
+    @testset "attribution_outlet_cells / rollout_diverged" begin
+        res = (tree = tree,
+               rows = [(; retained = true), (; retained = false), (; retained = true)])
+        # root (cell 4) first, then retained outlets by decreasing cumulative area
+        @test attribution_outlet_cells(res) == [4, 2]
+        res2 = (tree = tree, rows = fill((; retained = true), 3))
+        @test attribution_outlet_cells(res2) == [4, 2, 5]
+        @test WflowRoutingGNN.rollout_diverged(fill(1f6, 2, 2, 2), fill(1f0, 2, 2, 2))
+        @test !WflowRoutingGNN.rollout_diverged(fill(2f0, 2, 2, 2), fill(1f0, 2, 2, 2))
+        @test !WflowRoutingGNN.rollout_diverged(fill(NaN32, 2, 2, 2), fill(1f0, 2, 2, 2))
+    end
+
+    @testset "plot_downstream_timeseries with explicit nodes" begin
+        T = 5
+        q = rand(Float32, 3, 3, T)
+        pg = Dict("river_q" => q, "river_h" => q .+ 1f0)
+        tg = Dict("river_q" => q .* 1.1f0, "river_h" => q .+ 1.2f0)
+        grid = (rows = [1, 2, 3], cols = [1, 2, 3], nrows = 3, ncols = 3)
+        mktempdir() do tmp
+            path = joinpath(tmp, "o.png"); csvp = joinpath(tmp, "o.csv")
+            plot_downstream_timeseries(pg, tg, "river", grid, Float32[1, 2, 3];
+                                       path, csv_path = csvp, nodes = [3, 1])
+            @test isfile(joinpath(tmp, "o_node3_r1.png")) && isfile(joinpath(tmp, "o_node3_r1.csv"))
+            @test isfile(joinpath(tmp, "o_node1_r2.png")) && isfile(joinpath(tmp, "o_node1_r2.csv"))
+            plot_downstream_timeseries(pg, tg, "river", grid, Float32[1, 2, 3];
+                                       path = joinpath(tmp, "one.png"), nodes = [2])
+            @test isfile(joinpath(tmp, "one.png"))
+            @test_throws ArgumentError plot_downstream_timeseries(pg, tg, "river", grid, Float32[1, 2, 3]; nodes = [4])
+            @test_throws ArgumentError plot_downstream_timeseries(pg, tg, "river", grid, Float32[1, 2, 3]; nodes = Int[])
+        end
+    end
+end
+
+@testset "Outlet timeseries in the analyze stage (3f)" begin
+    model_path = joinpath(@__DIR__, "..", "test_data", "test_model")
+    mktempdir() do tmp
+        ds = DataSettings(run_name = "ot", runs_dir = tmp, wflow_model_path = model_path,
+                          train_frac = 0.6, val_frac = 0.2)
+        ms = ModelSettings(domain = "river", hidden_dim = 8, nlayers = 1)
+        ts = TrainSettings(epochs = 1, batch_size = 4, lr_start = 1f-3, lr_final = 1f-5,
+                           lr_steps = 1, seed = 7, device = :cpu,
+                           strategy = TrainingStrategy([1, 2], [1, 1], 0.0))
+        run_dir = joinpath(tmp, "ot")
+        prep = preprocess_run(ds, ms, ts)
+        tr   = train_run(prep, ds, ms, ts)
+        dirs = (; model = joinpath(run_dir, "model"), output = joinpath(run_dir, "output"),
+                  plots = joinpath(run_dir, "plots"), metrics = joinpath(run_dir, "metrics"))
+        infer_run(tr.model, prep, ms, ts; dirs, splits = (:val,))
+
+        # the test model has no `wflow_uparea` (network route), so use its gauge raster (route A)
+        analyze_run(prep, ms, ts; dirs, metrics_toml = false, outlet_gauge_var = "gauges_grdc")
+        outs = filter(f -> startswith(f, "outlet_timeseries") && endswith(f, ".png"),
+                      readdir(dirs.plots))
+        @test !isempty(outs)
+        @test all(f -> isfile(joinpath(dirs.metrics, replace(f, ".png" => ".csv"))), outs)
+
+        # An unusable gauge variable must not fail the analyze stage.
+        rm(dirs.plots; recursive = true)
+        analyze_run(prep, ms, ts; dirs, metrics_toml = false, outlet_gauge_var = "no_such_var")
+        @test any(startswith("downstream_timeseries"), readdir(dirs.plots))
+        @test !any(startswith("outlet_timeseries"), readdir(dirs.plots))
+    end
 end

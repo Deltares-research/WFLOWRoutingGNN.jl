@@ -188,6 +188,21 @@ function gather_nodes(grids::AbstractDict{String, <:AbstractArray{Float32,3}},
     return states
 end
 
+"""
+    nodes_for_cells(grid, cells) -> Vector{Int}
+
+Map column-major linear raster cell indices (`(col - 1) * nrows + row`) to graph-node
+indices through the node↔cell mapping `grid = (rows, cols, nrows, ncols)`. Cells that
+have no active node are dropped; the order of `cells` is otherwise preserved.
+"""
+function nodes_for_cells(grid::NamedTuple, cells::AbstractVector{<:Integer})
+    lut = Dict{Int,Int}()
+    for (ni, (r, c)) in enumerate(zip(grid.rows, grid.cols))
+        lut[(c - 1) * grid.nrows + r] = ni
+    end
+    return Int[lut[c] for c in cells if haskey(lut, c)]
+end
+
 # List of per-cell metric names produced by `spatial_error_metrics`, in a
 # stable order (used for NetCDF variable naming and plot panel layout).
 const SPATIAL_METRIC_NAMES = ["rmse", "bias", "relbias", "overpred_freq",

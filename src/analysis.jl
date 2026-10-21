@@ -26,12 +26,22 @@ NetCDF outputs (`<dirs.output>/val_pred.nc`, `val_true.nc`) and writes
 
     <dirs.plots>/    validation.mp4, downstream_timeseries.png, spatial_metrics.png,
                      q_overprediction_vs_ramp.png, [mb_diagnostics.png, volume_budget.png],
-                     [validation_daterange.mp4, downstream_timeseries_daterange.png]
+                     [outlet_timeseries*.png],
+                     [validation_daterange.mp4, downstream_timeseries_daterange.png,
+                      outlet_timeseries_daterange*.png]
     <dirs.metrics>/  downstream_timeseries.csv, spatial_metrics.csv,
                      q_overprediction_vs_ramp.csv, mb_residual.csv, mb_residual_by_node.csv,
-                     [mb_*.csv, volume_budget.csv],
-                     [downstream_timeseries_daterange.csv], metrics.toml
+                     [mb_*.csv, volume_budget.csv], [outlet_timeseries*.csv],
+                     [downstream_timeseries_daterange.csv, outlet_timeseries_daterange*.csv],
+                     metrics.toml
     <dirs.output>/   spatial_metrics.nc
+
+`outlet_timeseries*` are the discharge series at the subcatchment-attribution outlets
+([`subcatch_error_attribution`](@ref)): the whole-basin outlet first, then the retained
+outlets by decreasing area (one figure/CSV per outlet, suffixed `_node<idx>_r<rank>`).
+They are best effort: skipped with a notice when the run has no `river_q` state, the
+rollout is diverged, `staticmaps.nc` lacks what the outlet selection needs, or anything
+else in the selection fails.
 
 Node-order arrays (for [`river_q_performance_metrics`](@ref)) are recovered with
 [`gather_nodes`](@ref) and the node↔cell mapping `prep.grid`; the gauge/network
@@ -50,6 +60,9 @@ Keyword arguments:
 - `infer`         : result of [`infer_run`](@ref), for the validation rollout timing.
 - `metrics_toml`  : write the per-run `metrics.toml` summary (default). Periodic
                     checkpoint evaluations pass `false`.
+- `outlet_gauge_var`, `outlet_min_area_km2` : outlet selection for `outlet_timeseries*`
+                    (a gauge raster in `staticmaps.nc`, else network confluences with
+                    incremental area ≥ `outlet_min_area_km2`, default 100 km²).
 
 Returns the summaries that feed `metrics.toml` (each `nothing` when not
 applicable): `spatial_summary` from [`spatial_metric_summary`](@ref), `ramp` from
@@ -61,7 +74,8 @@ from [`mb_residual_diagnostics`](@ref).
 """
 function analyze_run(prep::PrepBundle, ms::ModelSettings, ts::TrainSettings;
                      dirs, model = nothing, train_summary = nothing,
-                     infer = nothing, metrics_toml::Bool = true)
+                     infer = nothing, metrics_toml::Bool = true,
+                     outlet_gauge_var = nothing, outlet_min_area_km2::Real = 100.0)
     foreach(mkpath, (dirs.output, dirs.plots, dirs.metrics))
     schema     = load_schema(prep.wflow_schema)
     domain     = ms.domain
@@ -99,6 +113,10 @@ function analyze_run(prep::PrepBundle, ms::ModelSettings, ts::TrainSettings;
                                edge_targets = prep.edge_tgt,
                                timestamps = split_times,
                                csv_path   = joinpath(dirs.metrics, "downstream_timeseries.csv"))
+
+    _analyze_outlet_timeseries(prep, ms, p_grids, t_grids, split_times, dirs;
+                               gauge_var = outlet_gauge_var,
+                               min_area_km2 = outlet_min_area_km2)
 
     # Spatial performance: per-cell error maps + Q overprediction vs ramp
     sp_metrics = spatial_error_metrics(p_grids, t_grids, domain)
@@ -171,6 +189,9 @@ function analyze_run(prep::PrepBundle, ms::ModelSettings, ts::TrainSettings;
                                    edge_targets = prep.edge_tgt,
                                    timestamps = dr_pred_times,
                                    csv_path   = joinpath(dirs.metrics, "downstream_timeseries_daterange.csv"))
+        _analyze_outlet_timeseries(prep, ms, dr_p_grids, dr_t_grids, dr_pred_times, dirs;
+                                   suffix = "_daterange", gauge_var = outlet_gauge_var,
+                                   min_area_km2 = outlet_min_area_km2)
     end
 
     out = (; spatial_summary, ramp = ramp_summary, river_q_perf,
@@ -194,6 +215,41 @@ function analyze_run(prep::PrepBundle, ms::ModelSettings, ts::TrainSettings;
                                out.mb_residual)
     end
     return out
+end
+
+# Discharge timeseries at the subcatchment-attribution outlets (3f): the
+# whole-basin outlet first, then the largest-area root and the retained outlets of
+# `subcatch_error_attribution`. Best effort: never fails the analyze stage.
+function _analyze_outlet_timeseries(prep, ms, p_grids, t_grids, times, dirs;
+                                    suffix::AbstractString = "", gauge_var = nothing,
+                                    min_area_km2::Real = 100.0)
+    "river_q" in DOMAIN_VARS[ms.domain]["state"] || return nothing
+    pq, tq = p_grids["river_q"], t_grids["river_q"]
+    if rollout_diverged(pq, tq)
+        @info "Skipping outlet timeseries$suffix: the predicted discharge is diverged"
+        return nothing
+    end
+    try
+        res   = subcatch_error_attribution(prep.staticmaps_file, load_schema(prep.wflow_schema),
+                                           pq, tq; gauge_var, min_area_km2, rank = false)
+        nodes = nodes_for_cells(prep.grid, attribution_outlet_cells(res))
+        ua    = prep.postscale["river_q"]
+        any(isfinite, ua) && pushfirst!(nodes, argmax(replace(ua, NaN => -Inf)))
+        unique!(nodes)
+        isempty(nodes) && return nothing
+        plot_downstream_timeseries(p_grids, t_grids, ms.domain, prep.grid, ua;
+            path         = joinpath(dirs.plots, "outlet_timeseries$suffix.png"),
+            nodes        = nodes,
+            edge_sources = prep.edge_src,
+            edge_targets = prep.edge_tgt,
+            timestamps   = times,
+            csv_path     = joinpath(dirs.metrics, "outlet_timeseries$suffix.csv"))
+        @info "Outlet timeseries$suffix: $(length(nodes)) outlet(s) written"
+        return nodes
+    catch err
+        @warn "Skipping outlet timeseries$suffix" exception = (err, catch_backtrace())
+        return nothing
+    end
 end
 
 # ---------------------------------------------------------------------------

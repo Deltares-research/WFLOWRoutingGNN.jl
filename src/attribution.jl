@@ -496,10 +496,48 @@ function _read_raster(ds, name::AbstractString)
     return Float64.(coalesce.(v[:, :], NaN))
 end
 
+# Largest finite |x| of an array (0 when none).
+function _max_abs_finite(A::AbstractArray{<:Real})
+    m = 0.0
+    @inbounds for x in A
+        isfinite(x) && (m = max(m, abs(Float64(x))))
+    end
+    return m
+end
+
+"""
+    rollout_diverged(pred_q, true_q) -> Bool
+
+Whether the predicted discharge is implausibly large (`max|Q_pred| > 1e3 · max|Q_true|`),
+i.e. the rollout is numerically diverged and per-region statistics are meaningless.
+"""
+rollout_diverged(pred_q::AbstractArray{<:Real}, true_q::AbstractArray{<:Real}) =
+    _max_abs_finite(pred_q) > 1e3 * max(_max_abs_finite(true_q), eps())
+
+"""
+    attribution_outlet_cells(res) -> Vector{Int}
+
+Raster cells of the outlets to show timeseries for, from a [`subcatch_error_attribution`](@ref)
+result: the largest-area tree root first, then the other retained outlets by decreasing
+cumulative area (de-duplicated).
+"""
+function attribution_outlet_cells(res)
+    tree  = res.tree
+    cells = Int[]
+    roots = findall(==(0), tree.parent)
+    isempty(roots) || push!(cells, tree.outlets[roots[argmax(tree.cum_area_km2[roots])]])
+    keep = findall(r -> r.retained, res.rows)
+    for k in sort(keep; by = k -> -tree.cum_area_km2[k])
+        c = tree.outlets[k]
+        c in cells || push!(cells, c)
+    end
+    return cells
+end
+
 """
     subcatch_error_attribution(staticmaps_file, schema, pred_q, true_q;
                                gauge_var = nothing, min_area_km2 = 100.0, outlets = nothing,
-                               min_n_rank = 5, nperm = 5000) -> NamedTuple
+                               min_n_rank = 5, nperm = 5000, rank = true) -> NamedTuple
 
 Core of [`subcatch_error_attribution_run`](@ref), on in-memory `(nrows, ncols, T)`
 discharge grids (`NaN` at inactive cells). Outlets are, in order of priority, the
@@ -510,14 +548,16 @@ finite discharge series are dropped.
 Returns `(; tree, rows, attributes, ranking, route, nrows, ncols, lon, lat, min_area_km2)`.
 `rows` has one `NamedTuple` per outlet (skill, error decomposition, attributes, `retained`);
 `ranking` maps each target (`"rms_local_per_km2"`, `"rel_local"`) to the
-[`rank_attributes`](@ref) result over the retained regions.
+[`rank_attributes`](@ref) result over the retained regions; with `rank = false` the
+permutation ranking is skipped and `ranking` is empty.
 """
 function subcatch_error_attribution(staticmaps_file::AbstractString, schema::WflowSchema,
                                     pred_q::AbstractArray{<:Real,3}, true_q::AbstractArray{<:Real,3};
                                     gauge_var::Union{Nothing,AbstractString} = nothing,
                                     min_area_km2::Real = 100.0,
                                     outlets::Union{Nothing,AbstractVector{<:Integer}} = nothing,
-                                    min_n_rank::Int = 5, nperm::Int = 5000)
+                                    min_n_rank::Int = 5, nperm::Int = 5000,
+                                    rank::Bool = true)
     size(pred_q) == size(true_q) || throw(ArgumentError("pred_q and true_q must have the same shape"))
     nrows, ncols, T = size(pred_q)
 
@@ -554,8 +594,7 @@ function subcatch_error_attribution(staticmaps_file::AbstractString, schema::Wfl
     P = reshape(pred_q, nrows * ncols, T)
     Q = reshape(true_q, nrows * ncols, T)
 
-    max_pred = maximum((abs(x) for x in P if isfinite(x)); init = 0.0)
-    max_true = maximum((abs(x) for x in Q if isfinite(x)); init = 0.0)
+    max_pred, max_true = _max_abs_finite(P), _max_abs_finite(Q)
     max_pred > 1e3 * max(max_true, eps()) &&
         @warn "predicted discharge is implausibly large (max |Q_pred| = $max_pred vs max |Q_true| = $max_true): " *
               "the rollout looks numerically diverged, so the attribution below is meaningless"
@@ -607,6 +646,7 @@ function subcatch_error_attribution(staticmaps_file::AbstractString, schema::Wfl
     sel = findall(retained)
     ranking = Dict{String,Vector{NamedTuple}}()
     for tname in (:rms_local_per_km2, :rel_local)
+        rank || break
         y = [getproperty(rows[k], tname) for k in sel]
         sub = [n => v[sel] for (n, v) in attrs]
         ranking[String(tname)] = rank_attributes(sub, y; min_n = min_n_rank, nperm)

@@ -667,6 +667,10 @@ Arguments:
                     available, the plotted timeseries are written to CSV
                     (forwarded to `plot_timeseries`).
 - `csv_path`      : optional explicit CSV output path.
+- `nodes`         : optional vector of graph-node indices to plot, in order,
+                    instead of the upstream-area percentile ladder (then
+                    `upstream_points` and `upstream_area` are not used for the
+                    selection). Default `nothing` keeps the ladder.
 
 Returns the last generated `Figure` object.
 """
@@ -682,9 +686,17 @@ function plot_downstream_timeseries(
         edge_targets  = nothing,
         timestamps    = nothing,
         csv           = true,
-        csv_path      = nothing)
-    upstream_points > 0 || throw(ArgumentError("upstream_points must be positive"))
-    node_idxs = _upstream_percentile_nodes(upstream_area, upstream_points)
+        csv_path      = nothing,
+        nodes         = nothing)
+    if nodes === nothing
+        upstream_points > 0 || throw(ArgumentError("upstream_points must be positive"))
+        node_idxs = _upstream_percentile_nodes(upstream_area, upstream_points)
+    else
+        node_idxs = collect(Int, nodes)
+        isempty(node_idxs) && throw(ArgumentError("nodes must not be empty"))
+        all(i -> 1 <= i <= length(grid.rows), node_idxs) ||
+            throw(ArgumentError("nodes must be graph-node indices in 1:$(length(grid.rows))"))
+    end
 
     inset_spec = if !isnothing(edge_sources) && !isnothing(edge_targets)
         (rows = grid.rows, cols = grid.cols, nrows = grid.nrows, ncols = grid.ncols,
