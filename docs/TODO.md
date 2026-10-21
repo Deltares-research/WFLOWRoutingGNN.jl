@@ -176,6 +176,184 @@ supervision with a convex combination:
 
 ---
 
+# Mass-balance redesign — B/C hybrid (Muskingum backbone + continuity readout)
+
+**Why (the root-cause fix for the `amp≈12` blow-up).** The current
+`ThetaKinematicWave` (Option A) carries the *fragile* discharge `q` as the fed-back
+state with the normalisation stiffness `κ(Aᵀ−I) = −21.95` in the same loop, so the
+rollout Jacobian has `ρ(J) > 1` from stiff high-flow anchors — the demonstrated
+geometric amplification (`peak_ratio ≈ amp^H`). The design thread concluded the
+**B/C hybrid** is the recommended target architecture: it is the only closure that
+satisfies all four design constraints simultaneously, including the decisive
+train-short (≤10) / roll-long (1000s) gap. Full derivation, Jacobian analysis and
+side-by-side comparison in
+[notes/mass_balance_formulations.md](notes/mass_balance_formulations.md) §4.2 / §6;
+see also [DECISIONS.md](DECISIONS.md) and the `amp` lever in
+[PROJECT.md](PROJECT.md) Known limitations.
+
+**The construction (§4.2).** Carry `h` (≡ storage `S`) as the state; advance it
+with a **Muskingum–Cunge backbone `P_MC`** (Option B) giving a *structural*
+contraction `ρ(∂_h F) = C₃ < 1` (horizon-independent); add the decoder's freedom as
+a **bounded residual in the source** (cannot move the spectrum); and **diagnose `q`
+by the exact continuity readout** `q = (I−Aᵀ)⁻¹(I_lat − dS/dt)` (Option C) so the
+fragile discharge is *never a state and never fed back*:
+
+    S^{t+1} = P_MC·S^t + P_MC·source(z^t, r)         # contracting backbone + bounded residual
+    q^{t+1} = (I−Aᵀ)⁻¹·(I_lat − dS/dt)                # exact readout, out of the loop
+
+Both operators are static SpMVs → precompute once (`A` is static, constraint 3).
+
+- [ ] **New formulation struct** implementing the `MassBalanceFormulation`
+      interface in [src/massbalance.jl](../src/massbalance.jl) (e.g.
+      `MuskingumContinuityHybrid <: MassBalanceFormulation`, alongside
+      `ThetaKinematicWave`/`NoMassBalance`). Must provide every interface method the
+      abstract type lists: `decoder_outputs`, `extra_decoder_features` /
+      `extra_decoder_dim`, `floor_state`, `apply_formulation`, `has_mass_balance`,
+      `mb_h_loss_weight`, `precompute_batched`, `Flux.gpu`/`Flux.cpu`. The decoder
+      now predicts a **bounded source residual** (not `Δq`), so `decoder_outputs`
+      and the decoder-feature set change accordingly.
+- [ ] **Muskingum backbone `P_MC`.** Build the static three-coefficient operator
+      from reference `(K, x)` so the coefficients are non-negative (M-matrix ⇒
+      `C₃ < 1`, the contraction guarantee). Validate `C₂ ≥ 0` (no negative-
+      coefficient oscillation) at build time and **abort** if violated, mirroring
+      how `build_massbalance` sets up the routing operator today. Precompute as a
+      sparse operator in the same class as the current `A_routing`.
+- [ ] **Continuity readout `(I−Aᵀ)⁻¹`.** Precompute the accumulation inverse once
+      (same sparsity/precompute path as the current adjoint in
+      [src/sparse_ops.jl](../src/sparse_ops.jl)); apply as one SpMV each step to
+      diagnose `q` from `I_lat − dS/dt`. Keep a positivity transform (softplus) on
+      `h` outside the solve. `q` is diagnostic-only → it must **not** be fed back
+      into the decoder by default.
+- [ ] **Open design decisions (resolve before/within implementation, from §5).**
+      (a) Is `q` a **pure readout** or a **defensively-regularised input feature**
+      (`C+q-input`, §3.3 — small/stop-gradient weights so `∂_q F ≈ 0`)? Default to
+      pure readout. (b) Does "increment beats absolute" (measured under A) still
+      hold with `h` as the free state? §3.3/§6 warn **increment-`h` breaks
+      constraint 4** (undamped integrator drift) — so predict the source
+      conservatively via `P_MC`, not a raw `h` increment. Record the choice in
+      [DECISIONS.md](DECISIONS.md).
+- [ ] **Config toggle (reuses the existing mechanism).** The formulation is
+      already selected by the `mb_formulation` string key
+      ([src/gnn.jl](../src/gnn.jl) `ModelSettings.mb_formulation`,
+      `mb_formulation_kind`, dispatched via `_build_mb_formulation(::Val{…})` in
+      [src/run.jl](../src/run.jl)). Add the new name to the `MB_FORMULATIONS` tuple,
+      add the `Val{:muskingum_continuity}` (or chosen symbol) dispatch method, and
+      keep the default `"theta_kinematic_wave"` so existing configs are unchanged.
+      Update `MB_FORMULATIONS` error text + templates.
+- [ ] **Wire all formulation-dispatched sites.** Add methods for the new type to:
+      `_loss_components` / `_mb_amplification` ([src/strategy.jl](../src/strategy.jl)),
+      `_rollout_mb_diagnostics` ([src/rollout.jl](../src/rollout.jl)),
+      `layer_mb_analysis` ([src/analysis.jl](../src/analysis.jl)), and the
+      `mb_h_loss_weight` path. The `amplification.png`/volume-budget diagnostics
+      should report the new backbone's `C₃` contraction instead of A's −21.95
+      stiffness.
+- [ ] **Expose to the hpar search.** `model.mb_formulation` is a plain string key,
+      so the box search can sweep it today via `_set!`
+      ([src/hparsearch.jl](../src/hparsearch.jl)) once the new value is accepted —
+      add `"model.mb_formulation"` with `["theta_kinematic_wave",
+      "muskingum_continuity"]` to
+      [experiments/template_hparsearch.toml](../experiments/template_hparsearch.toml)
+      as the A/B example. Confirm a search cell with the new value preprocesses,
+      trains and evaluates end-to-end.
+- [ ] **Validation (win conditions).** A/B the hybrid vs `ThetaKinematicWave` on
+      `sava_small_v081`: (i) `amp` no longer geometric and fixed-horizon RMSE finite
+      from stiff high-flow anchors; (ii) stable past the training horizon (≥1906
+      steps, matching the current MB's one virtue) — the structural `C₃ < 1` claim;
+      (iii) mass conservation still exact (volume-budget PBIAS/drift); (iv) `q`
+      confirmed out of the loop (no `q`-row/column in the measured rollout
+      Jacobian). Then repeat on full `sava_v081` where A diverges.
+- Touch: `src/massbalance.jl` (new struct + interface), `src/sparse_ops.jl` /
+  precompute (both static operators), `src/run.jl` (`_build_mb_formulation` Val
+  dispatch), `src/gnn.jl` (`MB_FORMULATIONS`, decoder out-dim), `src/strategy.jl` +
+  `src/rollout.jl` + `src/analysis.jl` (dispatched diagnostics), config templates +
+  `scripts`/`experiments`; tests in `test/test_gnn.jl` (interface + conservation +
+  contraction) and `test/test_training.jl` (a short hybrid run).
+- **Note:** A and C are mutually-exclusive closures; the hybrid is additive (B
+  backbone + C readout) and does **not** share state with `ThetaKinematicWave`, so
+  it lands as a *parallel* formulation behind the toggle — no change to the legacy
+  path, so existing checkpoints and A/B comparisons stay valid.
+
+---
+
+# Input feature normalization — selectable nonlinear scaling
+
+**Why.** Physical river features span many orders of magnitude and are
+heavy-tailed (discharge, upstream area, inwater), so a plain per-variable z-score
+leaves the high-flow tail dominating the feature scale and compresses the dynamic
+range the encoder sees at low/median flow. Static river geometry already gets a
+`log1p` pre-standardization (`STATIC_TRANSFORMS`: `river_length/slope/width/depth`
+via `_log1p_nonnegative!`) and `wflow_uparea` gets `_log_upstream_area_feature`,
+but the **time-varying physical inputs** (`river_q`, `river_h`, `river_inwater`)
+currently go straight to z-score (per-node for the `PER_NODE_NORM_VARS` set) with
+no nonlinear squashing. Goal: let each physical feature pick a nonlinear transform
+(e.g. `log1p`, signed-log, `asinh`) applied **before** z-score, selectable from
+config and sweepable in the hpar search.
+
+**Current state (grounding, [src/preprocess.jl](../src/preprocess.jl)).**
+Normalization is hardcoded in two places: `STATIC_TRANSFORMS` (per-node static
+transform before `standardize!`) and the time-series path, where
+`PER_NODE_NORM_VARS` get `standardize_per_node!` and everything else gets plain
+`standardize!`. `VAR_SCALERS` additionally applies the area/storage postscale and
+records the per-node inverse multiplier in `postscale`. De-normalization
+(`evaluate_trajectory` in [src/rollout.jl](../src/rollout.jl), the MB-residual path
+in [src/analysis.jl](../src/analysis.jl)) undoes **z-score then `postscale`** — it
+knows nothing about a nonlinear transform yet.
+
+- [ ] **Normalization-scheme abstraction.** Replace the hardcoded transform Dicts
+      with a small selectable scheme per variable: at minimum `:zscore` (today's
+      behaviour, the default), `:log1p_zscore`, `:signed_log_zscore`,
+      `:asinh_zscore`. Each scheme is a `(forward, inverse)` pair so it is exactly
+      invertible; z-score stays the outer affine step. Keep the per-node vs global
+      z-score choice (`PER_NODE_NORM_VARS`) orthogonal to the nonlinear transform.
+- [ ] **Wire the inverse into every de-normalization path.** The transform id must
+      be persisted in `norm_stats` (→ `norm_stats.toml`) so `evaluate_trajectory`
+      and the analysis/MB-residual code invert `nonlinear ∘ zscore ∘ postscale`
+      symmetrically. Audit all readers of `norm_stats`/`postscale` (rollout.jl,
+      analysis.jl, rollout fixed-horizon eval) — a missing inverse silently
+      corrupts physical-unit output.
+- [ ] **Mass-balance correctness gate (critical).** The `ThetaKinematicWave` layer
+      and the loss evaluate physics in **physical units** and the per-node z-score
+      is deliberately kept **affine** to preserve routing additivity (see the
+      `PER_NODE_NORM_VARS` comment in preprocess.jl and
+      [src/massbalance.jl](../src/massbalance.jl)). A nonlinear transform on the
+      **state** variables (`river_q`/`river_h`) would break that additivity, so
+      scope the nonlinear option to **encoder input features** (forcing +
+      static + the state *as fed to the encoder*) while the decoder/MB/loss keep
+      operating on physical (affine-recoverable) `q`/`h`. Decide and document
+      whether `river_inwater` (a forcing, not a looped state) may use a nonlinear
+      transform freely. Add a test that the MB physical budget is unchanged when
+      only input-feature normalization changes.
+- [ ] **Config switch (per variable).** Expose the scheme in the run config
+      (data/model settings TOML), e.g. a `[normalization]` table mapping variable
+      name → scheme, defaulting every variable to `:zscore` so existing configs are
+      unchanged. Plumb through `DataSettings`/`ModelSettings`
+      ([src/run.jl](../src/run.jl), [src/gnn.jl](../src/gnn.jl)) into
+      `build_wflow_graph`'s kwargs (mirror how `sigma_floor_*` /
+      `include_log_upstream_area` already flow via `preprocess_run`,
+      [src/pipeline.jl](../src/pipeline.jl#L198)). Persist the choice so inference
+      reuses it.
+- [ ] **Expose to the hpar search.** The box search already applies arbitrary
+      dot-path overrides via `_set!` ([src/hparsearch.jl](../src/hparsearch.jl)), so
+      a key like `"normalization.river_inwater"` is sweepable **once it exists in
+      the parsed config**. Add the key(s) to the search-space and confirm `_set!`
+      reaches the nested table (it indexes existing sub-dicts — pre-create the
+      `[normalization]` table or teach `_set!` to create missing intermediate
+      nodes). Add an example to
+      [experiments/template_hparsearch.toml](../experiments/template_hparsearch.toml).
+- [ ] **Validation.** A/B one physical feature (start with `river_inwater`, which
+      is forcing-only and side-steps the MB additivity constraint) `:zscore` vs
+      `:log1p_zscore` on `sava_small_v081`; check encoder-input dynamic range,
+      peak/low-flow skill, and that the MB physical budget is bit-unchanged.
+- Touch: `src/preprocess.jl` (scheme abstraction, forward+inverse,
+  `build_wflow_graph` kwargs), `src/rollout.jl` + `src/analysis.jl` (inverse in
+  de-normalization), `src/run.jl` / `src/gnn.jl` (settings fields),
+  `src/pipeline.jl` (`preprocess_run` plumbing), `src/hparsearch.jl` (`_set!`
+  nested-create if needed), config templates + `norm_stats.toml` schema; tests in
+  `test/test_preprocess.jl` (round-trip invertibility) + `test/test_gnn.jl` (MB
+  budget unchanged).
+
+---
+
 # Diagnostics & plotting
 
 ## 3e. Subcatchment error attribution (post-hoc; which subcatchments inject error)
