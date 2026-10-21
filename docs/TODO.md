@@ -269,7 +269,26 @@ Both operators are static SpMVs → precompute once (`A` is static, constraint 3
   The hybrid has no rollout/volume-budget layer record yet (`layer_mb_analysis` writes
   `metrics/mb_backbone_contraction_by_node.csv`); a volume budget for it is a follow-up.
   Tests: [test/test_mb_hybrid.jl](../test/test_mb_hybrid.jl) (44) and an end-to-end
-  train/infer/analyze case in [test/test_pipeline.jl](../test/test_pipeline.jl).- [ ] **Validation (win conditions).** A/B the hybrid vs `ThetaKinematicWave` on
+  train/infer/analyze case in [test/test_pipeline.jl](../test/test_pipeline.jl).
+- [ ] **Open design choices to revisit (not defects — the stability guarantee holds
+      either way).** Two simplifications vs the §4.2 construction, worth a deliberate
+      decision before/after the A/B validation:
+      (a) **Level-pool backbone (Muskingum `x = 0`).** `P` is an implicit-Euler
+      *linear-reservoir cascade* with a static per-node `K = μ_h/μ_q`, so it has the
+      degenerate diffusive wedge: pure attenuation, no kinematic translation/sharpening.
+      The `C₃ < 1` contraction is intact, but hydrograph-shape fidelity (travel time,
+      peak attenuation) is the crudest MC case. Revisit if the A/B shows timing/peak
+      bias that a true three-coefficient `(K, x)` operator — or a flow-dependent `K` —
+      would fix. (Daily Courant ≫ 1 is why the physical three-coefficient form was
+      dropped; a revisit would need a Courant-robust coefficient scheme.)
+      (b) **Residual added *after* the backbone, not routed through it.** The code uses
+      `h_pre = h_bb + residual_bound·tanh(Δ)`, whereas §4.2 wrote the residual inside
+      the source, `S^{t+1} = P_MC·(S^t + source)`. Bounded-additive on a contraction is
+      still BIBO-stable (why the guarantee survives), but the residual is not smoothed/
+      routed by `P` and acts one step more directly on `h`. Decide whether to route it
+      through `P` for a smoother, physically-sourced correction. Record the resolution
+      of both in [DECISIONS.md](DECISIONS.md).
+- [ ] **Validation (win conditions).** A/B the hybrid vs `ThetaKinematicWave` on
       `sava_small_v081`: (i) `amp` no longer geometric and fixed-horizon RMSE finite
       from stiff high-flow anchors; (ii) stable past the training horizon (≥1906
       steps, matching the current MB's one virtue) — the structural `C₃ < 1` claim;
