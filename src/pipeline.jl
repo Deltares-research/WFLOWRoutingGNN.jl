@@ -199,7 +199,8 @@ function preprocess_run(ds::DataSettings, ms::ModelSettings;
         include_log_upstream_area = ms.include_log_upstream_area,
         sigma_floor_h = ms.mb_sigma_h_floor,
         sigma_floor_q = ms.mb_sigma_q_floor,
-        sigma_floor_inwater = ms.mb_sigma_inwater_floor)
+        sigma_floor_inwater = ms.mb_sigma_inwater_floor,
+        normalization = ms.normalization)
 
     g0        = graphs[1]
     n_nodes   = g0.num_nodes
@@ -423,9 +424,16 @@ function train_run(prep::PrepBundle, ds::DataSettings, ms::ModelSettings, ts::Tr
     # Normalisation statistics
     encode_stat(x) = x isa AbstractVector ? Float64.(x) : Float64(x)
     stats_dict = Dict(
-        var => Dict("mean" => encode_stat(s.mean), "std" => encode_stat(s.std))
+        var => Dict{String,Any}("mean" => encode_stat(s.mean), "std" => encode_stat(s.std))
         for (var, s) in norm_stats
     )
+    # Nonlinear-scaling parameters (only present for non-zscore variables).
+    for (var, s) in norm_stats
+        haskey(s, :scheme) || continue
+        merge!(stats_dict[var], Dict{String,Any}(
+            "scheme" => String(s.scheme), "scale" => encode_stat(s.scale),
+            "nl_mean" => encode_stat(s.nl_mean), "nl_std" => encode_stat(s.nl_std)))
+    end
     open(joinpath(dirs.model, "norm_stats.toml"), "w") do io
         TOML.print(io, stats_dict)
     end

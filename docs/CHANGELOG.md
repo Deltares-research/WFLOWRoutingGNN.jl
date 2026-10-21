@@ -2,6 +2,18 @@ This document serves as a concrete changelog of the code, summarizing briefly th
 
 ## 2026-10-21
 
+- **Selectable nonlinear input scaling (TODO "Input feature normalization").** New
+	`[model.normalization]` config table (`variable = scheme`; `zscore` default,
+	`log1p_zscore`, `signed_log_zscore`, `asinh_zscore`) for time-varying
+	state/forcing variables, exposed as `ModelSettings.normalization` and sweepable in the
+	hpar search (`model.normalization.river_inwater`; `_set!` now creates missing
+	intermediate tables). Encoder-input-only: `build_wflow_graph(...; normalization)`
+	fits `scheme/scale/nl_mean/nl_std` on the training window (also in `norm_stats.toml`)
+	and the model prepends a non-trainable `EncoderInputTransform` only when a scheme is
+	set, so stored data, mass balance, loss and de-normalization are unchanged. New exports
+	`nonlinear_forward/inverse`, `nonlinear_stats`, `parse_normalization`,
+	`encoder_input_transform`, `with_input_transform`. Tests:
+	[test/test_normalization.jl](../test/test_normalization.jl).
 - **Outlet timeseries at the attribution outlets (TODO §3f).** `analyze_run` now also
 	writes `plots/outlet_timeseries*.png` and `metrics/outlet_timeseries*.csv`
 	(and `_daterange` variants): predicted vs true discharge at the whole-basin outlet

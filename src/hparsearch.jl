@@ -108,7 +108,7 @@ function _set!(d::Dict, path::String, value)
     parts = split(path, ".")
     node  = d
     for p in parts[1:end-1]
-        node = node[p]
+        node = get!(node, p, Dict{String,Any}())
     end
     node[parts[end]] = value
 end

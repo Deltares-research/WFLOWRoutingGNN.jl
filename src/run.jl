@@ -107,6 +107,7 @@ function settings_from_config(d::AbstractDict, toml_dir::AbstractString)
         mb_sigma_q_floor = Float32(get(md, "mb_sigma_q_floor", 0.0)),
         mb_sigma_inwater_floor = Float32(get(md, "mb_sigma_inwater_floor", 0.0)),
         mb_inwater_unscale = get(md, "mb_inwater_unscale", true),
+        normalization = _normalization_dict(get(md, "normalization", Dict{String,Any}()), md["domain"]),
     )
 
     td = d["train"]
@@ -232,6 +233,10 @@ function _build_gnn_model(ms::ModelSettings, n_nodes::Int, src_edges, tgt_edges,
     h_weight = mb_h_loss_weight(mb, h_loss_scale)
     (strategy === nothing || h_weight === nothing) || (strategy.h_loss_weight = h_weight)
     model = WflowGNN(ms, mb, A_sparse)
+    # Optional nonlinear encoder-input scaling (no-op, no layer added, when every
+    # variable is plain z-score).
+    tf = encoder_input_transform(ms, norm_stats, n_nodes)
+    tf === nothing || (model = with_input_transform(model, tf))
 
     # Block-diagonal adjacency for the batch size. Must be built on CPU
     # (blockdiag needs SparseMatrixCSC); device movement happens at the call site.

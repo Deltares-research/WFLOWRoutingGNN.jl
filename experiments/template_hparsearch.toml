@@ -173,6 +173,12 @@ search_type = "box"
 # "model.mb_smooth_h_floor" = [false, true]
 # "model.mb_h_floor_softness" = [0.02, 0.05, 0.1]
 
+# Optional nonlinear encoder-input scaling of a time-varying variable
+# (zscore | log1p_zscore | signed_log_zscore | asinh_zscore). The table is
+# created on demand; only the encoder sees the transform (mass balance unchanged).
+# iver_inwater is the first candidate (heavy-tailed, area-normalised).
+# "model.normalization.river_inwater" = ["zscore", "log1p_zscore", "asinh_zscore"]
+
 # Optional per-node std-floor sweep for MB-invasive hardening.
 # "model.mb_sigma_h_floor" = [0.0, 0.5, 1.0]
 # "model.mb_sigma_q_floor" = [0.0]

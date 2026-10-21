@@ -335,6 +335,108 @@ const STATIC_TRANSFORMS = Dict(
 # MB-invasive Option A path. Kept affine per node to preserve routing additivity.
 const PER_NODE_NORM_VARS = Set(["river_q", "river_h", "river_inwater"])
 
+# ── Selectable nonlinear input scaling ───────────────────────────────────────
+# A scheme is a nonlinear squashing `f(x / s)` applied to the (area/storage-scaled)
+# physical value *before* a second z-score. It only ever feeds the **encoder**
+# (see `EncoderInputTransform` in gnn.jl): the stored graph data, `norm_stats`
+# `(mean, std)`, `postscale`, the mass-balance layer, the loss and every
+# de-normalisation path stay affine, so the routing additivity is untouched.
+const NORMALIZATION_SCHEMES = (:zscore, :log1p_zscore, :signed_log_zscore, :asinh_zscore)
+
+"""
+    nonlinear_forward(scheme, x, s)
+    nonlinear_inverse(scheme, y, s)
+
+Forward / inverse of the nonlinear step of a normalisation `scheme` with scale `s > 0`:
+
+- `:zscore`            : identity,
+- `:log1p_zscore`      : `log1p(max(x, 0) / s)` (non-negative variables; negatives clamp to 0),
+- `:signed_log_zscore` : `sign(x) · log1p(|x| / s)`,
+- `:asinh_zscore`      : `asinh(x / s)`.
+
+The inverse is exact on the range of the forward map (`:log1p_zscore` only for
+`x ≥ 0`). The z-score is the outer affine step and is not part of these functions.
+"""
+function nonlinear_forward(scheme::Symbol, x, s)
+    scheme === :zscore            && return x
+    scheme === :log1p_zscore      && return log1p(max(x, zero(x)) / s)
+    scheme === :signed_log_zscore && return sign(x) * log1p(abs(x) / s)
+    scheme === :asinh_zscore      && return asinh(x / s)
+    throw(ArgumentError("unknown normalization scheme $(repr(scheme)); choose from $(NORMALIZATION_SCHEMES)"))
+end
+
+function nonlinear_inverse(scheme::Symbol, y, s)
+    scheme === :zscore            && return y
+    scheme === :log1p_zscore      && return expm1(y) * s
+    scheme === :signed_log_zscore && return sign(y) * expm1(abs(y)) * s
+    scheme === :asinh_zscore      && return sinh(y) * s
+    throw(ArgumentError("unknown normalization scheme $(repr(scheme)); choose from $(NORMALIZATION_SCHEMES)"))
+end
+
+"""
+    parse_normalization(spec, domain) -> Dict{String,Symbol}
+
+Validate a `variable => scheme` mapping (e.g. the `[normalization]` config table; schemes as
+strings or symbols) against the time-varying variables of `domain`. Unlisted variables and
+`"zscore"` entries are plain z-score and are dropped from the result. Static variables are
+rejected (they keep `STATIC_TRANSFORMS`).
+"""
+function parse_normalization(spec::AbstractDict, domain::String)
+    haskey(DOMAIN_VARS, domain) || throw(ArgumentError("unknown domain \"$domain\""))
+    tv = vcat(DOMAIN_VARS[domain]["state"], DOMAIN_VARS[domain]["forcing"])
+    out = Dict{String,Symbol}()
+    for (k, v) in spec
+        name = String(k)
+        name in tv || throw(ArgumentError(
+            "normalization: \"$name\" is not a time-varying variable of domain \"$domain\" " *
+            "(choose from $(join(tv, ", ")); static variables keep their fixed transforms)"))
+        scheme = Symbol(v)
+        scheme in NORMALIZATION_SCHEMES || throw(ArgumentError(
+            "normalization: unknown scheme $(repr(String(v))) for \"$name\"; " *
+            "choose from $(join(NORMALIZATION_SCHEMES, ", "))"))
+        scheme === :zscore || (out[name] = scheme)
+    end
+    return out
+end
+
+# Scale `s` of a nonlinear scheme: the median of the finite non-zero |values| (robust,
+# adapts to the tiny magnitudes of area-normalised variables); 1 when there are none.
+function _nonlinear_scale(vals::AbstractArray{Float32})
+    a = Float32[abs(v) for v in vals if isfinite(v) && v != 0f0]
+    return isempty(a) ? 1f0 : max(median(a), floatmin(Float32))
+end
+
+# Mean/std of `f(x/s)` over the finite entries of `vals` (std guarded like `standardize!`).
+function _nonlinear_moments(scheme::Symbol, vals::AbstractArray{Float32}, s::Float32)
+    y = Float32[nonlinear_forward(scheme, v, s) for v in vals if isfinite(v)]
+    isempty(y) && return 0f0, 1f0
+    μ = mean(y)
+    σ = length(y) == 1 ? 1f0 : std(y)
+    return Float32(μ), (σ == 0f0 || !isfinite(σ) ? 1f0 : Float32(σ))
+end
+
+"""
+    nonlinear_stats(scheme, fit; per_node) -> (scale, nl_mean, nl_std)
+
+Fit the nonlinear step of `scheme` on the `(n_nodes × T)` pre-z-score training slice `fit`:
+the scale `s` and the mean/std of `f(x/s)`. Per-node vectors when `per_node`, else scalars.
+"""
+function nonlinear_stats(scheme::Symbol, fit::AbstractMatrix{Float32}; per_node::Bool)
+    if per_node
+        n  = size(fit, 1)
+        sc = Vector{Float32}(undef, n); μ = similar(sc); σ = similar(sc)
+        for i in 1:n
+            row = @view fit[i, :]
+            sc[i] = _nonlinear_scale(row)
+            μ[i], σ[i] = _nonlinear_moments(scheme, row, sc[i])
+        end
+        return sc, μ, σ
+    end
+    s = _nonlinear_scale(fit)
+    μ, σ = _nonlinear_moments(scheme, fit, s)
+    return s, μ, σ
+end
+
 """
     build_wflow_graph(staticmaps_file, output_file, domain)
         -> (graphs, stats, grid, postscale, static)
@@ -364,6 +466,13 @@ Construct a `GNNGraph` for the wflow routing domain with standardized node featu
   normalisation for `river_q`, storage-proxy scaling for `river_h`).
   Pass this to `evaluate_trajectory` as `postscale` to recover physical units.
 - The fifth return value is the shared `static` feature matrix.
+
+Keyword `normalization` (a `variable => scheme` mapping, see [`parse_normalization`](@ref)
+and `NORMALIZATION_SCHEMES`) selects a nonlinear input scaling per time-varying variable.
+It does **not** change the stored data or the `(mean, std)` statistics (always the plain
+z-score). For a non-`:zscore` variable the statistics entry additionally carries `scheme`,
+`scale`, `nl_mean`, `nl_std` (per-node vectors for `PER_NODE_NORM_VARS`), fitted on the
+training slice, which the model's `EncoderInputTransform` uses to feed the encoder.
 """
 function build_wflow_graph(staticmaps_file::String, output_file::String, domain::String;
                            schema::WflowSchema = SCHEMA_V1,
@@ -371,11 +480,13 @@ function build_wflow_graph(staticmaps_file::String, output_file::String, domain:
                            include_log_upstream_area::Bool = false,
                            sigma_floor_h::Real = 0.0,
                            sigma_floor_q::Real = 0.0,
-                           sigma_floor_inwater::Real = 0.0)
+                           sigma_floor_inwater::Real = 0.0,
+                           normalization::AbstractDict = Dict{String,Symbol}())
     0 < stats_frac <= 1 || throw(ArgumentError("stats_frac must be in (0, 1]"))
     sigma_floor_h >= 0 || throw(ArgumentError("sigma_floor_h must be >= 0"))
     sigma_floor_q >= 0 || throw(ArgumentError("sigma_floor_q must be >= 0"))
     sigma_floor_inwater >= 0 || throw(ArgumentError("sigma_floor_inwater must be >= 0"))
+    nl_scheme = parse_normalization(normalization, domain)
 
     sigma_floor_map = Dict(
         "river_h" => Float32(sigma_floor_h),
@@ -501,7 +612,13 @@ function build_wflow_graph(staticmaps_file::String, output_file::String, domain:
                         postscale[lname] = domain_scalers[lname](
                             @view(arr[vi, :, :]), rows, cols, staticmaps_file, schema)
                     end
-                    if domain == "river" && (lname in PER_NODE_NORM_VARS)
+                    # Nonlinear input scaling (encoder-only, see `nonlinear_stats`): fitted
+                    # on the pre-z-score training slice; never alters the stored data.
+                    scheme   = get(nl_scheme, lname, :zscore)
+                    per_node = domain == "river" && (lname in PER_NODE_NORM_VARS)
+                    nl = scheme === :zscore ? nothing :
+                         nonlinear_stats(scheme, arr[vi, :, 1:nfit_t]; per_node)
+                    if per_node
                         σ_floor = get(sigma_floor_map, lname, 0f0)
                         μv, σv = standardize_per_node!(@view(arr[vi, :, :]),
                                                        @view(arr[vi, :, 1:nfit_t]),
@@ -511,6 +628,8 @@ function build_wflow_graph(staticmaps_file::String, output_file::String, domain:
                         μ, σ = standardize!(@view(arr[vi, :, :]), @view(arr[vi, :, 1:nfit_t]))
                         stats[lname] = (mean = μ, std = σ)
                     end
+                    nl === nothing || (stats[lname] = merge(stats[lname],
+                        (scheme = scheme, scale = nl[1], nl_mean = nl[2], nl_std = nl[3])))
                 end
                 arr
             end

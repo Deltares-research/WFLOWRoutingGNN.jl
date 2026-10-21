@@ -264,6 +264,16 @@ status logs; it back-fills decisions made before 27-08-2026.*
 - **Per-variable z-score + physical postscale.** `river_q` area-normalised
   (specific discharge), `river_h` scaled by `w·l/A`; the MB layer stores inverse
   constants and evaluates physics in physical units. Stats fit on train split.
+- **Nonlinear input scaling is encoder-input-only.** A selectable per-variable
+  scheme (`log1p`/signed-log/`asinh` then re-z-score, auto scale = median non-zero
+  `|x|`) is applied inside the model by a non-trainable first encoder layer, not in
+  the data pipeline. Baking it into `ndata.state/forcing` would break the MB layer's
+  affine physical-unit de-normalisation (routing additivity) and require inverses in
+  `rollout.jl`/`analysis.jl`; the in-model design leaves data, `norm_stats`
+  `(mean, std)`, `postscale`, MB, loss and de-normalisation untouched, so the MB
+  budget is bit-unchanged and no inverse path exists to get wrong. Cost: one
+  elementwise op per forward pass, and only when a scheme is configured. Static
+  variables keep `STATIC_TRANSFORMS`.
 
 ## Training
 

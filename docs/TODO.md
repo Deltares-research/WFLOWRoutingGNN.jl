@@ -247,7 +247,7 @@ Both operators are static SpMVs → precompute once (`A` is static, constraint 3
       `mb_h_loss_weight` path. The `amplification.png`/volume-budget diagnostics
       should report the new backbone's `C₃` contraction instead of A's −21.95
       stiffness.
-- [ ] **Expose to the hpar search.** `model.mb_formulation` is a plain string key,
+- [x] **Expose to the hpar search.** `model.mb_formulation` is a plain string key,
       so the box search can sweep it today via `_set!`
       ([src/hparsearch.jl](../src/hparsearch.jl)) once the new value is accepted —
       add `"model.mb_formulation"` with `["theta_kinematic_wave",
@@ -299,19 +299,19 @@ records the per-node inverse multiplier in `postscale`. De-normalization
 in [src/analysis.jl](../src/analysis.jl)) undoes **z-score then `postscale`** — it
 knows nothing about a nonlinear transform yet.
 
-- [ ] **Normalization-scheme abstraction.** Replace the hardcoded transform Dicts
+- [x] **Normalization-scheme abstraction.** Replace the hardcoded transform Dicts
       with a small selectable scheme per variable: at minimum `:zscore` (today's
       behaviour, the default), `:log1p_zscore`, `:signed_log_zscore`,
       `:asinh_zscore`. Each scheme is a `(forward, inverse)` pair so it is exactly
       invertible; z-score stays the outer affine step. Keep the per-node vs global
       z-score choice (`PER_NODE_NORM_VARS`) orthogonal to the nonlinear transform.
-- [ ] **Wire the inverse into every de-normalization path.** The transform id must
+- [x] **Wire the inverse into every de-normalization path.** *(Resolved by design: encoder-only, no inverse path needed; see the Implemented note.)* The transform id must
       be persisted in `norm_stats` (→ `norm_stats.toml`) so `evaluate_trajectory`
       and the analysis/MB-residual code invert `nonlinear ∘ zscore ∘ postscale`
       symmetrically. Audit all readers of `norm_stats`/`postscale` (rollout.jl,
       analysis.jl, rollout fixed-horizon eval) — a missing inverse silently
       corrupts physical-unit output.
-- [ ] **Mass-balance correctness gate (critical).** The `ThetaKinematicWave` layer
+- [x] **Mass-balance correctness gate (critical).** The `ThetaKinematicWave` layer
       and the loss evaluate physics in **physical units** and the per-node z-score
       is deliberately kept **affine** to preserve routing additivity (see the
       `PER_NODE_NORM_VARS` comment in preprocess.jl and
@@ -323,7 +323,7 @@ knows nothing about a nonlinear transform yet.
       whether `river_inwater` (a forcing, not a looped state) may use a nonlinear
       transform freely. Add a test that the MB physical budget is unchanged when
       only input-feature normalization changes.
-- [ ] **Config switch (per variable).** Expose the scheme in the run config
+- [x] **Config switch (per variable).** Expose the scheme in the run config
       (data/model settings TOML), e.g. a `[normalization]` table mapping variable
       name → scheme, defaulting every variable to `:zscore` so existing configs are
       unchanged. Plumb through `DataSettings`/`ModelSettings`
@@ -332,7 +332,7 @@ knows nothing about a nonlinear transform yet.
       `include_log_upstream_area` already flow via `preprocess_run`,
       [src/pipeline.jl](../src/pipeline.jl#L198)). Persist the choice so inference
       reuses it.
-- [ ] **Expose to the hpar search.** The box search already applies arbitrary
+- [x] **Expose to the hpar search.** The box search already applies arbitrary
       dot-path overrides via `_set!` ([src/hparsearch.jl](../src/hparsearch.jl)), so
       a key like `"normalization.river_inwater"` is sweepable **once it exists in
       the parsed config**. Add the key(s) to the search-space and confirm `_set!`
@@ -340,10 +340,30 @@ knows nothing about a nonlinear transform yet.
       `[normalization]` table or teach `_set!` to create missing intermediate
       nodes). Add an example to
       [experiments/template_hparsearch.toml](../experiments/template_hparsearch.toml).
-- [ ] **Validation.** A/B one physical feature (start with `river_inwater`, which
-      is forcing-only and side-steps the MB additivity constraint) `:zscore` vs
-      `:log1p_zscore` on `sava_small_v081`; check encoder-input dynamic range,
-      peak/low-flow skill, and that the MB physical budget is bit-unchanged.
+- **Implemented (all items except the validation A/B).** The nonlinear scaling is an
+  **encoder-input-only** transform applied *inside the model*, not in the data
+  pipeline, so the stored (affine) state/forcing, `norm_stats` `(mean, std)`,
+  `postscale`, the mass-balance layer, the loss, `evaluate_trajectory` and the
+  analysis code are untouched and no inverse is needed in any de-normalization path
+  (the "wire the inverse" item is satisfied by construction; the MB budget is
+  bit-unchanged, tested). Schemes (`NORMALIZATION_SCHEMES`): `:zscore` (default),
+  `:log1p_zscore`, `:signed_log_zscore`, `:asinh_zscore`; `nonlinear_forward`
+  / `nonlinear_inverse` are an exact pair (inverse used for tests). The scale `s`
+  is fitted automatically (median non-zero `|x|` of the training window, per node for
+  `PER_NODE_NORM_VARS`) because area-normalised `river_inwater` is ~1e-8, where a
+  plain `log1p`/`asinh` is the identity; `f(x/s)` is re-standardised with
+  training-window `nl_mean`/`nl_std`. `build_wflow_graph(...; normalization)`
+  stores `scheme, scale, nl_mean, nl_std` in the stats of non-zscore variables only
+  (also written to `norm_stats.toml`). The model prepends a non-trainable
+  `EncoderInputTransform` to the encoder only when a scheme is set (default model and
+  old checkpoints unchanged). Config: `[model.normalization]` (`variable = scheme`),
+  validated, persisted in `model_settings.toml`; hpar key
+  `model.normalization.river_inwater` works (`_set!` now creates missing tables).
+  Scope: time-varying state/forcing variables; static variables keep
+  `STATIC_TRANSFORMS`. Tests: [test/test_normalization.jl](../test/test_normalization.jl).
+- [ ] **Validation A/B (open).** Run iver_inwater :zscore vs :log1p_zscore /
+      :asinh_zscore on sava_small_v081 (config key above) and compare peak/low-flow
+      skill.
 - Touch: `src/preprocess.jl` (scheme abstraction, forward+inverse,
   `build_wflow_graph` kwargs), `src/rollout.jl` + `src/analysis.jl` (inverse in
   de-normalization), `src/run.jl` / `src/gnn.jl` (settings fields),

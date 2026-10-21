@@ -103,6 +103,15 @@ mb_sigma_inwater_floor = 0.0
 # effectively dropped lateral inflow from the layer.
 mb_inwater_unscale = true
 
+# Optional nonlinear input scaling per time-varying (state/forcing) variable:
+# zscore (default) | log1p_zscore | signed_log_zscore | asinh_zscore. The scale s
+# is fitted automatically (median non-zero |x| of the training window), then the
+# result is re-standardised. ONLY the encoder input changes (a non-trainable layer
+# inside the model); stored data, mass balance, loss and de-normalisation stay
+# affine. Unlisted variables stay plain z-score.
+# [model.normalization]
+# river_inwater = "asinh_zscore"
+
 
 [train]
 # Total number of training epochs

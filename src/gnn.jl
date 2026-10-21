@@ -91,6 +91,13 @@ Hyperparameters for a `WflowGNN` model.
                    (effectively dropping lateral inflow). A saved
                    `model_settings.toml` without this key is read as `false`,
                    so checkpoints from before R5b keep their old behaviour.
+- `normalization`   : per-variable nonlinear input scaling, a `variable => scheme` map
+                   (`Dict{String,String}`; schemes `"zscore"` (default), `"log1p_zscore"`,
+                   `"signed_log_zscore"`, `"asinh_zscore"`; time-varying state/forcing
+                   variables only). Unlisted variables are plain z-score. It only changes
+                   what the **encoder** sees (a non-trainable `EncoderInputTransform`);
+                   the stored data, mass balance, loss and de-normalisation stay affine.
+                   See [`parse_normalization`](@ref). Default: empty.
 """
 Base.@kwdef struct ModelSettings
     domain               :: String
@@ -110,10 +117,16 @@ Base.@kwdef struct ModelSettings
     mb_sigma_q_floor     :: Float32 = 0.0f0
     mb_sigma_inwater_floor :: Float32 = 0.0f0
     mb_inwater_unscale   :: Bool = true
+    normalization        :: Dict{String,String} = Dict{String,String}()
 end
 
 # Valid values of `ModelSettings.mb_formulation`.
 const MB_FORMULATIONS = ("none", "theta_kinematic_wave")
+
+# Validated `variable => scheme` map for `ModelSettings.normalization` (plain z-score
+# entries dropped; see `parse_normalization`).
+_normalization_dict(raw::AbstractDict, domain::String) =
+    Dict{String,String}(k => String(v) for (k, v) in parse_normalization(raw, domain))
 
 """
     mb_formulation_kind(s::ModelSettings) -> Symbol
@@ -148,6 +161,8 @@ function Base.show(io::IO, s::ModelSettings)
     println(io, "  mb_sigma_h_floor : ", s.mb_sigma_h_floor)
     println(io, "  mb_sigma_q_floor : ", s.mb_sigma_q_floor)
     println(io, "  mb_sigma_inwater_floor : ", s.mb_sigma_inwater_floor)
+    isempty(s.normalization) ||
+        print(io, "\n  normalization   : ", join(("$k=$v" for (k, v) in sort(collect(s.normalization))), ", "))
     print(  io, "  mb_inwater_unscale : ", s.mb_inwater_unscale)
 end
 
@@ -177,6 +192,7 @@ function save_model_settings(path::String, s::ModelSettings)
         "mb_sigma_inwater_floor" => Float32(s.mb_sigma_inwater_floor),
         "mb_inwater_unscale" => s.mb_inwater_unscale,
     )
+    isempty(s.normalization) || (dict["normalization"] = Dict{String,Any}(s.normalization))
     open(path, "w") do io
         TOML.print(io, dict)
     end
@@ -211,6 +227,7 @@ function load_model_settings(path::String)
         mb_sigma_q_floor = Float32(get(d, "mb_sigma_q_floor", 0.0)),
         mb_sigma_inwater_floor = Float32(get(d, "mb_sigma_inwater_floor", 0.0)),
         mb_inwater_unscale = get(d, "mb_inwater_unscale", false),
+        normalization = _normalization_dict(get(d, "normalization", Dict{String,Any}()), d["domain"]),
     )
 end
 
@@ -607,4 +624,95 @@ end
 
 _decoder_input(h, ::Tuple{}) = h
 _decoder_input(h, extras::Tuple{Any, Any}) = vcat(h, extras[1], extras[2])
+
+# ── Selectable nonlinear input scaling (encoder-only) ───────────────────────
+
+"""
+    EncoderInputTransform
+
+Non-trainable first layer of the encoder that re-expresses selected time-varying
+input rows with a nonlinear scheme (see `NORMALIZATION_SCHEMES`). The model input rows
+arrive affine-normalised (`z = (x − μ)/σ`); for a selected row the layer recovers the
+physical-scale value `x = z·σ + μ`, applies `f(x / s)` and re-standardises with the
+training-window `nl_mean`/`nl_std`. Other rows pass through unchanged.
+
+Only the encoder input changes. The mass-balance layer, the loss, the rollout and every
+de-normalisation keep using the affine-normalised state/forcing, so no inverse transform
+is needed anywhere and the mass balance is bit-identical to the plain z-score model.
+
+All parameters have shape `(n_rows, n_nodes, 1)` (`masks`: `(n_rows, 1, 1)`); the
+`(n_rows, B·n_nodes)` input is reshaped (no copy) to `(n_rows, n_nodes, B)`, so per-node
+statistics broadcast over the batch and the layer needs no indexing (GPU/Zygote safe).
+Build with [`encoder_input_transform`](@ref).
+"""
+struct EncoderInputTransform{A <: AbstractArray{Float32,3}}
+    n_nodes :: Int
+    μ       :: A   # affine mean of the stored z-score
+    σ       :: A   # affine std of the stored z-score
+    inv_s   :: A   # 1 / s
+    μ_nl    :: A   # mean of f(x/s) on the training window
+    σ_nl    :: A   # std of f(x/s) on the training window
+    m_nl    :: A   # (n_rows,1,1): 1 for transformed rows
+    m_log1p :: A   # (n_rows,1,1) scheme masks
+    m_signed:: A
+    m_asinh :: A
+end
+
+Flux.@layer EncoderInputTransform trainable=()
+
+function (t::EncoderInputTransform)(x::AbstractMatrix)
+    size(x, 2) % t.n_nodes == 0 || throw(DimensionMismatch(
+        "EncoderInputTransform: input has $(size(x, 2)) columns, not a multiple of n_nodes = $(t.n_nodes)"))
+    r = reshape(x, size(x, 1), t.n_nodes, :)
+    u = (r .* t.σ .+ t.μ) .* t.inv_s
+    f = t.m_log1p  .* log1p.(max.(u, 0f0)) .+
+        t.m_signed .* (sign.(u) .* log1p.(abs.(u))) .+
+        t.m_asinh  .* asinh.(u)
+    y = (f .- t.μ_nl) ./ t.σ_nl
+    out = (1f0 .- t.m_nl) .* r .+ t.m_nl .* y
+    return reshape(out, size(x))
+end
+
+"""
+    encoder_input_transform(settings, norm_stats, n_nodes) -> Union{Nothing, EncoderInputTransform}
+
+Build the [`EncoderInputTransform`](@ref) for the variables in `norm_stats` that carry a
+nonlinear `scheme` (state and forcing rows; see `build_wflow_graph`). Returns `nothing`
+when every variable is plain z-score, so the default model is unchanged.
+"""
+function encoder_input_transform(s::ModelSettings, norm_stats, n_nodes::Int)
+    vars = DOMAIN_VARS[s.domain]
+    tv   = vcat(vars["state"], vars["forcing"])
+    extra_static = (s.domain == "river" && s.include_log_upstream_area) ? 1 : 0
+    n_rows = length(tv) + length(vars["static"]) + extra_static
+    sel = [v for v in tv if haskey(norm_stats, v) && haskey(norm_stats[v], :scheme) &&
+                            norm_stats[v].scheme !== :zscore]
+    isempty(sel) && return nothing
+
+    μ, μ_nl = zeros(Float32, n_rows, n_nodes, 1), zeros(Float32, n_rows, n_nodes, 1)
+    σ, inv_s, σ_nl = (ones(Float32, n_rows, n_nodes, 1) for _ in 1:3)
+    m_nl, m_log1p, m_signed, m_asinh = (zeros(Float32, n_rows, 1, 1) for _ in 1:4)
+    fillrow!(A, i, v) = (A[i, :, 1] .= v)
+    for v in sel
+        i  = findfirst(==(v), tv)
+        st = norm_stats[v]
+        fillrow!(μ, i, st.mean);       fillrow!(σ, i, st.std)
+        fillrow!(inv_s, i, 1 ./ st.scale)
+        fillrow!(μ_nl, i, st.nl_mean); fillrow!(σ_nl, i, st.nl_std)
+        m_nl[i] = 1f0
+        st.scheme === :log1p_zscore      && (m_log1p[i]  = 1f0)
+        st.scheme === :signed_log_zscore && (m_signed[i] = 1f0)
+        st.scheme === :asinh_zscore      && (m_asinh[i]  = 1f0)
+    end
+    return EncoderInputTransform(n_nodes, μ, σ, inv_s, μ_nl, σ_nl, m_nl, m_log1p, m_signed, m_asinh)
+end
+
+"""
+    with_input_transform(model::WflowGNN, t::EncoderInputTransform) -> WflowGNN
+
+Return `model` with `t` prepended to its encoder (`Chain(t, encoder)`). All other
+components, including the mass-balance layer, are shared unchanged.
+"""
+with_input_transform(m::WflowGNN, t::EncoderInputTransform) =
+    WflowGNN(Chain(t, m.encoder), m.processor, m.decoder, m.mass_balance, m.augment_mb)
 

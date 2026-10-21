@@ -37,7 +37,8 @@ function load_tuning_data(ds::DataSettings, ms::ModelSettings)
                          include_log_upstream_area = ms.include_log_upstream_area,
                          sigma_floor_h = ms.mb_sigma_h_floor,
                          sigma_floor_q = ms.mb_sigma_q_floor,
-                         sigma_floor_inwater = ms.mb_sigma_inwater_floor)
+                         sigma_floor_inwater = ms.mb_sigma_inwater_floor,
+                         normalization = ms.normalization)
     return (; graphs, norm_stats, postscale, static_arr, output_file)
 end
 

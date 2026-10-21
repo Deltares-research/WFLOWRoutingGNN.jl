@@ -13,7 +13,9 @@ export ldd_to_graph, build_wflow_graph, make_horizon_dataset, DOMAIN_VARS, LDD_O
        check_and_correct_grid_alignment,
        scale_river_q!, scale_river_h!, VAR_SCALERS,
        DataSettings, save_data_settings, load_data_settings,
-       get_timestep, peak_node_stats
+       get_timestep, peak_node_stats,
+       NORMALIZATION_SCHEMES, nonlinear_forward, nonlinear_inverse, nonlinear_stats,
+       parse_normalization
 
 include("sparse_ops.jl")
 
@@ -23,7 +25,8 @@ export MassBalanceFormulation, NoMassBalance, ThetaKinematicWave, MassBalanceLay
 
 include("gnn.jl")
 export WflowGNN, ModelSettings, save_model_settings, load_model_settings, ACTIVATIONS,
-       SparseConv, precompute_batched, mb_formulation_kind
+       SparseConv, precompute_batched, mb_formulation_kind,
+       EncoderInputTransform, encoder_input_transform, with_input_transform
 
 include("strategy.jl")
 export TrainingStrategy, save_training_strategy, load_training_strategy,
