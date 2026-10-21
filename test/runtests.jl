@@ -11,4 +11,5 @@ using WflowRoutingGNN
     include("test_training.jl")
     include("test_pipeline.jl")
     include("test_analysis.jl")
+    include("test_stages.jl")
 end

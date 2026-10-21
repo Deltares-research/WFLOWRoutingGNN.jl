@@ -255,13 +255,28 @@ A/B-tested change (retrain needed, results will shift).
 
 ## R7. Staged CLI entry point
 
-- [ ] `scripts/pipeline.jl <stage> <config.toml>` with
+- [x] `scripts/pipeline.jl <stage> <config.toml>` with
       `stage ∈ {prep, train, infer, analyze, all}`, dispatched via a `Stage` type
       hierarchy (`run_stage(::Preprocess, cfg)` … one method per stage; `all` folds
       over the four) — not an `if stage == …` ladder.
-- [ ] Decide `run_dir` layout: prefer **additively** introducing `prep/` over
+- [x] Decide `run_dir` layout: prefer **additively** introducing `prep/` over
       renaming existing dirs, to avoid breaking evaluation/performance-agent and
       plotting-script consumers; audit consumers first.
+- Implemented: `abstract type Stage` with `PreprocessStage`, `TrainStage`,
+      `InferStage`, `AnalyzeStage` and the composite `AllStages` (a fold of
+      `run_stage` over the four), plus `StageContext`, `stage_from_name` and
+      `run_stage_from_toml` in `src/run.jl`. A stage uses the in-memory result of
+      an earlier stage in the same context, else loads `prep/`, `model/` or
+      `output/*.nc` from the run dir, so each stage can run standalone.
+      `run_wflow_gnn` is now `run_stage(AllStages(), ...)`. `prep/` was already
+      introduced additively in R4 (no existing dir renamed). CLI names: `prep`
+      (alias `preprocess`), `train`, `infer`, `analyze`, `all`; `scripts/train.jl`
+      stays as the fused alias. Tests: `test/test_stages.jl`.
+- [x] R7 validation (2026-10-20): full test suite 4851/4851 pass. Golden run
+      (`sava_small_v081`, seed 42, 5 epochs, CPU and GPU): HEAD (pre-R7) vs. fused
+      `train.jl`, and fused vs. four separate `pipeline.jl prep|train|infer|analyze`
+      processes, all have the same 48 artifacts; TOML (minus timing keys),
+      NetCDF, JLD2 and CSV contents are identical and png/mp4 exist non-empty.
 - Touch: `scripts/pipeline.jl` (new), `src/pipeline.jl`.
 
 ## R — performance acceptance gate (run around the whole restructuring)

@@ -555,6 +555,166 @@ function write_run_metrics_toml(path::AbstractString, losses, ts::TrainSettings,
     return path
 end
 
+# ---------------------------------------------------------------------------
+# Stage hierarchy: one `run_stage` method per pipeline stage
+# ---------------------------------------------------------------------------
+
+"""
+    Stage
+
+Abstract supertype of the pipeline stages. Concrete stages: [`PreprocessStage`](@ref),
+[`TrainStage`](@ref), [`InferStage`](@ref), [`AnalyzeStage`](@ref) and the composite
+[`AllStages`](@ref). Run one with [`run_stage`](@ref); look one up by its CLI name
+with [`stage_from_name`](@ref).
+"""
+abstract type Stage end
+
+"Stage 1: [`preprocess_run`](@ref) → `prep/`."
+struct PreprocessStage <: Stage end
+"Stage 2: [`train_run`](@ref) → `model/`."
+struct TrainStage <: Stage end
+"Stage 3: [`infer_run`](@ref) → `output/<split>_{pred,true}.nc`."
+struct InferStage <: Stage end
+"Stage 4: [`analyze_run`](@ref) → `metrics/`, `plots/`, `output/spatial_metrics.nc`."
+struct AnalyzeStage <: Stage end
+
+"""
+    AllStages(stages = (PreprocessStage(), TrainStage(), InferStage(), AnalyzeStage()))
+
+The whole pipeline: folds [`run_stage`](@ref) over `stages` in order, handing the
+in-memory results from one stage to the next.
+"""
+struct AllStages{T <: Tuple} <: Stage
+    stages :: T
+end
+AllStages() = AllStages((PreprocessStage(), TrainStage(), InferStage(), AnalyzeStage()))
+
+"CLI name → stage, as accepted by `scripts/pipeline.jl`."
+const STAGE_NAMES = Dict{String, Stage}(
+    "prep"       => PreprocessStage(),
+    "preprocess" => PreprocessStage(),
+    "train"      => TrainStage(),
+    "infer"      => InferStage(),
+    "analyze"    => AnalyzeStage(),
+    "all"        => AllStages(),
+)
+
+"""
+    stage_from_name(name) -> Stage
+
+Look up a stage by its CLI name: `prep` (alias `preprocess`), `train`, `infer`,
+`analyze` or `all`. Throws an `ArgumentError` listing the valid names otherwise.
+"""
+function stage_from_name(name::AbstractString)
+    stage = get(STAGE_NAMES, lowercase(strip(name)), nothing)
+    stage === nothing &&
+        throw(ArgumentError("unknown stage \"$name\"; expected one of " *
+                            join(sort!(collect(keys(STAGE_NAMES))), ", ")))
+    return stage
+end
+
+"""
+    StageContext(ds, ms, ts)
+
+Settings plus the results of the stages run so far. A stage reads what it needs
+from the context and, when that is not there yet (the stage runs on its own),
+from the run directory `<ds.runs_dir>/<ds.run_name>/`; it then stores its own
+result back. Fields `prep`, `train`, `infer` and `analysis` are `nothing` until the
+corresponding stage ran in this context.
+"""
+mutable struct StageContext
+    ds       :: DataSettings
+    ms       :: ModelSettings
+    ts       :: TrainSettings
+    prep     :: Union{Nothing, PrepBundle}
+    train    :: Union{Nothing, NamedTuple}
+    infer    :: Union{Nothing, NamedTuple}
+    analysis :: Union{Nothing, NamedTuple}
+end
+StageContext(ds::DataSettings, ms::ModelSettings, ts::TrainSettings) =
+    StageContext(ds, ms, ts, nothing, nothing, nothing, nothing)
+
+# Inputs of a stage: the in-memory result of an earlier stage, else the artifact on disk.
+_stage_prep(ctx::StageContext) =
+    ctx.prep === nothing ? load_prep(_run_dirs(ctx.ds).root) : ctx.prep
+
+function _stage_model(ctx::StageContext, prep::PrepBundle)
+    ctx.train !== nothing && return ctx.train.model
+    return load_model(prep, ctx.ms, _run_dirs(ctx.ds).model)
+end
+
+"""
+    run_stage(stage, ctx::StageContext) -> ctx
+
+Run one pipeline stage. One method per [`Stage`](@ref); each returns `ctx` with its
+own result stored in it:
+
+| stage                | reads (when not already in `ctx`) | writes                      |
+|:---------------------|:----------------------------------|:----------------------------|
+| [`PreprocessStage`](@ref) | wflow model files            | `prep/`, `output/data/`     |
+| [`TrainStage`](@ref)      | `prep/`                      | `model/`, losses            |
+| [`InferStage`](@ref)      | `prep/`, `model/`            | `output/<split>_*.nc`       |
+| [`AnalyzeStage`](@ref)    | `prep/`, `output/*.nc`, `model/` | `metrics/`, `plots/`    |
+
+so each stage can be run on its own from a previous stage's artifacts. The
+stage `ctx.ds`/`ms`/`ts` must describe the same run as the artifacts.
+"""
+function run_stage end
+
+function run_stage(::PreprocessStage, ctx::StageContext)
+    ctx.prep = preprocess_run(ctx.ds, ctx.ms, ctx.ts)
+    return ctx
+end
+
+function run_stage(::TrainStage, ctx::StageContext)
+    ctx.prep  = _stage_prep(ctx)
+    ctx.train = train_run(ctx.prep, ctx.ds, ctx.ms, ctx.ts)
+    return ctx
+end
+
+function run_stage(::InferStage, ctx::StageContext)
+    prep  = ctx.prep = _stage_prep(ctx)
+    model = _stage_model(ctx, prep)
+    @info "Evaluating train and val trajectories"
+    ctx.infer = infer_run(model, prep, ctx.ms, ctx.ts; dirs = _run_dirs(ctx.ds))
+    return ctx
+end
+
+function run_stage(::AnalyzeStage, ctx::StageContext)
+    prep = ctx.prep = _stage_prep(ctx)
+    dirs = _run_dirs(ctx.ds)
+    # The layer-internal mass-balance diagnostics need the trained model; a run
+    # without weights on disk is analysed without them.
+    model = if ctx.train !== nothing
+        ctx.train.model
+    elseif isfile(joinpath(dirs.model, "model.jld2"))
+        load_model(prep, ctx.ms, dirs.model)
+    else
+        nothing
+    end
+    ctx.analysis = analyze_run(prep, ctx.ms, ctx.ts; dirs, model,
+                               train_summary = ctx.train, infer = ctx.infer)
+    return ctx
+end
+
+function run_stage(all::AllStages, ctx::StageContext)
+    foldl((c, stage) -> run_stage(stage, c), all.stages; init = ctx)
+end
+
+"""
+    run_stage_from_toml(stage, toml_path) -> StageContext
+
+Parse the run config at `toml_path` ([`parse_run_config`](@ref)) and run `stage`
+(a [`Stage`](@ref) or its CLI name, see [`stage_from_name`](@ref)) on it. This is
+what `scripts/pipeline.jl <stage> <config.toml>` calls.
+"""
+function run_stage_from_toml(stage::Stage, toml_path::AbstractString)
+    ds, ms, ts = parse_run_config(String(toml_path))
+    return run_stage(stage, StageContext(ds, ms, ts))
+end
+run_stage_from_toml(name::AbstractString, toml_path::AbstractString) =
+    run_stage_from_toml(stage_from_name(name), toml_path)
+
 """
     run_wflow_gnn(ds, ms, ts) -> model
 
@@ -606,34 +766,17 @@ Returns `(model, metrics)` where `metrics` is a `NamedTuple` with fields:
 - `val_n_timesteps`             : number of timesteps in the val trajectory
 """
 function run_wflow_gnn(ds::DataSettings, ms::ModelSettings, ts::TrainSettings)
-
-    # --- Stage 1: preprocess → prep/ ---
-    prep = preprocess_run(ds, ms, ts)
-
-    # --- Stage 2: train → model/ ---
-    tr = train_run(prep, ds, ms, ts)
-    model          = tr.model
-    losses         = tr.losses
-    train_duration = tr.train_duration_s
-    train_rollout  = losses.train_rollout
-    val_rollout    = losses.val_rollout
-
-    dirs = _run_dirs(ds)
-
-    # --- Stage 3: infer → output/<split>_{pred,true}.nc ---
-    @info "Evaluating train and val trajectories"
-    inf = infer_run(model, prep, ms, ts; dirs)
-
-    # --- Stage 4: analyze → metrics/, plots/, output/spatial_metrics.nc ---
-    analyze_run(prep, ms, ts; dirs, model, train_summary = tr, infer = inf)
+    # preprocess → train → infer → analyze, handing results over in memory.
+    ctx = run_stage(AllStages(), StageContext(ds, ms, ts))
+    tr, inf = ctx.train, ctx.infer
 
     metrics = (
-        final_train_loss           = last(train_rollout),
-        final_val_loss             = last(val_rollout),
+        final_train_loss           = last(tr.losses.train_rollout),
+        final_val_loss             = last(tr.losses.val_rollout),
         n_params                   = tr.n_params,
-        train_duration_s           = train_duration,
+        train_duration_s           = tr.train_duration_s,
         val_rollout_duration_s     = inf.val_rollout_duration_s,
         val_n_timesteps            = inf.val_n_timesteps,
     )
-    return model, metrics
+    return tr.model, metrics
 end

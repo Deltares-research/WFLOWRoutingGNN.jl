@@ -42,7 +42,9 @@ export PrepBundle, PREP_SCHEMA_VERSION, preprocess_run, train_run, save_prep, lo
 include("analysis.jl")
 export analyze_run, resolve_staticmaps, spatial_eval_run, regen_mb_diagnostics
 include("run.jl")
-export run_wflow_gnn, run_wflow_gnn_from_toml, parse_run_config, build_gnn_model
+export run_wflow_gnn, run_wflow_gnn_from_toml, parse_run_config, build_gnn_model,
+       Stage, PreprocessStage, TrainStage, InferStage, AnalyzeStage, AllStages,
+       StageContext, STAGE_NAMES, stage_from_name, run_stage, run_stage_from_toml
 
 include("tune.jl")
 export load_tuning_data, make_model_loader, probe_training_strategy,
