@@ -620,7 +620,8 @@ end
 
 _loss_components(::NoMassBalance, model, batch, static) = (nothing, nothing)
 
-function _loss_components(::ThetaKinematicWave, model, batch, static)
+function _loss_components(::Union{ThetaKinematicWave, MuskingumContinuityHybrid},
+                          model, batch, static)
     Flux.ignore_derivatives() do
         g      = batch[1]
         pred   = model(g, g.ndata.state, g.ndata.forcing, static, batch[2].ndata.forcing)
@@ -657,6 +658,12 @@ function mb_amplification(model::WflowGNN, batch::Vector{<:GNNGraph}, static::Ab
 end
 
 _mb_amplification(::NoMassBalance, model, batch, static) = (NaN32, NaN32)
+
+# The hybrid has no q→h readout to amplify (h is the carried state, q a readout): `amp`
+# is undefined and `gain` reports the median backbone contraction (< 1 by construction).
+function _mb_amplification(mb::MuskingumContinuityHybrid, model, batch, static)
+    (NaN32, Float32(median(backbone_contraction(mb))))
+end
 
 function _mb_amplification(mb::ThetaKinematicWave, model, batch, static)
     Flux.ignore_derivatives() do

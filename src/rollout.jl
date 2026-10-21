@@ -552,6 +552,10 @@ end
 # covers such models.
 _rollout_mb_diagnostics(::NoMassBalance, model, split, static) = nothing
 
+# The hybrid has no per-step layer record yet (conservation holds by construction;
+# the layer-free residual diagnostic still applies).
+_rollout_mb_diagnostics(::MuskingumContinuityHybrid, model, split, static) = nothing
+
 function _rollout_mb_diagnostics(mb::ThetaKinematicWave, model, split, static)
 
     # Flatten windows to a consecutive timeseries (same logic as evaluate_trajectory)

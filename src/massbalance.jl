@@ -639,3 +639,325 @@ function mb_h_loss_weight(mb::ThetaKinematicWave, h_loss_scale::Symbol)
     end
     return h_weight
 end
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Reservoir backbone + continuity readout hybrid
+# ──────────────────────────────────────────────────────────────────────────────
+
+"""
+    MuskingumContinuityHybrid
+
+Mass-balance formulation in which the **storage** (water depth `h`) is the only
+carried state and discharge `q` is a *readout*, never fed back.
+
+Per step, with `S = h·w·l` the channel storage [m³] and `I` the lateral inflow [m³/s]:
+
+1. **Backbone** — an implicit-Euler *linear-reservoir cascade* (`S_i = K_i·Q_i`):
+
+       S_bb[t+1] = P · ( S[t] + dt·I[t+1] ),    P = (I + dt·D − dt·A·D)⁻¹,   D = diag(1/K)
+
+   `A[i,j] = 1` means `j` flows into `i`. `P` is the exact solution of
+   `S[t+1] − S[t] = dt·(I + (A − I)·S[t+1]/K)`; it is **non-negative** (`I + dt·D − dt·A·D`
+   is an M-matrix) and, because `A` is nilpotent, lower-triangular in topological
+   order, so its spectrum is its diagonal `1/(1 + dt/K_i) < 1` for *any* `K_i > 0` —
+   unconditional contraction, no Courant condition. (The Muskingum–Cunge three-
+   coefficient form needs `K(1−x) ≥ dt/2`; with daily steps and Courant numbers ≫ 1 that
+   fails for physical `K`, which is why the implicit reservoir — Muskingum with `x = 0` —
+   is used.) `K_i = μ_h/μ_q` is the per-node mean storage/discharge ratio from the
+   training statistics, clamped to `[0.05, 100]·dt`.
+
+2. **Bounded learned residual** — the decoder output `Δ` enters as
+   `h_norm = h_bb_norm + ρ_max·tanh(Δ)` (`ρ_max = residual_bound`). The residual is
+   bounded in value, so the state stays bounded for any weights (bounded input ⇒ bounded
+   state of a contracting linear system). This is *not* a claim that the learned map
+   cannot change the local Jacobian; it can, but it cannot make the state diverge.
+   A non-negative floor (hard or softplus) is then applied to the physical depth.
+
+3. **Continuity readout** — discharge is solved from the *predicted* storage change:
+
+       Q[t+1] = (I − A)⁻¹ · ( I[t+1] − (S[t+1] − S[t])/dt ),
+
+   which satisfies `dS/dt = A·Q + I − Q` **exactly** at every node for whatever `S[t+1]`
+   the network produced. The only conservation break is the output floor `Q ≥ 0`, which is
+   outside the dynamics (`q` is not fed back: the encoder sees a zeroed `q` row, see
+   [`encoder_state`](@ref)).
+
+Both `P` and `(I − A)⁻¹` are precomputed sparse matrices (no dense inverse); a batched
+block-diagonal copy is built by [`precompute_batched`](@ref).
+
+Fields: per-node constants as in [`ThetaKinematicWave`](@ref) plus `K` [s],
+`contraction = 1/(1 + dt/K)` (diagonal of `P`), `P`, `R = (I−A)⁻¹`, their batched
+counterparts, `residual_bound`, and the smooth-floor settings.
+"""
+struct MuskingumContinuityHybrid{V <: AbstractVector{Float32}} <: MassBalanceFormulation
+    postscale_q       :: V
+    postscale_h       :: V
+    ph_over_pq        :: V
+    μ_q               :: V
+    σ_q               :: V
+    μ_h               :: V
+    σ_h               :: V
+    μ_inwater         :: V
+    σ_inwater         :: V
+    postscale_inwater :: V
+    K                 :: V   # reservoir time constant per node [s]
+    contraction       :: V   # 1/(1 + dt/K): diagonal (= spectrum) of P
+    dt                :: Float32
+    P                 :: AbstractMatrix{Float32}   # (N×N) backbone operator
+    R                 :: AbstractMatrix{Float32}   # (N×N) readout operator (I − A)⁻¹
+    P_batched         :: Union{Nothing, AbstractMatrix{Float32}}
+    R_batched         :: Union{Nothing, AbstractMatrix{Float32}}
+    batch_size        :: Int
+    residual_bound    :: Float32
+    smooth_h_floor    :: Bool
+    h_floor_softness  :: Float32
+end
+
+Flux.@layer MuskingumContinuityHybrid
+Flux.trainable(::MuskingumContinuityHybrid) = (;)  # physics constants, not optimised
+
+Functors.@functor MuskingumContinuityHybrid (
+    postscale_q, postscale_h, ph_over_pq,
+    μ_q, σ_q, μ_h, σ_h, μ_inwater, σ_inwater, postscale_inwater,
+    K, contraction,
+)
+
+# Re-create `l` with every per-node vector mapped by `fv` and every sparse operator by `fm`.
+function _mch_move(l::MuskingumContinuityHybrid, fv, fm)
+    MuskingumContinuityHybrid(
+        fv(l.postscale_q), fv(l.postscale_h), fv(l.ph_over_pq),
+        fv(l.μ_q), fv(l.σ_q), fv(l.μ_h), fv(l.σ_h),
+        fv(l.μ_inwater), fv(l.σ_inwater), fv(l.postscale_inwater),
+        fv(l.K), fv(l.contraction), l.dt,
+        fm(l.P), fm(l.R),
+        isnothing(l.P_batched) ? nothing : fm(l.P_batched),
+        isnothing(l.R_batched) ? nothing : fm(l.R_batched),
+        l.batch_size, l.residual_bound, l.smooth_h_floor, l.h_floor_softness,
+    )
+end
+Flux.gpu(l::MuskingumContinuityHybrid) = _mch_move(l, Flux.gpu, _to_cusparse)
+Flux.cpu(l::MuskingumContinuityHybrid) = _mch_move(l, Flux.cpu, _to_cpu_sparse)
+
+# Bounds of the reservoir constant, as multiples of the timestep.
+const MCH_K_MIN_DT = 0.05f0
+const MCH_K_MAX_DT = 100f0
+
+"""
+    _tree_inverse_operator(src, tgt, n, c, d) -> SparseMatrixCSC{Float32}
+
+Sparse inverse of the lower-triangular operator `L = diag(d) − A·diag(c)` on the
+routing DAG (`A[i,j] = 1` for each edge `src[k]=j → tgt[k]=i`), computed row by row in
+topological order from `row_i = (e_i + Σ_{j→i} c_j·row_j) / d_i`. Each node's row is
+merged into exactly one downstream row, so the cost is `O(nnz(L⁻¹))` — no dense inverse.
+`c = d = 1` gives the accumulation operator `(I − A)⁻¹` (`1` where `j` is `i` or upstream
+of it). Throws `ArgumentError` when the graph has a cycle.
+"""
+function _tree_inverse_operator(src::AbstractVector{<:Integer}, tgt::AbstractVector{<:Integer},
+                                n::Int, c::AbstractVector, d::AbstractVector)
+    ups  = [Int[] for _ in 1:n]
+    down = [Int[] for _ in 1:n]
+    remaining = zeros(Int, n)
+    for (s, t) in zip(src, tgt)
+        push!(ups[t], s); push!(down[s], t); remaining[t] += 1
+    end
+    queue = findall(==(0), remaining)
+    rows_idx = Vector{Vector{Int32}}(undef, n)
+    rows_val = Vector{Vector{Float32}}(undef, n)
+    acc     = zeros(Float64, n)
+    mark    = falses(n)
+    touched = Int[]
+    head = 1
+    while head <= length(queue)
+        i = queue[head]; head += 1
+        empty!(touched)
+        acc[i] = 1.0; mark[i] = true; push!(touched, i)
+        for j in ups[i]
+            cj = Float64(c[j])
+            for (k, v) in zip(rows_idx[j], rows_val[j])
+                if !mark[k]
+                    mark[k] = true; push!(touched, k)
+                end
+                acc[k] += cj * v
+            end
+        end
+        di = Float64(d[i])
+        rows_idx[i] = Int32.(touched)
+        rows_val[i] = Float32[acc[k] / di for k in touched]
+        for k in touched
+            acc[k] = 0.0; mark[k] = false
+        end
+        for t in down[i]
+            remaining[t] -= 1
+            remaining[t] == 0 && push!(queue, t)
+        end
+    end
+    length(queue) == n ||
+        throw(ArgumentError("routing graph contains a cycle ($(n - length(queue)) nodes unreachable in topological order)"))
+    nnz_total = sum(length, rows_idx)
+    I = Vector{Int}(undef, nnz_total); J = Vector{Int}(undef, nnz_total)
+    V = Vector{Float32}(undef, nnz_total)
+    p = 0
+    for i in 1:n
+        for (k, v) in zip(rows_idx[i], rows_val[i])
+            p += 1; I[p] = i; J[p] = k; V[p] = v
+        end
+    end
+    return sparse(I, J, V, n, n)
+end
+
+"""
+    build_muskingum_continuity(norm_stats, postscale, src_edges, tgt_edges, dt;
+                               residual_bound, smooth_h_floor, h_floor_softness,
+                               unscale_inwater = true) -> MuskingumContinuityHybrid
+
+Factory for [`MuskingumContinuityHybrid`](@ref); statistics, inverse scalers and `dt`
+as in [`build_massbalance`](@ref). The reservoir constant is `K_i = μ_h/μ_q` (mean
+scaled storage over mean scaled discharge, in seconds), clamped to
+`[$(MCH_K_MIN_DT), $(MCH_K_MAX_DT)]·dt`; nodes without a positive finite ratio fall back
+to `K = dt`. Aborts (`ArgumentError`) on a non-finite or negative `residual_bound` or a
+cyclic routing graph. The batched operators are left unset; call
+[`precompute_batched`](@ref).
+"""
+function build_muskingum_continuity(norm_stats, postscale,
+                                    src_edges::AbstractVector{<:Integer},
+                                    tgt_edges::AbstractVector{<:Integer},
+                                    dt;
+                                    residual_bound::Real,
+                                    smooth_h_floor::Bool,
+                                    h_floor_softness::Real,
+                                    unscale_inwater::Bool = true)
+    isfinite(residual_bound) && residual_bound >= 0 ||
+        throw(ArgumentError("mb_residual_bound must be finite and ≥ 0, got $residual_bound"))
+    pq_vec  = postscale["river_q"]
+    ph_vec  = postscale["river_h"]
+    n_nodes = length(pq_vec)
+    piw_vec = unscale_inwater ? Float32.(postscale["river_inwater"]) :
+                                ones(Float32, n_nodes)
+    stat_vec(vname::String, field::Symbol) = begin
+        raw = getfield(norm_stats[vname], field)
+        if raw isa AbstractVector
+            length(raw) == n_nodes ||
+                throw(ArgumentError("norm_stats[$vname].$field length $(length(raw)) != n_nodes $n_nodes"))
+            Float32.(raw)
+        else
+            fill(Float32(raw), n_nodes)
+        end
+    end
+    μ_q = stat_vec("river_q", :mean);  σ_q = stat_vec("river_q", :std)
+    μ_h = stat_vec("river_h", :mean);  σ_h = stat_vec("river_h", :std)
+    μ_iw = stat_vec("river_inwater", :mean); σ_iw = stat_vec("river_inwater", :std)
+
+    dtf = Float32(dt)
+    K = μ_h ./ μ_q
+    n_fallback = count(k -> !(isfinite(k) && k > 0f0), K)
+    K[.!(isfinite.(K) .& (K .> 0f0))] .= dtf
+    n_clipped = count(k -> k < MCH_K_MIN_DT * dtf || k > MCH_K_MAX_DT * dtf, K)
+    clamp!(K, MCH_K_MIN_DT * dtf, MCH_K_MAX_DT * dtf)
+    λ = dtf ./ K
+    contraction = 1f0 ./ (1f0 .+ λ)
+    all(c -> 0f0 < c < 1f0, contraction) ||
+        throw(ArgumentError("backbone contraction left (0, 1): K must be positive and finite"))
+
+    P = _tree_inverse_operator(src_edges, tgt_edges, n_nodes, λ, 1f0 .+ λ)
+    R = _tree_inverse_operator(src_edges, tgt_edges, n_nodes,
+                               ones(Float32, n_nodes), ones(Float32, n_nodes))
+    @info "Muskingum-continuity hybrid: median K/dt = $(round(median(K) / dtf; sigdigits = 3)), " *
+          "backbone contraction (spectral radius) = $(round(maximum(contraction); sigdigits = 4)); " *
+          "$n_fallback node(s) K→dt fallback, $n_clipped clamped; nnz(P) = $(nnz(P))"
+    return MuskingumContinuityHybrid(
+        pq_vec, ph_vec, ph_vec ./ pq_vec, μ_q, σ_q, μ_h, σ_h, μ_iw, σ_iw, piw_vec,
+        K, contraction, dtf, P, R, nothing, nothing, 0,
+        Float32(residual_bound), smooth_h_floor, Float32(h_floor_softness),
+    )
+end
+
+function precompute_batched(l::MuskingumContinuityHybrid, B::Int)
+    blk(M) = SparseMatrixCSC{Float32, Int32}(blockdiag(fill(_to_cpu_sparse(M), B)...))
+    MuskingumContinuityHybrid(
+        l.postscale_q, l.postscale_h, l.ph_over_pq,
+        l.μ_q, l.σ_q, l.μ_h, l.σ_h, l.μ_inwater, l.σ_inwater, l.postscale_inwater,
+        l.K, l.contraction, l.dt,
+        _to_cpu_sparse(l.P), _to_cpu_sparse(l.R), blk(l.P), blk(l.R), B,
+        l.residual_bound, l.smooth_h_floor, l.h_floor_softness,
+    )
+end
+
+# `M · x` for a `(1, n)` row `x`, with the same three dispatch paths as the θ layer
+# (single graph / precomputed block-diagonal / reshape fallback).
+function _mch_apply(l::MuskingumContinuityHybrid, M, Mb, x::AbstractMatrix, n::Int, n_rep::Int)
+    N_per = length(l.postscale_q)
+    if n_rep == 1
+        return (_topology_mul(M, x'))'
+    elseif !isnothing(Mb) && n == l.batch_size * N_per
+        return (_topology_mul(Mb, x'))'
+    else
+        return reshape(_topology_mul(M, reshape(x, N_per, n_rep)), 1, n)
+    end
+end
+
+"""
+    (l::MuskingumContinuityHybrid)(g, state, forcing_next, Δ) -> next_state
+
+One step of the hybrid (see [`MuskingumContinuityHybrid`](@ref)): backbone, bounded
+residual `Δ`, depth floor, continuity readout. `state` is the normalised `(2, n)` state
+at `t` (only its `river_h` row is used); returns the normalised `(2, n)` state at `t+1`
+(`river_q` from the readout, `river_h` the carried storage).
+"""
+function (l::MuskingumContinuityHybrid)(g::GNNGraph, state::AbstractMatrix,
+                                        forcing_next::AbstractMatrix, Δ::AbstractMatrix)
+    n     = g.num_nodes
+    n_rep = n ÷ length(l.postscale_q)
+    tile(v) = _tile_node_const(v, n_rep, n)
+    pq, ph = tile(l.postscale_q), tile(l.postscale_h)
+    μq, σq = tile(l.μ_q), tile(l.σ_q)
+    μh, σh = tile(l.μ_h), tile(l.σ_h)
+    μiw, σiw, piw = tile(l.μ_inwater), tile(l.σ_inwater), tile(l.postscale_inwater)
+
+    # Storage S = pq · scaled_h [m³]; lateral inflow at t+1 [m³/s].
+    S_curr = pq .* (state[2:2, :] .* σh .+ μh)
+    I_next = (forcing_next[1:1, :] .* σiw .+ μiw) .* piw
+
+    # 1. backbone (implicit-Euler reservoir cascade), in normalised depth space
+    S_bb  = _mch_apply(l, l.P, l.P_batched, S_curr .+ l.dt .* I_next, n, n_rep)
+    h_bb  = (S_bb ./ pq .- μh) ./ σh
+    # 2. bounded residual + ≥ 0 depth floor
+    h_pre = h_bb .+ l.residual_bound .* tanh.(Δ)
+    h_phys = _nonnegative_floor(ph .* (h_pre .* σh .+ μh), l.smooth_h_floor, l.h_floor_softness)
+    scaled_h_new = h_phys ./ ph
+    S_new = pq .* scaled_h_new
+    # 3. continuity readout of discharge (exact for the storage change above)
+    q_phys = _mch_apply(l, l.R, l.R_batched, I_next .- (S_new .- S_curr) ./ l.dt, n, n_rep)
+    q_phys = max.(0f0, q_phys)
+    return vcat((q_phys ./ pq .- μq) ./ σq, (scaled_h_new .- μh) ./ σh)
+end
+
+has_mass_balance(::MuskingumContinuityHybrid)   = true
+decoder_outputs(::MuskingumContinuityHybrid, ::Int) = 1
+extra_decoder_dim(::MuskingumContinuityHybrid)  = 0
+extra_decoder_features(::MuskingumContinuityHybrid, g, state, forcing) = ()
+floor_state(::MuskingumContinuityHybrid, g, raw) = raw
+apply_formulation(f::MuskingumContinuityHybrid, g, state, forcing, forcing_next, Δ) =
+    f(g, state, forcing_next, Δ)
+
+function mb_h_loss_weight(mb::MuskingumContinuityHybrid, ::Symbol)
+    @info "Muskingum-continuity hybrid: h_loss_weight left at the strategy value " *
+          "(h is a carried state, not a stiff q→h readout)"
+    return nothing
+end
+
+"""
+    encoder_state(f, state) -> state
+
+State rows the encoder may see. Identity for every formulation except
+[`MuskingumContinuityHybrid`](@ref), whose `river_q` row (a readout, not a state) is
+zeroed so the dynamics depend only on the carried storage `h` and the forcing. The row
+count is unchanged, so the encoder input width and checkpoints keep their layout.
+"""
+encoder_state(::MassBalanceFormulation, state) = state
+function encoder_state(::MuskingumContinuityHybrid, state)
+    q0 = Flux.ignore_derivatives(() -> zero(state[1:1, :]))
+    return vcat(q0, state[2:2, :])
+end
+
+# Diagonal (= spectrum) of the backbone operator, per node: `1/(1 + dt/K_i)`.
+backbone_contraction(f::MuskingumContinuityHybrid) = Array(f.contraction)

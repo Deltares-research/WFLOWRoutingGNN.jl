@@ -2,7 +2,19 @@ This document serves as a concrete changelog of the code, summarizing briefly th
 
 ## 2026-10-21
 
-- **Selectable nonlinear input scaling (TODO "Input feature normalization").** New
+- **Mass-balance redesign: `muskingum_continuity` formulation (TODO "Mass-balance
+        redesign").** New `MuskingumContinuityHybrid` (`build_muskingum_continuity`) behind
+        `mb_formulation = "muskingum_continuity"`: storage `h` is the carried state, advanced
+        by an implicit-Euler reservoir-cascade backbone (sparse `P`, spectrum `1/(1+dt/K) < 1`)
+        plus a bounded learned residual (`mb_residual_bound`, default 0.5), and `q` is the
+        exact continuity readout `(Iâˆ’A)â»Â¹(I_lat âˆ’ dS/dt)`, never fed back (`encoder_state`
+        zeroes the `q` row in the encoder input). Wired into `_loss_components`,
+        `_mb_amplification`, `_rollout_mb_diagnostics`, `layer_mb_analysis`
+        (`metrics/mb_backbone_contraction_by_node.csv`), `MB_FORMULATIONS`,
+        `ModelSettings.mb_residual_bound`, `settings_from_config` and the templates (incl. a
+        `model.mb_formulation` sweep example). Default formulation and checkpoints unchanged.
+        Tests: [test/test_mb_hybrid.jl](../test/test_mb_hybrid.jl), a pipeline case in
+        [test/test_pipeline.jl](../test/test_pipeline.jl).- **Selectable nonlinear input scaling (TODO "Input feature normalization").** New
 	`[model.normalization]` config table (`variable = scheme`; `zscore` default,
 	`log1p_zscore`, `signed_log_zscore`, `asinh_zscore`) for time-varying
 	state/forcing variables, exposed as `ModelSettings.normalization` and sweepable in the

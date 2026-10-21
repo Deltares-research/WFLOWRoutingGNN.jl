@@ -58,6 +58,21 @@ proc_activation = "swish"
 # useful as a baseline to measure the benefit of the mass-balance constraint.
 enforce_mass_balance = true
 
+# Mass-balance formulation (river domain, enforce_mass_balance = true only):
+#   "theta_kinematic_wave"  (default) discharge q is the fed-back state, h derived
+#                           from the θ-weighted kinematic-wave balance (see mb_theta).
+#   "muskingum_continuity"  h (storage) is the only carried state: an implicit-Euler
+#                           reservoir-cascade backbone (spectral radius < 1 for any
+#                           timestep) plus a bounded learned residual; q is an exact
+#                           continuity readout and is NOT fed back (the encoder sees
+#                           a zeroed q row). mb_theta / mb_augment_decoder are ignored.
+#   "none"                  no physics constraint.
+mb_formulation = "theta_kinematic_wave"
+
+# Bound rho_max (in sigma_h units) of the learned residual of the
+# "muskingum_continuity" formulation: h_norm = h_backbone + rho_max*tanh(delta).
+mb_residual_bound = 0.5
+
 # Implicitness weight θ ∈ [0, 1] of the mass-balance time discretisation
 # (river domain, enforce_mass_balance = true only).
 #   θ = 1.0  fully implicit / backward Euler (default; historical behaviour)

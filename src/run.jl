@@ -107,6 +107,7 @@ function settings_from_config(d::AbstractDict, toml_dir::AbstractString)
         mb_sigma_q_floor = Float32(get(md, "mb_sigma_q_floor", 0.0)),
         mb_sigma_inwater_floor = Float32(get(md, "mb_sigma_inwater_floor", 0.0)),
         mb_inwater_unscale = get(md, "mb_inwater_unscale", true),
+        mb_residual_bound = Float32(get(md, "mb_residual_bound", 0.5)),
         normalization = _normalization_dict(get(md, "normalization", Dict{String,Any}()), md["domain"]),
     )
 
@@ -261,6 +262,14 @@ _build_mb_formulation(::Val{:theta_kinematic_wave}, ms, norm_stats, postscale,
                       smooth_h_floor = ms.mb_smooth_h_floor,
                       h_floor_softness = ms.mb_h_floor_softness,
                       unscale_inwater = ms.mb_inwater_unscale)
+
+_build_mb_formulation(::Val{:muskingum_continuity}, ms, norm_stats, postscale,
+                      src_edges, tgt_edges, dt) =
+    build_muskingum_continuity(norm_stats, postscale, src_edges, tgt_edges, dt;
+                               residual_bound = ms.mb_residual_bound,
+                               smooth_h_floor = ms.mb_smooth_h_floor,
+                               h_floor_softness = ms.mb_h_floor_softness,
+                               unscale_inwater = ms.mb_inwater_unscale)
 
 function _write_mb_floor_fraction_by_node(path::AbstractString,
                                           frac_h_raw_neg_node::AbstractVector,

@@ -5,6 +5,44 @@ note that holds the full reasoning. Newest at the top.
 
 ---
 
+
+# IMPLEMENTED 21-10-2026
+
+## Mass-balance redesign: reservoir backbone + continuity readout (`muskingum_continuity`)
+
+**Status: IMPLEMENTED (A/B validation open).** A parallel `MassBalanceFormulation`
+(`MuskingumContinuityHybrid`), selected by `mb_formulation = "muskingum_continuity"`;
+the default `"theta_kinematic_wave"` and its checkpoints are untouched. Design:
+[notes/mass_balance_formulations.md](notes/mass_balance_formulations.md) Â§4.2 / Â§6.
+
+- **State and readout.** `h` (storage `S = hÂ·wÂ·l`) is the only carried state;
+  `q = (Iâˆ’A)â»Â¹(I_lat âˆ’ Î”S/Î”t)` is a readout, never fed back. The encoder receives a
+  zeroed `q` row (`encoder_state`), so `in_dim` and the checkpoint layout are unchanged
+  but the dynamics cannot depend on `q`. *Open decision (a): pure readout (default).*
+- **Backbone = implicit-Euler linear-reservoir cascade, not three-coefficient
+  Muskingumâ€“Cunge.** `S_bb = P (S + Î”tÂ·I)`, `P = (I + Î”tÂ·D âˆ’ Î”tÂ·AÂ·D)â»Â¹`, `D = diag(1/K)`,
+  `K_i = Î¼_h/Î¼_q` clamped to `[0.05, 100]Â·Î”t`. At daily steps the Courant number is â‰« 1, so
+  the MC coefficient `Câ‚ƒ = (K(1âˆ’x) âˆ’ Î”t/2)/D` is negative for physical `K` (the build-time
+  abort of the original plan would always fire). The reservoir form is the `x = 0` member
+  of the Muskingum family with `P â‰¥ 0` (M-matrix) and spectrum `1/(1+Î”t/K_i) < 1` for any
+  `K_i > 0`, with no Courant condition. `P` and `(Iâˆ’A)â»Â¹` are exact sparse inverses built
+  in `O(nnz)` by a topological sweep (no dense inverse); the build aborts on a cyclic graph
+  or a bad `mb_residual_bound`.
+- **Residual is a bounded source, not an `h` increment.** `h_norm = h_bb + Ï_maxÂ·tanh(Î”)`
+  (`mb_residual_bound = Ï_max`, default 0.5 Ïƒ_h), applied *after* the contracting backbone,
+  so a raw increment (undamped integrator, constraint 4) is avoided. *Open decision (b).*
+- **Nuance versus the design note.** The note says the residual "cannot move the
+  spectrum". As implemented the guarantee is **bounded-input/bounded-state**: the carried
+  map is a contraction plus a bounded term, so the state stays bounded for any weights; the
+  learned part can still change the local Jacobian through the encoder's `h` input.
+- **Conservation.** The readout satisfies `Î”S/Î”t = AÂ·Q + I âˆ’ Q` exactly for the produced
+  storage. The only break is the output floor `Q â‰¥ 0` (outside the dynamics) and the
+  non-negative `h` floor.
+- **Not done / deferred.** The `K, x` bank and iterative variants; a rollout/volume-budget
+  diagnostic for the hybrid (`layer_mb_analysis` only writes the contraction CSV);
+  `amplification.png` shows the backbone contraction as the "gain" and no amplification.
+
+---
 # IMPLEMENTED 19-10-2026 (shipped 2026-10-21)
 
 ## Four-stage pipeline + mass-balance code separation

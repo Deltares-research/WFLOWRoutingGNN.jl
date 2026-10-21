@@ -62,6 +62,11 @@ proc_activation = "swish"
 # (see [hparsearch.search_space] below) to compare against the hard constraint.
 enforce_mass_balance = true
 
+# Mass-balance formulation: "theta_kinematic_wave" (default), "muskingum_continuity"
+# (carried storage + reservoir backbone, q as continuity readout) or "none".
+# mb_residual_bound bounds the learned residual of "muskingum_continuity".
+mb_formulation = "theta_kinematic_wave"
+mb_residual_bound = 0.5
 # Implicitness weight θ ∈ [0, 1] of the mass-balance time discretisation.
 # θ=1 fully implicit (default), θ=0.5 Crank–Nicolson, θ=0 fully explicit.
 # Lowering θ damps rollout h-overshoots (scales ∂h_norm/∂q_norm by θ).
@@ -163,6 +168,9 @@ search_type = "box"
 # (lower θ, less h-overshoot) against storage-response lag.
 "model.mb_theta" = [1.0, 0.5, 0.25]
 
+# A/B of the mass-balance formulation: the legacy q-state kinematic wave versus
+# the reservoir-backbone + continuity-readout hybrid (mb_theta only affects the former).
+"model.mb_formulation" = ["theta_kinematic_wave", "muskingum_continuity"]
 # Physics-augmented decoder inputs (upstream-Q sum + explicit depth estimate).
 "model.mb_augment_decoder" = [false, true]
 

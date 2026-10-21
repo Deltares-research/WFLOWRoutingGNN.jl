@@ -21,7 +21,9 @@ include("sparse_ops.jl")
 
 include("massbalance.jl")
 export MassBalanceFormulation, NoMassBalance, ThetaKinematicWave, MassBalanceLayer,
-       build_massbalance, mb_diagnostics
+       build_massbalance, mb_diagnostics,
+       MuskingumContinuityHybrid, build_muskingum_continuity, backbone_contraction,
+       encoder_state
 
 include("gnn.jl")
 export WflowGNN, ModelSettings, save_model_settings, load_model_settings, ACTIVATIONS,

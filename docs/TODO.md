@@ -203,7 +203,7 @@ fragile discharge is *never a state and never fed back*:
 
 Both operators are static SpMVs → precompute once (`A` is static, constraint 3).
 
-- [ ] **New formulation struct** implementing the `MassBalanceFormulation`
+- [x] **New formulation struct** implementing the `MassBalanceFormulation`
       interface in [src/massbalance.jl](../src/massbalance.jl) (e.g.
       `MuskingumContinuityHybrid <: MassBalanceFormulation`, alongside
       `ThetaKinematicWave`/`NoMassBalance`). Must provide every interface method the
@@ -212,19 +212,19 @@ Both operators are static SpMVs → precompute once (`A` is static, constraint 3
       `mb_h_loss_weight`, `precompute_batched`, `Flux.gpu`/`Flux.cpu`. The decoder
       now predicts a **bounded source residual** (not `Δq`), so `decoder_outputs`
       and the decoder-feature set change accordingly.
-- [ ] **Muskingum backbone `P_MC`.** Build the static three-coefficient operator
+- [x] **Muskingum backbone `P_MC`.** Build the static three-coefficient operator
       from reference `(K, x)` so the coefficients are non-negative (M-matrix ⇒
       `C₃ < 1`, the contraction guarantee). Validate `C₂ ≥ 0` (no negative-
       coefficient oscillation) at build time and **abort** if violated, mirroring
       how `build_massbalance` sets up the routing operator today. Precompute as a
       sparse operator in the same class as the current `A_routing`.
-- [ ] **Continuity readout `(I−Aᵀ)⁻¹`.** Precompute the accumulation inverse once
+- [x] **Continuity readout `(I−Aᵀ)⁻¹`.** Precompute the accumulation inverse once
       (same sparsity/precompute path as the current adjoint in
       [src/sparse_ops.jl](../src/sparse_ops.jl)); apply as one SpMV each step to
       diagnose `q` from `I_lat − dS/dt`. Keep a positivity transform (softplus) on
       `h` outside the solve. `q` is diagnostic-only → it must **not** be fed back
       into the decoder by default.
-- [ ] **Open design decisions (resolve before/within implementation, from §5).**
+- [x] **Open design decisions (resolve before/within implementation, from §5).**
       (a) Is `q` a **pure readout** or a **defensively-regularised input feature**
       (`C+q-input`, §3.3 — small/stop-gradient weights so `∂_q F ≈ 0`)? Default to
       pure readout. (b) Does "increment beats absolute" (measured under A) still
@@ -232,7 +232,7 @@ Both operators are static SpMVs → precompute once (`A` is static, constraint 3
       constraint 4** (undamped integrator drift) — so predict the source
       conservatively via `P_MC`, not a raw `h` increment. Record the choice in
       [DECISIONS.md](DECISIONS.md).
-- [ ] **Config toggle (reuses the existing mechanism).** The formulation is
+- [x] **Config toggle (reuses the existing mechanism).** The formulation is
       already selected by the `mb_formulation` string key
       ([src/gnn.jl](../src/gnn.jl) `ModelSettings.mb_formulation`,
       `mb_formulation_kind`, dispatched via `_build_mb_formulation(::Val{…})` in
@@ -240,7 +240,7 @@ Both operators are static SpMVs → precompute once (`A` is static, constraint 3
       add the `Val{:muskingum_continuity}` (or chosen symbol) dispatch method, and
       keep the default `"theta_kinematic_wave"` so existing configs are unchanged.
       Update `MB_FORMULATIONS` error text + templates.
-- [ ] **Wire all formulation-dispatched sites.** Add methods for the new type to:
+- [x] **Wire all formulation-dispatched sites.** Add methods for the new type to:
       `_loss_components` / `_mb_amplification` ([src/strategy.jl](../src/strategy.jl)),
       `_rollout_mb_diagnostics` ([src/rollout.jl](../src/rollout.jl)),
       `layer_mb_analysis` ([src/analysis.jl](../src/analysis.jl)), and the
@@ -255,7 +255,21 @@ Both operators are static SpMVs → precompute once (`A` is static, constraint 3
       [experiments/template_hparsearch.toml](../experiments/template_hparsearch.toml)
       as the A/B example. Confirm a search cell with the new value preprocesses,
       trains and evaluates end-to-end.
-- [ ] **Validation (win conditions).** A/B the hybrid vs `ThetaKinematicWave` on
+- **Implemented (all items except the validation A/B).**
+  `MuskingumContinuityHybrid` / `build_muskingum_continuity` in
+  [src/massbalance.jl](../src/massbalance.jl), selected by
+  `mb_formulation = "muskingum_continuity"` (default unchanged), residual bound
+  `mb_residual_bound` (default 0.5). Deviations from the text above, all recorded in
+  [DECISIONS.md](DECISIONS.md): the backbone is an implicit-Euler *linear-reservoir cascade*
+  (Muskingum with `x = 0`), not the three-coefficient MC form (daily steps give Courant
+  numbers â‰« 1, so `Câ‚ƒ < 0` for physical `K` and the "abort on a negative coefficient" check
+  would always fire; the reservoir backbone has spectrum `1/(1+dt/K) < 1` for any `K > 0`
+  and `P â‰¥ 0`); the residual guarantee is bounded-input/bounded-state, not "cannot move the
+  spectrum"; the encoder sees a zeroed `q` row (`encoder_state`) so `q` is out of the loop.
+  The hybrid has no rollout/volume-budget layer record yet (`layer_mb_analysis` writes
+  `metrics/mb_backbone_contraction_by_node.csv`); a volume budget for it is a follow-up.
+  Tests: [test/test_mb_hybrid.jl](../test/test_mb_hybrid.jl) (44) and an end-to-end
+  train/infer/analyze case in [test/test_pipeline.jl](../test/test_pipeline.jl).- [ ] **Validation (win conditions).** A/B the hybrid vs `ThetaKinematicWave` on
       `sava_small_v081`: (i) `amp` no longer geometric and fixed-horizon RMSE finite
       from stiff high-flow anchors; (ii) stable past the training horizon (≥1906
       steps, matching the current MB's one virtue) — the structural `C₃ < 1` claim;
@@ -361,7 +375,8 @@ knows nothing about a nonlinear transform yet.
   `model.normalization.river_inwater` works (`_set!` now creates missing tables).
   Scope: time-varying state/forcing variables; static variables keep
   `STATIC_TRANSFORMS`. Tests: [test/test_normalization.jl](../test/test_normalization.jl).
-- [ ] **Validation A/B (open).** Run iver_inwater :zscore vs :log1p_zscore /
+- [ ] **Validation A/B (open).** Run 
+iver_inwater :zscore vs :log1p_zscore /
       :asinh_zscore on sava_small_v081 (config key above) and compare peak/low-flow
       skill.
 - Touch: `src/preprocess.jl` (scheme abstraction, forward+inverse,

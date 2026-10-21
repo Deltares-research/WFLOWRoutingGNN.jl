@@ -349,3 +349,30 @@ end
         @test !haskey(toml_n, "volume_budget")
     end
 end
+
+@testset "muskingum_continuity hybrid: train -> infer -> analyze end to end" begin
+    mktempdir() do tmp
+        ds, _, ts = pl_settings(tmp)
+        ms  = ModelSettings(domain = "river", hidden_dim = 8, nlayers = 1,
+                            mb_formulation = "muskingum_continuity")
+        run_dir = joinpath(tmp, "pl")
+        prep = preprocess_run(ds, ms, ts)
+        tr   = train_run(prep, ds, ms, ts)
+        @test tr.model.mass_balance isa MuskingumContinuityHybrid
+        @test all(isfinite, tr.losses.train_rollout)
+        @test load_model_settings(joinpath(run_dir, "model", "model_settings.toml")).mb_formulation ==
+              "muskingum_continuity"
+
+        inf  = infer_run(tr.model, prep, ms, ts; dirs = (; output = joinpath(run_dir, "output")))
+        dirs = (; output = joinpath(run_dir, "output"), plots = joinpath(run_dir, "plots"),
+                  metrics = joinpath(run_dir, "metrics"), model = joinpath(run_dir, "model"))
+        res = analyze_run(prep, ms, ts; dirs, model = tr.model, infer = inf)
+        @test res.mb_residual !== nothing && isfinite(res.mb_residual.pred.rms)
+        @test res.volume_budget === nothing && res.mb_stiffness === nothing
+        csv = joinpath(dirs.metrics, "mb_backbone_contraction_by_node.csv")
+        @test isfile(csv)
+        @test length(readlines(csv)) == prep.n_nodes + 1
+        @test rollout_mb_diagnostics(tr.model, prep.dataset.val, prep.static_arr) === nothing
+        @test all(0 .< backbone_contraction(tr.model.mass_balance) .< 1)
+    end
+end

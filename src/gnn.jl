@@ -48,8 +48,14 @@ Hyperparameters for a `WflowGNN` model.
                    `false` always selects the `"none"` formulation.
 - `mb_formulation`  : which mass-balance formulation to use when the mass balance
                    is enabled: `"theta_kinematic_wave"` (default; the θ-weighted
-                   kinematic-wave hard constraint) or `"none"` (no physics
+                   kinematic-wave hard constraint), `"muskingum_continuity"` (reservoir
+                   backbone + bounded residual, discharge as a continuity readout;
+                   see [`MuskingumContinuityHybrid`](@ref)) or `"none"` (no physics
                    constraint). See [`mb_formulation_kind`](@ref).
+- `mb_residual_bound` : only for `mb_formulation = "muskingum_continuity"`: bound `ρ_max`
+                   (in `σ_h` units) of the learned residual added to the reservoir
+                   backbone, `h_norm = h_backbone + ρ_max·tanh(Δ)` (default `0.5`).
+                   See [`MuskingumContinuityHybrid`](@ref).
 - `mb_theta`        : implicitness weight `θ ∈ [0, 1]` of the mass-balance time
                    discretisation (default `1.0` = fully implicit / backward
                    Euler). `0.5` = Crank–Nicolson, `0.0` = fully explicit.
@@ -117,11 +123,12 @@ Base.@kwdef struct ModelSettings
     mb_sigma_q_floor     :: Float32 = 0.0f0
     mb_sigma_inwater_floor :: Float32 = 0.0f0
     mb_inwater_unscale   :: Bool = true
+    mb_residual_bound    :: Float32 = 0.5f0
     normalization        :: Dict{String,String} = Dict{String,String}()
 end
 
 # Valid values of `ModelSettings.mb_formulation`.
-const MB_FORMULATIONS = ("none", "theta_kinematic_wave")
+const MB_FORMULATIONS = ("none", "theta_kinematic_wave", "muskingum_continuity")
 
 # Validated `variable => scheme` map for `ModelSettings.normalization` (plain z-score
 # entries dropped; see `parse_normalization`).
@@ -131,7 +138,8 @@ _normalization_dict(raw::AbstractDict, domain::String) =
 """
     mb_formulation_kind(s::ModelSettings) -> Symbol
 
-Effective mass-balance formulation for `s`: `:none` or `:theta_kinematic_wave`.
+Effective mass-balance formulation for `s`: `:none`, `:theta_kinematic_wave` or
+`:muskingum_continuity`.
 A mass balance is only available for the `"river"` domain; `enforce_mass_balance =
 false` (the legacy switch) and `mb_formulation = "none"` both select `:none`.
 Throws `ArgumentError` for an unknown `mb_formulation`.
@@ -161,6 +169,7 @@ function Base.show(io::IO, s::ModelSettings)
     println(io, "  mb_sigma_h_floor : ", s.mb_sigma_h_floor)
     println(io, "  mb_sigma_q_floor : ", s.mb_sigma_q_floor)
     println(io, "  mb_sigma_inwater_floor : ", s.mb_sigma_inwater_floor)
+    println(io, "  mb_residual_bound : ", s.mb_residual_bound)
     isempty(s.normalization) ||
         print(io, "\n  normalization   : ", join(("$k=$v" for (k, v) in sort(collect(s.normalization))), ", "))
     print(  io, "  mb_inwater_unscale : ", s.mb_inwater_unscale)
@@ -191,6 +200,7 @@ function save_model_settings(path::String, s::ModelSettings)
         "mb_sigma_q_floor" => Float32(s.mb_sigma_q_floor),
         "mb_sigma_inwater_floor" => Float32(s.mb_sigma_inwater_floor),
         "mb_inwater_unscale" => s.mb_inwater_unscale,
+        "mb_residual_bound" => Float32(s.mb_residual_bound),
     )
     isempty(s.normalization) || (dict["normalization"] = Dict{String,Any}(s.normalization))
     open(path, "w") do io
@@ -227,6 +237,7 @@ function load_model_settings(path::String)
         mb_sigma_q_floor = Float32(get(d, "mb_sigma_q_floor", 0.0)),
         mb_sigma_inwater_floor = Float32(get(d, "mb_sigma_inwater_floor", 0.0)),
         mb_inwater_unscale = get(d, "mb_inwater_unscale", false),
+        mb_residual_bound = Float32(get(d, "mb_residual_bound", 0.5)),
         normalization = _normalization_dict(get(d, "normalization", Dict{String,Any}()), d["domain"]),
     )
 end
@@ -611,7 +622,7 @@ function (m::WflowGNN)(g::GNNGraph,
     n_dyn  = size(state, 2)
     static = size(static, 2) == n_dyn ? static :
              repeat(static, 1, n_dyn ÷ size(static, 2))
-    x = vcat(state, forcing, static)
+    x = vcat(encoder_state(m.mass_balance, state), forcing, static)
     h = m.encoder(x)
     h = m.processor(g, h)
     f = m.mass_balance

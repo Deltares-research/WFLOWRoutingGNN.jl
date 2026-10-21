@@ -268,6 +268,23 @@ covers such models.
 """
 layer_mb_analysis(::NoMassBalance, model, prep, dirs, split_times) = nothing
 
+# Hybrid: report the backbone contraction (diagonal of P = spectrum) per node. There is
+# no floor/stiffness/volume-budget record for this formulation, so no layer summary.
+function layer_mb_analysis(mb::MuskingumContinuityHybrid, model, prep, dirs, split_times)
+    c = backbone_contraction(mb)
+    K = Array(mb.K)
+    path = joinpath(dirs.metrics, "mb_backbone_contraction_by_node.csv")
+    open(path, "w") do io
+        println(io, "node_idx,K_s,contraction")
+        for i in eachindex(c)
+            println(io, string(i, ",", Float32(K[i]), ",", c[i]))
+        end
+    end
+    @info "Muskingum-continuity backbone contraction: median=$(round(median(c); sigdigits=3)) " *
+          "max=$(round(maximum(c); sigdigits=4)) (spectral radius of P; < 1)"
+    return nothing
+end
+
 function layer_mb_analysis(::ThetaKinematicWave, model, prep, dirs, split_times)
     @info "Computing mass balance diagnostics on validation split"
     cpu_model = Flux.cpu(model)
