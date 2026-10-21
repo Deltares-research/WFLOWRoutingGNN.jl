@@ -16,6 +16,34 @@ Model unless noted: `experiments/test_sava_v081`, 8235 nodes, hidden 64,
 
 ---
 
+# STATUS AS OF 21-10-2026 (restructuring acceptance gate R1-R7 + R5b)
+
+Before/after on the same machine (RTX A1000 4 GB, Julia 1.12.6, identical `Manifest.toml`),
+baseline = `829c432` (pre-restructure, separate worktree), after = `a8b4cba` + uncommitted R5b.
+Model: `sava_small_v081_e13b_depth_floored_hps01_s01` weights (323 nodes, 8 `SparseConv`
+layers, hidden 64, MB layer), 200-step window, B = 16. Median ms per step per member.
+
+| benchmark | baseline | after |
+|---|---|---|
+| rollout CPU single | 8.66 | 10.01 (noise: min 5.91 vs 5.88) |
+| rollout CPU ensemble | 3.78 | 3.82 |
+| rollout GPU single (3 runs) | 2.35 / 2.34 / 2.26 | 2.55 / 2.15 / 7.62 (one run hit contention) |
+| rollout GPU ensemble (3 runs) | 0.234 / 0.270 / 0.237 | 0.371 / 0.276 / 0.693 (min 0.20-0.23 in all) |
+| message passing, 743 nodes, CPU (COO / sparse / dense / adj-sparse) | 1.66 / 1.78 / 3.60 / 2.02 | 2.16 / 1.90 / 3.65 / 2.06 |
+| message passing, 743 nodes, GPU (same order) | 0.475 / 0.352 / 0.296 / 0.298 | 0.423 / 0.389 / 0.280 / 0.271 |
+| batched aggregation n = 5000, B = 16, GPU sparse / blkdiag_pre | 1.647 / 0.821 | 1.654 / 0.815 |
+| batched aggregation n = 5000, B = 32, GPU sparse / blkdiag_pre | 3.139 / 1.595 | 3.006 / 1.555 |
+
+Conclusion: no regression beyond run-to-run noise. The two high GPU outliers
+(0.371, 0.693) have inflated max/std (a 336 ms single-rollout spike) and did not
+reproduce in the alternating reruns; the minima are identical. Absolute numbers are
+not comparable with the 02-09 tables (different model/window).
+
+Note: `scripts/benchmark_rollout.jl` now passes `include_log_upstream_area` to
+`build_wflow_graph`; without it, models trained with that option fail with an input
+width mismatch (9 vs 8).
+---
+
 # STATUS AS OF 02-09-2026
 
 ## SUMMARY

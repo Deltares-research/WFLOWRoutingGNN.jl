@@ -581,10 +581,13 @@ function _rollout_mb_diagnostics(mb::ThetaKinematicWave, model, split, static)
         target_state = graphs[t + 1].ndata.state
 
         # One autoregressive step (fully-implicit: pass forcing_next)
+        state_prev = state_pred
         state_pred = model(g0, state_pred, forcing_t, static, forcing_next)
 
         # --- Diagnostics: MB with predicted q --------------------------------
-        d = mb_diagnostics(mb, g0, state_pred, forcing_t, forcing_next, state_pred[1:1, :])
+        # The layer's current state is the one *before* this step; only q comes from
+        # the new prediction.
+        d = mb_diagnostics(mb, g0, state_prev, forcing_t, forcing_next, state_pred[1:1, :])
         pred_q[:,     t] = d.q_phys_new
         pred_h[:,     t] = d.h_phys_new
         upstream_q[:, t] = d.upstream_q

@@ -44,7 +44,8 @@ end
                       mb_h_floor_softness = 0.02f0,
                       mb_sigma_h_floor = 0.5f0,
                       mb_sigma_q_floor = 0.1f0,
-                      mb_sigma_inwater_floor = 0.2f0)
+                      mb_sigma_inwater_floor = 0.2f0,
+                      mb_inwater_unscale = false)
 
     path = tempname() * ".toml"
     save_model_settings(path, s)
@@ -64,6 +65,21 @@ end
     @test s2.mb_sigma_h_floor == s.mb_sigma_h_floor
     @test s2.mb_sigma_q_floor == s.mb_sigma_q_floor
     @test s2.mb_sigma_inwater_floor == s.mb_sigma_inwater_floor
+    @test s2.mb_inwater_unscale == false
+
+    # Default is the corrected physics; a settings file without the key is a
+    # pre-R5b checkpoint and must reload with the legacy behaviour.
+    @test ModelSettings(domain = GNN_DOMAIN).mb_inwater_unscale
+    path_legacy = tempname() * ".toml"
+    save_model_settings(path_legacy, ModelSettings(domain = GNN_DOMAIN))
+    d = WflowRoutingGNN.TOML.parsefile(path_legacy)
+    @test haskey(d, "mb_inwater_unscale")
+    delete!(d, "mb_inwater_unscale")
+    open(path_legacy, "w") do io
+        WflowRoutingGNN.TOML.print(io, d)
+    end
+    @test !load_model_settings(path_legacy).mb_inwater_unscale
+    rm(path_legacy)
 
 end
 
@@ -152,6 +168,7 @@ end
         fill(0.0f0, N), fill(1.0f0, N),
         fill(0.0f0, N), fill(1.0f0, N),
         fill(0.0f0, N), fill(1.0f0, N),
+        fill(1.0f0, N),
         86400.0f0,
         A_routing, nothing, 0, 1.0f0,
         false, 0.05f0,
@@ -232,6 +249,7 @@ end
         fill(0.0f0, N), fill(1.0f0, N),
         fill(0.0f0, N), fill(1.0f0, N),
         fill(0.0f0, N), fill(1.0f0, N),
+        fill(1.0f0, N),
         86400.0f0, A_routing, nothing, 0, 1.0f0, false, 0.05f0)
 
     s = ModelSettings(domain = GNN_DOMAIN, hidden_dim = GNN_HIDDEN, nlayers = GNN_NLAYERS)
@@ -391,6 +409,7 @@ import CUDA, MLUtils
         Float32.(norm_stats["river_q"].mean),  Float32.(norm_stats["river_q"].std),
         Float32.(norm_stats["river_h"].mean),  Float32.(norm_stats["river_h"].std),
         Float32.(norm_stats["river_inwater"].mean), Float32.(norm_stats["river_inwater"].std),
+        postscale["river_inwater"],
         Float32(get_timestep(out)), A_routing, nothing, 0, 1.0f0, false, 0.05f0)
     model = WflowGNN(ms, mb, A)
 
@@ -440,4 +459,101 @@ import CUDA, MLUtils
             @test all(isfinite, Array(o1))
         end
     end
+end
+
+@testset "lateral inflow un-scaling (R5b)" begin
+
+    N = GNN_N_NODES
+    src_r = collect(2:N)
+    tgt_r = collect(1:(N - 1))
+    A_self = sparse(vcat(tgt_r, collect(1:N)), vcat(src_r, collect(1:N)),
+                    ones(Float32, (N - 1) + N), N, N)
+
+    # Upstream-area-like postscale; preprocessing divides q and inwater by it.
+    a  = Float32.(range(10, 100; length = N))
+    ph = fill(0.5f0, N)
+    stats(μ, σ) = (mean = fill(Float32(μ), N), std = fill(Float32(σ), N))
+    norm_stats = Dict("river_q" => stats(0.0, 1.0), "river_h" => stats(0.0, 1.0),
+                      "river_inwater" => stats(0.1, 0.5))
+    postscale = Dict("river_q" => a, "river_h" => ph, "river_inwater" => a)
+    dt = 3600.0f0
+
+    mk(unscale) = WflowRoutingGNN.build_massbalance(
+        norm_stats, postscale, src_r, tgt_r, dt;
+        θ = 1.0, smooth_h_floor = false, h_floor_softness = 0.05,
+        unscale_inwater = unscale)
+    mb_fix = mk(true)
+    mb_leg = mk(false)
+
+    @testset "build_massbalance toggle" begin
+        @test mb_fix.postscale_inwater == a
+        @test mb_leg.postscale_inwater == ones(Float32, N)
+        @test mk(true).postscale_inwater == a   # default direction is un-scaling
+    end
+
+    g = rand_graph(N, GNN_N_EDGES,
+                   ndata = (state   = rand(Float32, GNN_N_STATE,   N),
+                            forcing = rand(Float32, GNN_N_FORCING, N)))
+    state   = g.ndata.state
+    forcing = rand(Float32, GNN_N_FORCING, N)
+    q_new   = rand(Float32, 1, N) .+ 0.5f0
+
+    # Hand-computed reference of the fully-implicit scheme in physical units.
+    q_phys   = a' .* q_new
+    upstream = zeros(Float32, 1, N)
+    for (s, t) in zip(src_r, tgt_r)
+        upstream[1, t] += q_phys[1, s]
+    end
+    iw_phys  = (forcing[1:1, :] .* 0.5f0 .+ 0.1f0) .* a'   # m³/s
+    h_cur    = ph' .* state[2:2, :]
+    h_ref    = h_cur .+ dt .* (ph ./ a)' .* (upstream .+ iw_phys .- q_phys)
+    h_ref    = max.(h_ref, 0f0)
+
+    @testset "fixed layer matches the physical budget" begin
+        out = mb_fix(g, state, forcing, forcing, q_new)
+        @test out .* ph' ≈ h_ref rtol = 1f-4 atol = 1f-5
+    end
+
+    @testset "legacy layer treats area-scaled inflow as m³/s" begin
+        iw_leg = (forcing[1:1, :] .* 0.5f0 .+ 0.1f0)
+        h_leg  = max.(h_cur .+ dt .* (ph ./ a)' .* (upstream .+ iw_leg .- q_phys), 0f0)
+        out = mb_leg(g, state, forcing, forcing, q_new)
+        @test out .* ph' ≈ h_leg rtol = 1f-4 atol = 1f-5
+        @test !(out ≈ mb_fix(g, state, forcing, forcing, q_new))
+    end
+
+    @testset "explicit branch (θ < 1) and diagnostics use the same scaling" begin
+        mb_th = WflowRoutingGNN.build_massbalance(
+            norm_stats, postscale, src_r, tgt_r, dt;
+            θ = 0.5, smooth_h_floor = false, h_floor_softness = 0.05)
+        out = mb_th(g, state, forcing, forcing, q_new)
+        @test all(isfinite, out)
+        # Same forcing at t and t+1 and q_new == q_curr state ⇒ θ is irrelevant.
+        st2 = copy(state); st2[1:1, :] .= q_new
+        o_half = mb_th(g, st2, forcing, forcing, q_new)
+        o_impl = mb_fix(g, st2, forcing, forcing, q_new)
+        @test o_half ≈ o_impl rtol = 1f-4 atol = 1f-5
+        _, uf = WflowRoutingGNN.mb_decoder_features(mb_fix, g, st2, forcing)
+        @test all(isfinite, uf)
+    end
+
+    @testset "device / batching helpers preserve postscale_inwater" begin
+        @test Flux.cpu(mb_fix).postscale_inwater == a
+        @test precompute_batched(mb_fix, 3).postscale_inwater == a
+        @test Flux.cpu(Flux.gpu(mb_fix)).postscale_inwater == a
+    end
+
+    @testset "legacy checkpoint state (no postscale_inwater) still loads" begin
+        s = ModelSettings(domain = GNN_DOMAIN, hidden_dim = GNN_HIDDEN, nlayers = GNN_NLAYERS)
+        m_src = WflowGNN(s, mb_leg, A_self)
+        st = Flux.state(m_src)
+        mb_st = st.mass_balance
+        @test haskey(mb_st, :postscale_inwater)
+        st_old = merge(st, (mass_balance = Base.structdiff(mb_st, (postscale_inwater = nothing,)),))
+        m_dst = WflowGNN(s, mb_leg, A_self)
+        Flux.loadmodel!(m_dst, st_old)
+        @test m_dst.mass_balance.postscale_inwater == ones(Float32, N)
+        @test m_dst.decoder.weight == m_src.decoder.weight
+    end
+
 end

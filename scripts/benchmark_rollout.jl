@@ -95,7 +95,8 @@ schema = load_schema(ds.wflow_schema)
 
 @info "Building graph time series (domain=$(ms.domain), schema=$(ds.wflow_schema)) …"
 graphs, norm_stats, _grid, postscale, static_arr =
-    build_wflow_graph(staticmaps_file, output_file, ms.domain; schema)
+    build_wflow_graph(staticmaps_file, output_file, ms.domain; schema,
+                        include_log_upstream_area = ms.include_log_upstream_area)
 
 # Build the model with the same settings used in training, then restore weights.
 # batch_size=1 here; the ensemble path re-precomputes the block-diagonal for B.

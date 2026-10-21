@@ -178,35 +178,59 @@ testable and reversible); after each, tests must stay green and a small golden r
       **without** that area factor (src/massbalance.jl, forward and
       `mb_diagnostics`), so the layer's lateral inflow is off by the per-node
       upstream area; its `h_raw` / volume budget are affected. Not changed here
-      (no-behaviour-change refactor); to be checked. (3) on `sava_small_v081` the
+      (no-behaviour-change refactor); fixed in R5b. (3) on `sava_small_v081` the
       wflow reference residual is not ~0 (rms 0.033 m, max 2.7 m) — to be
       investigated (floored/dry nodes, lakes, or a different inflow definition).
 
-## R5b. Investigate the lateral-inflow (inwater) scaling in `ThetaKinematicWave`
+## R5b. Lateral-inflow (inwater) scaling in `ThetaKinematicWave`
 
-Behaviour-changing, so kept out of the restructuring steps; do it as a separate,
-A/B-tested change (retrain needed, results will shift).
+Behaviour-changing, so kept out of the restructuring steps; done as a separate,
+A/B-tested change (default now uses the fixed physics).
 
-- [ ] Confirm the discrepancy: `inwater_phys = forcing·σ_iw + μ_iw` in
-      [src/massbalance.jl](../src/massbalance.jl) (forward, `mb_diagnostics`)
-      lacks the `postscale["river_inwater"]` (upstream area `a`) factor, whereas
-      preprocessing divides inwater by `a` before z-scoring. Check on the layer's
-      own `h_raw` vs. wflow `river_h` using true q and physical inwater (expect
-      residual ~1e-5 m only with the factor; ~9 m without).
-- [ ] Decide where the factor lives: pass per-node `a` (or `wl`/`postscale`) into
-      the layer at construction (`build_massbalance`), so `ThetaKinematicWave`
-      un-scales to physical m³/s itself; keep `_val_inwater_physical` in
-      [src/analysis.jl](../src/analysis.jl) consistent.
-- [ ] Check the effect on the learned model: does the layer's lateral inflow now
-      matter (it was effectively ~0 before)? Compare val metrics, the volume
-      budget and floor fraction before/after; guard behind a toggle.
+- [x] Confirm the discrepancy: `inwater_phys = forcingÂ·Ïƒ_iw + Î¼_iw` lacked the
+      `postscale["river_inwater"]` (upstream area `a`) factor, whereas
+      preprocessing divides inwater by `a` before z-scoring. True-data check
+      (`sava_small_v081`, val split, layer `h_raw(true q)` âˆ’ wflow `river_h`):
+      legacy rms 3.92 m / median 0.29 m / max 252 m; fixed rms 0.0331 m /
+      median 0.0016 m / max 2.7 m (equal to the wflow reference residual, so the
+      remaining error is data-intrinsic, see last item).
+- [x] Where the factor lives: `build_massbalance(...; unscale_inwater = true)`
+      stores the per-node `postscale["river_inwater"]` in the new
+      `ThetaKinematicWave.postscale_inwater` field; forward, `mb_decoder_features`
+      and `mb_diagnostics` use `(forcingÂ·Ïƒ + Î¼)Â·a`. Toggle:
+      `ModelSettings.mb_inwater_unscale` (config key `mb_inwater_unscale`,
+      default `true`; `load_model_settings` defaults a missing key to `false`, so
+      old checkpoints keep the legacy behaviour; `Flux.loadmodel!` fills the new
+      field for legacy checkpoints). Templates updated.
+- [x] Related bug fixed in `_rollout_mb_diagnostics` ([src/rollout.jl](../src/rollout.jl)):
+      `mb_diagnostics` got the **predicted** state as the current state. It now
+      gets the state before the step, with the new q from the prediction. This
+      changes `h_raw`, floor fractions, `net_flux` and volume-budget numbers of
+      **all** runs (old values in `docs/EXPERIMENTS.md` are not comparable).
+- [x] Tests: `test/test_gnn.jl` ("lateral inflow un-scaling (R5b)": toggle,
+      physical budget, legacy layer, Î¸ < 1, gpu/cpu/precompute, legacy checkpoint
+      loading, settings round-trip); `test/test_pipeline.jl` residual agreement
+      now compares the layer's own `pred_q/pred_h/inwater`. Full suite 4870/4870.
+- [x] Effect on a learned model. (a) e13b weights (co-adapted to the legacy layer),
+      inference only, val: legacy toggle reproduces e13b (pooled q KGE 0.877 vs.
+      stored 0.887); the fixed layer with those weights degrades (0.379), as
+      expected for a mismatched layer. (b) Compressed retrain from scratch, GPU,
+      seed 1, 42 epochs (strategy steps [1,2,4,6,8,10] Ã— 7), same hyper-parameters
+      as e13b (legacy | fixed): pooled q KGE 0.490 | 0.547, gauge q KGE
+      0.281 | 0.370, gauge peak ratio 1.27 | 0.98, `frac_h_raw_neg_node_mean`
+      0.587 | 0.120, layer residual rms 2.06 | 1.60 m; but depth worse: median
+      `river_h` rmse 0.53 | 2.58 m, `overpred_freq` 0.24 | 0.90, volume_pbias
+      458 | 593 %, val h_1step 8.5 | 71. Both variants are unstable in fixed-horizon
+      rollouts at this length (rmse 2e16 | 3e6). Conclusion: q improves and the
+      floor stops being hit by most nodes, but depth is not better yet;
+      **inconclusive** because of the single seed and the 42-epoch schedule.
+- [ ] Full-length A/B on HPC (300 epochs, several seeds, e13b recipe, with/without
+      `mb_inwater_unscale`) before relying on the fixed layer for results; check
+      the depth bias with the fixed layer (possibly needs re-tuned `h_floor`/prior).
 - [ ] Explain the non-zero residual of the wflow reference on `sava_small_v081`
       (rms 0.033 m, max 2.7 m; `[mass_balance_residual.reference]`): dry/floored
       nodes, lakes/reservoirs, or a different inflow definition (e.g. `inwater`
       vs. `inwater + runoff`); inspect `metrics/mb_residual_by_node.csv`.
-- Touch: `src/massbalance.jl`, `src/analysis.jl`, `src/preprocess.jl` (only if
-      the scale must be exposed), tests in `test/test_pipeline.jl`.
-
 ## R6. Consolidate `scripts/` into `src/` + thin CLIs
 
 - [x] Promote post-hoc helpers `resolve_staticmaps` + `load_regrid_nc` into the
@@ -281,8 +305,12 @@ A/B-tested change (retrain needed, results will shift).
 
 ## R — performance acceptance gate (run around the whole restructuring)
 
-- [ ] Run `scripts/benchmark_message_passing.jl` + `scripts/benchmark_rollout.jl`
-      **before and after** and confirm no regression. Preserve byte-for-byte: the
+- [x] Run `scripts/benchmark_message_passing.jl` + `scripts/benchmark_rollout.jl`
+      **before and after** and confirm no regression. Done 2026-10-21 (baseline `829c432`,
+      after = R7 + R5b): no regression beyond noise; tables in
+      [PERFORMANCE.md](PERFORMANCE.md) (STATUS AS OF 21-10-2026). Fixed `benchmark_rollout.jl`
+      to pass `include_log_upstream_area`. Training-step speed was not re-benchmarked.
+      Preserve byte-for-byte: the
       `_topology_mul` rrule, `SparseConv` three-path dispatch + `precompute_batched`
       (both `SparseConv` and MB), CuSPARSE CSR (`Int32` colptr) conversions,
       zero-copy per-node `reshape` when `n_rep == 1`, explicit `gpu`/`cpu`

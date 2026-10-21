@@ -67,6 +67,11 @@ Fields (all per-node constants, not optimised):
 - `μ_q`, `σ_q`   : per-node z-score statistics of (scaled) river_q
 - `μ_h`, `σ_h`   : per-node z-score statistics of (scaled) river_h
 - `μ_inwater`, `σ_inwater` : per-node z-score statistics of river_inwater
+- `postscale_inwater` : per-node multiplier that turns the denormalised lateral
+                    inflow into m³/s. Preprocessing divides `river_inwater` by the
+                    upstream area `a` before the z-score (like `river_q`), so this
+                    is `a` (`postscale["river_inwater"]`); all-ones reproduces the
+                    pre-R5b behaviour that treated the area-scaled inflow as m³/s
 - `dt`            : model timestep in seconds
 - `θ`             : implicitness weight in `[0, 1]` (default `1` = fully implicit)
 - `smooth_h_floor`: if `true`, uses a smooth non-negative floor for `h_phys_new`
@@ -82,6 +87,7 @@ struct ThetaKinematicWave{V <: AbstractVector{Float32}} <: MassBalanceFormulatio
     σ_h               :: V
     μ_inwater         :: V
     σ_inwater         :: V
+    postscale_inwater :: V   # per-node inflow → m³/s multiplier (upstream area, or ones)
     dt                :: Float32
     A_routing         :: AbstractMatrix{Float32}  # (N×N) upstream adjacency, no self-loops
     A_routing_batched :: Union{Nothing, AbstractMatrix{Float32}}  # block-diagonal (B·N×B·N)
@@ -112,12 +118,17 @@ end
 
 Flux.@layer ThetaKinematicWave
 Flux.trainable(::ThetaKinematicWave) = (;)  # physics constants, not optimised
+
+# Per-node constant `v` as a `(1, n)` row, tiled over the `n_rep` graphs of a batch
+# (a zero-copy reshape when `n_rep == 1`, i.e. always during rollout).
+_tile_node_const(v::AbstractVector, n_rep::Int, n::Int) =
+    n_rep == 1 ? reshape(v, 1, n) : reshape(repeat(v, n_rep), 1, n)
 # Restrict Functors traversal to the per-node vectors; exclude A_routing
 # (not writable in-place on GPU). Device transfer is handled by the explicit
 # Flux.gpu / Flux.cpu overloads below.
 Functors.@functor ThetaKinematicWave (
     postscale_q, postscale_h, ph_over_pq,
-    μ_q, σ_q, μ_h, σ_h, μ_inwater, σ_inwater,
+    μ_q, σ_q, μ_h, σ_h, μ_inwater, σ_inwater, postscale_inwater,
 )
 function Flux.gpu(l::ThetaKinematicWave)
     ThetaKinematicWave(
@@ -125,7 +136,7 @@ function Flux.gpu(l::ThetaKinematicWave)
         Flux.gpu(l.postscale_h),
         Flux.gpu(l.ph_over_pq),
         Flux.gpu(l.μ_q), Flux.gpu(l.σ_q), Flux.gpu(l.μ_h), Flux.gpu(l.σ_h),
-        Flux.gpu(l.μ_inwater), Flux.gpu(l.σ_inwater), l.dt,
+        Flux.gpu(l.μ_inwater), Flux.gpu(l.σ_inwater), Flux.gpu(l.postscale_inwater), l.dt,
         _to_cusparse(l.A_routing),
         isnothing(l.A_routing_batched) ? nothing : _to_cusparse(l.A_routing_batched),
         l.batch_size,
@@ -141,7 +152,7 @@ function Flux.cpu(l::ThetaKinematicWave)
         Flux.cpu(l.postscale_h),
         Flux.cpu(l.ph_over_pq),
         Flux.cpu(l.μ_q), Flux.cpu(l.σ_q), Flux.cpu(l.μ_h), Flux.cpu(l.σ_h),
-        Flux.cpu(l.μ_inwater), Flux.cpu(l.σ_inwater), l.dt,
+        Flux.cpu(l.μ_inwater), Flux.cpu(l.σ_inwater), Flux.cpu(l.postscale_inwater), l.dt,
         _to_cpu_sparse(l.A_routing),
         isnothing(l.A_routing_batched) ? nothing : _to_cpu_sparse(l.A_routing_batched),
         l.batch_size,
@@ -153,7 +164,8 @@ end
 
 """
     build_massbalance(norm_stats, postscale, src_edges, tgt_edges, dt;
-                      θ, smooth_h_floor, h_floor_softness) -> ThetaKinematicWave
+                      θ, smooth_h_floor, h_floor_softness,
+                      unscale_inwater = true) -> ThetaKinematicWave
 
 Factory for the river-domain [`ThetaKinematicWave`](@ref). Pulls the per-node
 `river_q`/`river_h`/`river_inwater` z-score statistics out of `norm_stats`
@@ -161,6 +173,11 @@ Factory for the river-domain [`ThetaKinematicWave`](@ref). Pulls the per-node
 against the node count), the inverse scalers out of `postscale`, and builds the
 routing-only adjacency (no self-loops; `A_routing[i,j] = 1` means `j` flows
 into `i`) from the graph edge lists. `dt` is the model timestep in seconds.
+
+Preprocessing divides `river_inwater` by the upstream area before the z-score, so
+the lateral inflow in m³/s is `(z·σ + μ) · postscale["river_inwater"]`. With
+`unscale_inwater = true` (default) the layer applies that factor; `false` uses
+ones, reproducing the pre-R5b behaviour (kept only to evaluate old checkpoints).
 
 `n_nodes` is taken from `length(postscale["river_q"])`. The batched
 block-diagonal routing matrix is left unset; call
@@ -172,10 +189,13 @@ function build_massbalance(norm_stats, postscale,
                            dt;
                            θ::Real,
                            smooth_h_floor::Bool,
-                           h_floor_softness::Real)
+                           h_floor_softness::Real,
+                           unscale_inwater::Bool = true)
     pq_vec  = postscale["river_q"]
     ph_vec  = postscale["river_h"]
     n_nodes = length(pq_vec)
+    piw_vec = unscale_inwater ? Float32.(postscale["river_inwater"]) :
+                                ones(Float32, n_nodes)
 
     stat_vec(vname::String, field::Symbol) = begin
         raw = getfield(norm_stats[vname], field)
@@ -207,13 +227,14 @@ function build_massbalance(norm_stats, postscale,
         σ_h,
         μ_inwater,
         σ_inwater,
+        piw_vec,
         dt,
         A_routing,
         nothing,  # A_routing_batched — set via precompute_batched
         0,        # batch_size
-        θ,
+        Float32(θ),
         smooth_h_floor,
-        h_floor_softness,
+        Float32(h_floor_softness),
     )
 end
 
@@ -277,8 +298,11 @@ function (l::ThetaKinematicWave)(g            ::GNNGraph,
     # q_phys_new is floored at 0 in physical space (z-scored 0 ≠ physical 0).
     q_phys_new  = max.(0f0, pq .* (q_norm_new .* σq .+ μq))
 
-    # Lateral inflow at t+1  [m³/s]  (row 1 = river_inwater)  — implicit term
-    inwater_phys = forcing_next[1:1, :] .* σiw .+ μiw
+    # Lateral inflow at t+1  [m³/s]  (row 1 = river_inwater)  — implicit term.
+    # `river_inwater` was divided by the upstream area before the z-score, so the
+    # denormalised value is scaled back by `postscale_inwater`.
+    piw          = _tile_node_const(l.postscale_inwater, n_rep, n)
+    inwater_phys = (forcing_next[1:1, :] .* σiw .+ μiw) .* piw
 
     # Sum upstream Q into each node via CuSPARSE SpMM.
     # Three dispatch paths mirror SparseConv:
@@ -309,7 +333,7 @@ function (l::ThetaKinematicWave)(g            ::GNNGraph,
         # Explicit side: all quantities are known at t (no dependence on the
         # current prediction), which is what damps the stiff q→h gradient.
         q_phys_curr     = max.(0f0, pq .* (state[1:1, :] .* σq .+ μq))
-        inwater_curr    = forcing[1:1, :] .* σiw .+ μiw
+        inwater_curr    = (forcing[1:1, :] .* σiw .+ μiw) .* piw
         upstream_q_curr = route(q_phys_curr)
         net_flux_expl   = upstream_q_curr .+ inwater_curr .- q_phys_curr
         net_flux        = l.θ .* net_flux_impl .+ (1f0 - l.θ) .* net_flux_expl
@@ -411,7 +435,8 @@ function mb_decoder_features(l           ::ThetaKinematicWave,
     # All quantities are known at t (explicit / forward-Euler) — no dependence
     # on the discharge about to be predicted, so they are safe to feed as inputs.
     q_phys_curr     = max.(0f0, pq .* (state[1:1, :] .* σq .+ μq))
-    inwater_curr    = forcing[1:1, :] .* σiw .+ μiw
+    piw             = _tile_node_const(l.postscale_inwater, n_rep, n)
+    inwater_curr    = (forcing[1:1, :] .* σiw .+ μiw) .* piw
     upstream_q_curr = route(q_phys_curr)
     net_flux_expl   = upstream_q_curr .+ inwater_curr .- q_phys_curr
 
@@ -461,13 +486,14 @@ function mb_diagnostics(l            ::ThetaKinematicWave,
     σh  = reshape(repeat(Array(l.σ_h), n_rep), 1, n)
     μiw = reshape(repeat(Array(l.μ_inwater), n_rep), 1, n)
     σiw = reshape(repeat(Array(l.σ_inwater), n_rep), 1, n)
+    piw = reshape(repeat(Array(l.postscale_inwater), n_rep), 1, n)
     st  = Array(state)
     fn  = Array(forcing_next)
     qn  = Array(q_norm_new)
 
     q_phys_curr  = pq .* (st[1:1, :] .* σq .+ μq)   # for diagnostics only
     q_phys_new   = max.(0f0, pq .* (qn .* σq .+ μq))
-    inwater_phys = fn[1:1, :] .* σiw .+ μiw
+    inwater_phys = (fn[1:1, :] .* σiw .+ μiw) .* piw
     A_cpu        = _to_cpu_sparse(l.A_routing)
     upstream_q   = (A_cpu * q_phys_new')'
     h_phys_curr  = ph .* (st[2:2, :] .* σh .+ μh)
@@ -477,7 +503,7 @@ function mb_diagnostics(l            ::ThetaKinematicWave,
     else
         fc              = Array(forcing)
         q_phys_curr_f   = max.(0f0, pq .* (st[1:1, :] .* σq .+ μq))
-        inwater_curr    = fc[1:1, :] .* σiw .+ μiw
+        inwater_curr    = (fc[1:1, :] .* σiw .+ μiw) .* piw
         upstream_q_curr = (A_cpu * q_phys_curr_f')'
         net_flux_expl   = upstream_q_curr .+ inwater_curr .- q_phys_curr_f
         net_flux        = l.θ .* net_flux_impl .+ (1f0 - l.θ) .* net_flux_expl
@@ -507,7 +533,7 @@ function precompute_batched(l::ThetaKinematicWave, B::Int)
     A_blk = SparseMatrixCSC{Float32, Int32}(blockdiag(fill(A_cpu, B)...))
     ThetaKinematicWave(
         l.postscale_q, l.postscale_h, l.ph_over_pq,
-        l.μ_q, l.σ_q, l.μ_h, l.σ_h, l.μ_inwater, l.σ_inwater, l.dt,
+        l.μ_q, l.σ_q, l.μ_h, l.σ_h, l.μ_inwater, l.σ_inwater, l.postscale_inwater, l.dt,
         A_cpu, A_blk, B, l.θ,
         l.smooth_h_floor,
         l.h_floor_softness,
@@ -528,6 +554,16 @@ precompute_batched(f::NoMassBalance, ::Int) = f
 # Old checkpoints saved before the formulation hierarchy stored
 # `mass_balance = nothing` for models without a mass balance.
 Flux.loadmodel!(::NoMassBalance, ::Nothing; kw...) = nothing
+
+# Checkpoints saved before R5b have no `postscale_inwater` in the layer state. Keep
+# the destination's own value (all-ones for a legacy `mb_inwater_unscale = false`
+# settings file), so such checkpoints reload with their original behaviour.
+function Flux.loadmodel!(dst::ThetaKinematicWave, src::NamedTuple; kw...)
+    if !haskey(src, :postscale_inwater)
+        src = merge(src, (postscale_inwater = dst.postscale_inwater,))
+    end
+    invoke(Flux.loadmodel!, Tuple{Any, Any}, dst, src; kw...)
+end
 
 has_mass_balance(::NoMassBalance)       = false
 has_mass_balance(::ThetaKinematicWave)  = true

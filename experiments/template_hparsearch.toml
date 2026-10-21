@@ -90,6 +90,10 @@ mb_sigma_h_floor = 0.0
 mb_sigma_q_floor = 0.0
 mb_sigma_inwater_floor = 0.0
 
+# Scale the denormalised lateral inflow back to m3/s inside the mass-balance
+# layer (see template.toml). false reproduces pre-fix runs.
+mb_inwater_unscale = true
+
 
 [train]
 # Base training settings — individual values may be overridden by [hparsearch]

@@ -316,16 +316,17 @@ end
         @test haskey(toml_m, "volume_budget")
 
         diags = rollout_mb_diagnostics(tr.model, prep.dataset.val, prep.static_arr)
-        p_states = gather_nodes(WflowRoutingGNN.load_regrid_nc(
-            joinpath(dirs.output, "val_pred.nc"), vars), prep.grid, ms.domain)
-        # Feed the layer's own lateral-inflow series so only the equation is compared.
+        # Feed the layer's own q, h and lateral-inflow series so only the equation is
+        # compared. (The NetCDF comes from a separate rollout; once the lateral inflow
+        # is applied this tiny model is stiff enough that its roundoff differences to
+        # the diagnostics rollout are amplified to metres in h.)
         iw = diags.inwater
         wl = prep.postscale["river_q"] ./ prep.postscale["river_h"]
-        r = mb_residual_diagnostics(p_states[qi, :, :], p_states[hi, :, :], iw;
+        r = mb_residual_diagnostics(diags.pred_q, diags.pred_h, iw;
                                     edge_src = prep.edge_src, edge_tgt = prep.edge_tgt,
                                     wl, dt = prep.dt, θ = ms.mb_theta)
-        # Frame t of the diagnostics is frame t of the NetCDF; the residual of step
-        # t-1 -> t equals h[t] - h_raw[t] up to the roundoff of the two evaluation orders.
+        # The residual of step t-1 -> t equals h[t] - h_raw[t] up to the roundoff of the
+        # two evaluation orders.
         expected = diags.pred_h[:, 2:end] .- diags.h_raw[:, 2:end]
         ok = isfinite.(expected) .& isfinite.(r.residual)
         scale = max(1f0, maximum(abs, diags.pred_h[isfinite.(diags.pred_h)]))

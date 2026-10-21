@@ -83,6 +83,14 @@ Hyperparameters for a `WflowGNN` model.
                    (default `0.0` = disabled).
 - `mb_sigma_inwater_floor` : lower bound for per-node `σ_inwater` during
                    preprocessing (default `0.0` = disabled).
+- `mb_inwater_unscale` : multiply the denormalised lateral inflow by the upstream
+                   area (`postscale["river_inwater"]`) to get m³/s inside the
+                   mass-balance layer (default `true`; the physically correct
+                   scheme). `false` reproduces the pre-R5b behaviour, in which
+                   the area-normalised inflow was used as if it were m³/s
+                   (effectively dropping lateral inflow). A saved
+                   `model_settings.toml` without this key is read as `false`,
+                   so checkpoints from before R5b keep their old behaviour.
 """
 Base.@kwdef struct ModelSettings
     domain               :: String
@@ -101,6 +109,7 @@ Base.@kwdef struct ModelSettings
     mb_sigma_h_floor     :: Float32 = 0.0f0
     mb_sigma_q_floor     :: Float32 = 0.0f0
     mb_sigma_inwater_floor :: Float32 = 0.0f0
+    mb_inwater_unscale   :: Bool = true
 end
 
 # Valid values of `ModelSettings.mb_formulation`.
@@ -138,7 +147,8 @@ function Base.show(io::IO, s::ModelSettings)
     println(io, "  mb_h_floor_softness : ", s.mb_h_floor_softness)
     println(io, "  mb_sigma_h_floor : ", s.mb_sigma_h_floor)
     println(io, "  mb_sigma_q_floor : ", s.mb_sigma_q_floor)
-    print(  io, "  mb_sigma_inwater_floor : ", s.mb_sigma_inwater_floor)
+    println(io, "  mb_sigma_inwater_floor : ", s.mb_sigma_inwater_floor)
+    print(  io, "  mb_inwater_unscale : ", s.mb_inwater_unscale)
 end
 
 """
@@ -165,6 +175,7 @@ function save_model_settings(path::String, s::ModelSettings)
         "mb_sigma_h_floor" => Float32(s.mb_sigma_h_floor),
         "mb_sigma_q_floor" => Float32(s.mb_sigma_q_floor),
         "mb_sigma_inwater_floor" => Float32(s.mb_sigma_inwater_floor),
+        "mb_inwater_unscale" => s.mb_inwater_unscale,
     )
     open(path, "w") do io
         TOML.print(io, dict)
@@ -199,6 +210,7 @@ function load_model_settings(path::String)
         mb_sigma_h_floor = Float32(get(d, "mb_sigma_h_floor", 0.0)),
         mb_sigma_q_floor = Float32(get(d, "mb_sigma_q_floor", 0.0)),
         mb_sigma_inwater_floor = Float32(get(d, "mb_sigma_inwater_floor", 0.0)),
+        mb_inwater_unscale = get(d, "mb_inwater_unscale", false),
     )
 end
 

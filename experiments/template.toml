@@ -97,6 +97,12 @@ mb_sigma_h_floor = 0.0
 mb_sigma_q_floor = 0.0
 mb_sigma_inwater_floor = 0.0
 
+# Scale the denormalised lateral inflow back to m3/s inside the mass-balance
+# layer (preprocessing divides river_inwater by the upstream area). true is the
+# physically correct scheme; false reproduces runs from before this fix, which
+# effectively dropped lateral inflow from the layer.
+mb_inwater_unscale = true
+
 
 [train]
 # Total number of training epochs

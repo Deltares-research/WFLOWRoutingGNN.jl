@@ -66,6 +66,12 @@ Experiment configs live under `experiments/`. Newest at the top.
 
 # COMPLETED
 
+> **Caveat (R5b, 2026-10):** all experiments below predate two fixes: (1) the mass-balance layer
+> used the lateral inflow without the upstream-area factor (now default; `mb_inwater_unscale = false`
+> reproduces these runs), and (2) the layer diagnostics were evaluated at the predicted instead of
+> the previous state. Treat the `h_raw` / floor-fraction / net-flux / volume-budget numbers
+> below as not comparable with new runs. See `docs/TODO.md` R5b.
+
 > **⚠ Cross-cutting finding from E1 + E2 + E3 + E4 (read before any
 > peak-accuracy run).** No configuration tested so far produces a *faithful*
 > stable 30-step free rollout. The rollout **attractor** depends on the LR, and
