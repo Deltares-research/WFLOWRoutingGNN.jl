@@ -79,8 +79,9 @@ River discharge cannot be negative.
 
 - **Current code (partial floor already exists — do NOT re-implement it).** The
   MB layer already floors its *internal* physical discharge at zero
-  (`q_phys_new = max.(0f0, …)`, [src/gnn.jl](../src/gnn.jl#L281), since commit
-  `5cb4922`), and `rollout_mb_diagnostics` reports that floored copy. The gap is
+  (`q_phys_new = max.(0f0, …)`, [src/massbalance.jl](../src/massbalance.jl#L299),
+  since commit `5cb4922`), and `rollout_mb_diagnostics` reports that floored copy.
+  The gap is
   that this floored value does **not** propagate: the MB layer returns only `h`,
   so the **state/decoder q that carries to the next step is un-floored**, and
   `fixed_horizon_metrics` reconstructs its reported q directly from `q_norm`
@@ -114,7 +115,8 @@ Remaining:
 - [ ] **Tier 3 detection metrics (POD / FAR / CSI)** — `event_detection_metrics`
       exists as a unit-tested helper but is **not wired in**; deferred until a
       detection/exceedance head exists in the codebase.
-- Touch: `src/postprocess.jl`, `src/run.jl` (when unblocked).
+- Touch: `src/postprocess.jl` (metric helpers), `src/analysis.jl` (stage-4
+  wiring) (when unblocked).
 
 ## 3. Pushforward / detached-rollout trick (toggle)
 
@@ -184,10 +186,12 @@ Tests the hypothesis that *some subcatchments contribute disproportionately to
 downstream error* and that this correlates with WFLOW subcatchment attributes.
 Raw per-outlet NSE conflates **locally injected** error with **advected** error
 (discharge accumulates), so the key quantity is the **incremental** error each
-subcatchment adds. Post-hoc like [scripts/spatial_eval.jl](../scripts/spatial_eval.jl)
-— no retraining, primary method needs no forward pass. **New analysis script**
-(e.g. `scripts/subcatch_error_attribution.jl`), reusing `resolve_staticmaps`,
-`load_regrid_nc`, `ldd_to_graph`, `river_q_performance_metrics`.
+subcatchment adds. Post-hoc like [src/analysis.jl](../src/analysis.jl)'s
+`spatial_eval_run` (thin CLI [scripts/spatial_eval.jl](../scripts/spatial_eval.jl))
+— no retraining, primary method needs no forward pass. Add a `subcatch_error_attribution`
+analysis function in [src/analysis.jl](../src/analysis.jl) with a thin CLI,
+reusing the now-promoted `resolve_staticmaps` / `load_regrid_nc` plus
+`ldd_to_graph`, `river_q_performance_metrics`.
 
 - [ ] **Subcatchment definition + size filter.** Route (A, preferred): use
       WFLOW-native `wflow_subcatch` (or a gauge-set variant) with outlets from
@@ -234,10 +238,9 @@ subcatchment adds. Post-hoc like [scripts/spatial_eval.jl](../scripts/spatial_ev
       advected-vs-local stacked bars along the main stem, attribute scatter panel.
 - **Note:** partly unblocks §2b (`wflow_gauges*`/`wflow_subcatch*` is a ready-made
   gauge/subcatchment definition for per-gauge reporting).
-- Touch: new `scripts/subcatch_error_attribution.jl` (+ small reusable helpers if
-  `resolve_staticmaps`/`load_regrid_nc` are promoted out of
-  `scripts/spatial_eval.jl` into `src/`); no source-model change for the primary
-  method.
+- Touch: new `subcatch_error_attribution` in `src/analysis.jl` + a thin
+  `scripts/subcatch_error_attribution.jl` CLI (`resolve_staticmaps`/`load_regrid_nc`
+  are already in `src/`); no source-model change for the primary method.
 
 ---
 
@@ -254,19 +257,20 @@ Each item should land behind a toggle / be A/B-tested with the existing
 ## 4. Fix type instability in the hot forward path (highest-confidence win)
 
 - **Evidence:** `fieldtype(SparseConv, :A)` and
-  `fieldtype(MassBalanceLayer, :A_routing)` are `AbstractMatrix{Float32}`
+  `fieldtype(ThetaKinematicWave, :A_routing)` are `AbstractMatrix{Float32}`
   (abstract) though the stored value is concrete `SparseMatrixCSC`.
   `@code_warntype` shows `Body::ANY` with red
   `getproperty(l, :A)::ABSTRACTMATRIX{FLOAT32}` propagating `::ANY` through
   `neigh`/`net_flux`/`q_new`/`h_new`/`Δ`. One `SparseConv` forward measures
   **18 allocs / 331 KB / ~289 µs** (323-node CPU graph). Paid every layer,
   every step, in both rollout and training.
-- [ ] Parameterise the adjacency field on `SparseConv`:
-      `struct SparseConv{M,V,F,SA<:AbstractMatrix{Float32},SB} … A::SA;
-      A_batched::SB end` (SB covers `Nothing`/concrete). Update the
+- [ ] Parameterise the adjacency field on `SparseConv`: add type params
+      `SA<:AbstractMatrix{Float32}` (currently the struct is parametric only on
+      `W_self`/`W_neigh`/`bias`/`σ`, not `A`) and `SB` (covers
+      `Nothing`/concrete) so `A::SA; A_batched::SB`. Update the
       `Flux.gpu`/`Flux.cpu` overloads and `precompute_batched` to preserve the
       concrete types.
-- [ ] Same treatment for `MassBalanceLayer.A_routing` / `A_routing_batched`
+- [ ] Same treatment for `ThetaKinematicWave.A_routing` / `A_routing_batched`
       (currently `AbstractMatrix{Float32}` / `Union{Nothing,AbstractMatrix}`).
 - [ ] Verify the fix: `@code_warntype` red→blue (no `::ANY` on the layer and
       top-level `WflowGNN` forwards) and BenchmarkTools allocs drop, via
@@ -274,7 +278,8 @@ Each item should land behind a toggle / be A/B-tested with the existing
 - [ ] Re-run `scripts/benchmark_rollout.jl` +
       `scripts/benchmark_inference_vs_train.jl` to quantify the wall-clock gain
       (the cuSPARSE/BLAS SpMM may still dominate; record the delta regardless).
-- Touch: `src/gnn.jl` (`SparseConv`, `MassBalanceLayer` structs + `gpu`/`cpu`/
+- Touch: `src/gnn.jl` (`SparseConv` struct + `gpu`/`cpu`/`precompute_batched`),
+  `src/massbalance.jl` (`ThetaKinematicWave` struct + `gpu`/`cpu`/
   `precompute_batched`).
 
 ## 5. Gate per-batch training diagnostics to once-per-epoch
@@ -300,24 +305,26 @@ Each item should land behind a toggle / be A/B-tested with the existing
 
 - **Evidence:** the 02-09 numbers are a 323-node / 8-layer proxy on a 4 GB
   laptop GPU; `sava_v081` (8235 nodes) does not fit locally, and
-  `test_sava_small` fails to load (4-field `WflowGNN` state predates the
-  `augment_mb` field, `5b75540`).
+  `test_sava_small` fails to load (pre-restructure `WflowGNN` state predates the
+  `augment_mb` field, `5b75540`; the struct changed again to `WflowGNN{M}` +
+  `ThetaKinematicWave` in the restructure).
 - [ ] Run `scripts/benchmark_rollout.jl` +
       `scripts/benchmark_inference_vs_train.jl` on `sava_v081` (8235 nodes) on a
       ≥16 GB GPU to get the real surrogate-vs-Wflow inference number; persist to
       that run's `metrics/performance.toml` and add a STATUS entry to
       PERFORMANCE.md.
-- [ ] Re-train / re-save `test_sava_small` with the current `WflowGNN` struct so
-      a lightweight current-struct smoke model exists for future benchmarks.
+- [ ] Re-train / re-save a lightweight smoke model with the current
+      `WflowGNN{M}` struct (e.g. under `test_data/test_model/`) so a
+      current-struct smoke model exists for future benchmarks.
 - Touch: `scripts/*`, `docs/PERFORMANCE.md` (no source change).
 
-## 7. (Lower priority) Fuse MassBalanceLayer broadcasts
+## 7. (Lower priority) Fuse ThetaKinematicWave broadcasts
 
 - **Evidence (partly speculative):** GPU is launch-latency bound at ~323 nodes
   (single forward 1.71 ms → 0.25 ms/member under B=16). The MB layer issues many
   small separate-kernel broadcasts (`q_phys_new`, `upstream_q`, `net_flux`,
   `h_phys_new`, re-normalise).
-- [ ] Fuse the elementwise broadcasts in the `MassBalanceLayer` forward into
+- [ ] Fuse the elementwise broadcasts in the `ThetaKinematicWave` forward into
       fewer kernels; keep the θ=1 fast path bit-identical.
 - [ ] Quantify launch-count/time change with `CUDA.@profile` before committing.
-- Touch: `src/gnn.jl` (`MassBalanceLayer` forward).
+- Touch: `src/massbalance.jl` (`ThetaKinematicWave` forward).
