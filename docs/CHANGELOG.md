@@ -1,5 +1,57 @@
 This document serves as a concrete changelog of the code, summarizing briefly the changes of each commit.
 
+## 2026-10-21
+
+- **Completed the 4-stage pipeline + mass-balance code restructuring** (TODO
+	"Code restructuring", R1–R7). `run_wflow_gnn` is now
+	`run_stage(AllStages(), …)` over four independently-runnable stages —
+	**preprocess → train → infer → analyze** — dispatched through a `Stage` type
+	hierarchy in [src/run.jl](../src/run.jl) and driven by the new
+	[scripts/pipeline.jl](../scripts/pipeline.jl) `<prep|train|infer|analyze|all>`
+	CLI. Stages exchange on-disk artifacts (`prep/preprocessed.jld2`, `model/`,
+	`output/*.nc`, `metrics/`+plots); a stage uses an earlier stage's in-memory
+	result when composed, else loads its predecessor's artifacts, so each runs
+	standalone. Golden-run artifact sets are identical to the pre-refactor fused
+	path (verified on `sava_small_v081`, CPU+GPU).
+- **Mass-balance code separated from the generic GNN.** New
+	[src/sparse_ops.jl](../src/sparse_ops.jl) (the `_topology_mul` rrule +
+	CuSPARSE/CPU sparse helpers) and [src/massbalance.jl](../src/massbalance.jl)
+	(the layer, `build_massbalance`, diagnostics). Formulations are now a
+	`MassBalanceFormulation` dispatch hierarchy — `ThetaKinematicWave` (wraps the
+	old `MassBalanceLayer`, kept as a compat alias) and `NoMassBalance` (null
+	object replacing the `nothing` sentinel). The forward pass collapses to
+	`decoder_outputs`/`extra_decoder_features`/`apply_formulation`/`floor_state`
+	dispatch; every `isnothing(mass_balance)` branch across
+	`gnn.jl`/`run.jl`/`rollout.jl`/`training.jl`/`strategy.jl` is gone. Selected via
+	`mb_formulation` (`"theta_kinematic_wave"` default / `"none"`);
+	`enforce_mass_balance` and old `mass_balance = nothing` checkpoints still load.
+- **Layer-free, post-hoc mass-balance analysis.** `mb_residual_diagnostics`
+	([src/postprocess.jl](../src/postprocess.jl)) recomputes the kinematic-wave
+	residual from predicted q/h NetCDF fields + staticmaps, so MB analysis works on
+	**any** trained model; the layer-internal diagnostics dispatch on the
+	formulation (no-op for `NoMassBalance`). New artifacts `metrics/mb_residual.csv`,
+	`metrics/mb_residual_by_node.csv`, `[mass_balance_residual]` in `metrics.toml`.
+- **Scripts consolidated into `src/`.** [src/analysis.jl](../src/analysis.jl)
+	(`analyze_run`, `resolve_staticmaps`, `spatial_eval_run`, `regen_mb_diagnostics`),
+	[src/consistency.jl](../src/consistency.jl) (the layer-free MB routing/residual
+	core of `check_mass_balance*.jl`), and [src/tune.jl](../src/tune.jl) (LR-range
+	test / batch-size / autotune toolkit). `scripts/*` are now thin CLIs;
+	`smoke_test_sparse.jl` moved into the test suite; `plot_ldd` promoted to
+	`src/plot.jl`; one-off scripts archived under `scripts/oneoff/`.
+- **Fixed lateral-inflow (inwater) scaling in `ThetaKinematicWave`** (R5b):
+	`inwater_phys` now includes the `postscale["river_inwater"]` upstream-area
+	factor that preprocessing divides out before z-scoring (new `mb_inwater_unscale`
+	toggle, default `true`; old checkpoints default to the legacy behaviour). Also
+	fixed `_rollout_mb_diagnostics` passing the predicted (not pre-step) state to
+	`mb_diagnostics` — this changes `h_raw`/floor/`net_flux`/volume-budget numbers
+	for all runs (prior `docs/EXPERIMENTS.md` values are not comparable).
+- Performance acceptance gate passed: `benchmark_message_passing` +
+	`benchmark_rollout` show no regression beyond noise vs. baseline `829c432`
+	(see [PERFORMANCE.md](PERFORMANCE.md), STATUS AS OF 21-10-2026). The
+	`_topology_mul` rrule, `SparseConv` three-path dispatch + `precompute_batched`,
+	CuSPARSE CSR conversions and CPU-build-before-`gpu` ordering are byte-for-byte
+	preserved.
+
 ## 2026-09-19
 
 - Fixed a hard-cap bug in the smooth `river_h` floor. `_nonnegative_floor` in

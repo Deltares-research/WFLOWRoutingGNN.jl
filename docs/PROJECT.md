@@ -20,6 +20,16 @@ Experiments in the project are run by calling the appropriate Julia script from 
 The sections below summarise the *current implemented state*. Full reasoning
 lives in [DECISIONS.md](DECISIONS.md) and the research notes under `docs/notes/`.
 
+- **Four-stage pipeline.** The workflow is split into four independently runnable
+  stages — **preprocess → train → infer → analyze** — that exchange on-disk
+  artifacts (`prep/`, `model/`, `output/`, `metrics/`+plots). Running all four
+  back-to-back reproduces every artifact the old monolithic `run_wflow_gnn`
+  produced. Stages are dispatched through a `Stage` type hierarchy
+  (`run_stage(::PreprocessStage, …)` …) and driven from the CLI by
+  `scripts/pipeline.jl <prep|train|infer|analyze|all>`. Inference writes only
+  gridded wflow-faithful NetCDF; analysis reconstructs node arrays from those
+  NetCDFs via the prep-owned node↔cell mapping, so any analysis (including
+  mass-balance residuals) can run post-hoc on any trained model.
 - **Encode–process–decode GNN with a physics decoder.** Nodes are river cells,
   edges follow the local drainage direction. Neighbour aggregation
   `out[i] = Σ_{j→i} h[:,j]` is implemented as a sparse matrix–dense multiply
@@ -32,7 +42,12 @@ lives in [DECISIONS.md](DECISIONS.md) and the research notes under `docs/notes/`
   construction. The discretisation is **fully implicit** (all fluxes at `t+1`,
   verified against real Wflow output), blended by a configurable `mb_theta`
   (default `1.0`). The layer is a *rollout governor*: with it, rollouts stay
-  finite where the unconstrained model overflows.
+  finite where the unconstrained model overflows. Mass-balance code lives in its
+  own `src/massbalance.jl` (+ `src/sparse_ops.jl` for the shared sparse adjoint);
+  formulations are a `MassBalanceFormulation` dispatch hierarchy
+  (`ThetaKinematicWave`, or `NoMassBalance` for models trained without a layer),
+  so new formulations toggle via a single `mb_formulation` config key rather than
+  `if/else` branches.
 - **Normalisation.** Per-variable z-score plus a physical postscale
   (`river_q` area-normalised to specific discharge; `river_h` scaled by `w·l/A`),
   with statistics fit on the training split only. The MB layer evaluates physics
@@ -70,19 +85,27 @@ lives in [DECISIONS.md](DECISIONS.md) and the research notes under `docs/notes/`
 ```
 src/
 |- WflowRoutingGNN.jl   Main entrypoint, defines public functions etc.
-|- run.jl               Main core of building, running, and evaluating experiments
-|- gnn.jl               GNN layer definitions
+|- schema.jl            Variable/NetCDF schema definitions
+|- preprocess.jl        Preprocessing of Wflow data and graph creation
+|- sparse_ops.jl        Shared sparse message-passing op + custom autodiff rrule
+|- massbalance.jl       Mass-balance formulations (dispatch hierarchy) + layer
+|- gnn.jl               Generic GNN layer definitions (SparseConv, WflowGNN)
 |- strategy.jl          Train strategies, loss functions etc.
 |- training.jl          Main training loop
-|- rollout.jl           Functions for autoregressive rollout of simulation
-|- preprocess.jl        Preprocessing of Wflow data and graph creation
-|- postprocess.jl       Postprocessing of autoregressive rollout, eval metrics
-|- plot.jl              Plot functionality
+|- pipeline.jl          Stage functions: preprocess/train/infer + PrepBundle I/O
+|- analysis.jl          Stage 4 analysis (analyze_run, spatial_eval, regen)
+|- run.jl               Stage orchestration (Stage hierarchy, run_wflow_gnn)
+|- tune.jl              LR-range-test / batch-size / autotune toolkit
 |- hparsearch.jl        Hyperparameter search functionality
+|- rollout.jl           Functions for autoregressive rollout of simulation
+|- postprocess.jl       Regrid, eval metrics, layer-free MB residual diagnostic
+|- consistency.jl       Layer-free MB routing/residual + wflow-output checks
+|- plot.jl              Plot functionality
 
 test/                   Main tests
 test_data/              Data to use for tests
-scripts/                Train, hparsearch, benchmark, util scripts
+scripts/                Thin CLIs (pipeline, train, hparsearch, benchmarks, util)
+scripts/oneoff/         Archived one-off analysis scripts
 models/                 Wflow models used to generate training data
 experiments/            Templates for config TOML files; Archive of past experiments
 ```

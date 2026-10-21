@@ -5,8 +5,10 @@ stages** and **decoupling the mass-balance (MB) code from the generic GNN code**
 with multiple-dispatch MB formulations and a post-hoc MB analysis that works even
 on models trained *without* an MB layer.
 
-Status: PROPOSED (design only — implementation is the engineering agent's job).
-See [DECISIONS.md](../DECISIONS.md) and [TODO.md](../TODO.md).
+Status: IMPLEMENTED (shipped 2026-10-21 as TODO steps R1–R7; this note is kept
+as the design record). See [DECISIONS.md](../DECISIONS.md) →
+IMPLEMENTED 19-10-2026, [CHANGELOG.md](../CHANGELOG.md) 2026-10-21, and
+[TODO.md](../TODO.md).
 
 ---
 

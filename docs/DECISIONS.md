@@ -5,9 +5,22 @@ note that holds the full reasoning. Newest at the top.
 
 ---
 
-# PROPOSED 19-10-2026
+# IMPLEMENTED 19-10-2026 (shipped 2026-10-21)
 
 ## Four-stage pipeline + mass-balance code separation
+
+**Status: IMPLEMENTED.** Landed as TODO steps R1–R7 (plus the R5b inwater fix)
+and verified bit-for-bit against the pre-refactor fused path on a golden run
+(`sava_small_v081`, seed 42, CPU+GPU); the performance acceptance gate shows no
+regression (see [CHANGELOG.md](CHANGELOG.md) 2026-10-21 and
+[PERFORMANCE.md](PERFORMANCE.md), STATUS AS OF 21-10-2026). All four stages are
+dispatched through a `Stage` type hierarchy in `src/run.jl`
+(`run_stage(::PreprocessStage/TrainStage/InferStage/AnalyzeStage, ctx)`, folded by
+`AllStages`), driven by `scripts/pipeline.jl <prep|train|infer|analyze|all>`; MB
+code now lives in `src/sparse_ops.jl` + `src/massbalance.jl` with a
+`MassBalanceFormulation` dispatch hierarchy (`ThetaKinematicWave` /
+`NoMassBalance`), and post-hoc `mb_residual_diagnostics` makes MB analysis work on
+any model. The original proposal is preserved below.
 
 - **Restructure the monolithic `run_wflow_gnn` into four independently runnable
   stages** — (1) preprocess, (2) train, (3) infer, (4) analyze — that exchange
