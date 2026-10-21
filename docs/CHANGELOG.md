@@ -2,6 +2,17 @@ This document serves as a concrete changelog of the code, summarizing briefly th
 
 ## 2026-10-21
 
+- **Subcatchment error attribution (TODO §3e).** New post-hoc diagnostic
+	[src/attribution.jl](../src/attribution.jl) with CLI
+	[scripts/subcatch_error_attribution.jl](../scripts/subcatch_error_attribution.jl):
+	tessellates the domain by outlet cells (gauge raster or LDD-derived confluences),
+	builds the outlet tree, reports per-outlet skill and the advected-vs-local split
+	`e_local = dQ(o) - sum dQ(inlets)`, and Spearman-ranks static attributes against
+	local error. Writes `metrics/<split>_subcatch_{error_attribution,attribute_ranking}.csv`
+	and three plots. `resolve_staticmaps` now also finds `models/` for runs nested
+	one level deeper (`experiments/<group>/<run>`). Tests in
+	[test/test_attribution.jl](../test/test_attribution.jl).
+
 - **Completed the 4-stage pipeline + mass-balance code restructuring** (TODO
 	"Code restructuring", R1–R7). `run_wflow_gnn` is now
 	`run_stage(AllStages(), …)` over four independently-runnable stages —

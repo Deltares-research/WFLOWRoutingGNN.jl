@@ -177,3 +177,30 @@ counterfactual re-runs inference (still fixed weights).
   subcatchments give unreliable NSE (hence the size filter); multi-sink / clipped
   basins need an outlet-set convention consistent with the volume-budget outlet
   open question; the difference form depends on a verified tessellation.
+
+---
+
+## 6. As implemented (21-10-2026)
+
+- **Outlet set is the only input.** Route A (gauge raster) and Route B (river
+  sinks plus branch ends above confluences with upstream area >= threshold) both
+  yield outlet cells. Every cell goes to its first downstream outlet, so the
+  regions tessellate by construction; `tree.check` still verifies it and compares
+  cumulative region area with `wflow_uparea` (median ~1 %, max ~5-8 % on both Sava
+  models, the residual being cell-area vs the model's own area).
+- **Same-time difference.** `e_local = dQ(o) - sum dQ(u_i)` ignores the routing
+  lag between inlets and outlet, so a travelling error can show up as local. Read
+  it as an attribution at the outlet's time step, not as an exact injection.
+- **Ranking.** Spearman rho with a permutation p-value (5000 shuffles), Bonferroni
+  over the attributes tested, `low_power` for n < 10, attributes with relative
+  spread <= 1e-3 skipped (`SoilThickness` in `sava_small` varies only in the 4th
+  digit and gave a spurious rho of 0.5).
+- **First results (`sava_small_v081_e13b_depth_floored_hps01_s01`, Route B, 16
+  retained regions).** Headwater regions are fully local (rms_adv = 0); the
+  largest absolute local errors sit in the lower main stem (cumulative area
+  > 2000 km2). The strongest rank correlations with el_local are river slope
+  and  (rho ~ -0.7), but none survive Bonferroni at n = 16, so treat the
+  rankings as hypotheses.
+- **Not yet validated statistically on `sava_v081`**: the local full-Sava runs have
+  diverged predictions, and the run now warns when max |Q_pred| exceeds 1e3 times
+  max |Q_true|.

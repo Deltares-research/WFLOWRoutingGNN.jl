@@ -193,7 +193,7 @@ analysis function in [src/analysis.jl](../src/analysis.jl) with a thin CLI,
 reusing the now-promoted `resolve_staticmaps` / `load_regrid_nc` plus
 `ldd_to_graph`, `river_q_performance_metrics`.
 
-- [ ] **Subcatchment definition + size filter.** Route (A, preferred): use
+- [x] **Subcatchment definition + size filter.** *(done: both routes behind one outlet-set interface; `--gauges VAR` = A, default = B; `--min-area` sets the retained threshold, default 100 km2. `sava_small_v081` has one gauge so only B applies there.)* Route (A, preferred): use
       WFLOW-native `wflow_subcatch` (or a gauge-set variant) with outlets from
       `wflow_gauges` / `idx_out`. Route (B, fallback): delineate incremental
       catchments from the LDD tree, splitting at confluences where both branches
@@ -201,16 +201,16 @@ reusing the now-promoted `resolve_staticmaps` / `load_regrid_nc` plus
       `wflow_uparea` (or median outlet flow) exceeds a **configurable threshold**
       ("sufficiently large" — also dodges the dry-headwater floor regime where NSE
       is degenerate).
-- [ ] **Subcatchment tree from LDD.** Build which subcatchment drains into which
+- [x] **Subcatchment tree from LDD.** *(done: cells are labelled by their first downstream outlet, so the partition is a tessellation by construction; `tree.check` verifies it and the area vs `wflow_uparea`, and the run aborts if it fails. Cells with no outlet downstream stay `unassigned`.)* Build which subcatchment drains into which
       (immediate upstream sub-outlets per outlet) via `ldd_to_graph`. **Verify the
       partition is a proper tessellation** (every cell in exactly one subcatchment;
       all non-local inflow passes through tracked sub-outlets) — the incremental
       form below depends on it.
-- [ ] **Per-outlet skill (baseline).** Extract pred/true `q` (and `h`) at each
+- [x] **Per-outlet skill (baseline).** *(done for `river_q` only; `h` is not covered.)* Extract pred/true `q` (and `h`) at each
       retained outlet; compute NSE / KGE(+r,α,β) / PBIAS / peak_ratio / RMSE via
       `river_q_performance_metrics`. This is total (local+advected) error, not yet
       an attribution.
-- [ ] **Incremental (contributed) error — the crux.** For subcatchment `S` with
+- [x] **Incremental (contributed) error — the crux.** *(done, same-time difference with no routing-lag correction.)* For subcatchment `S` with
       outlet `o` and immediate upstream sub-outlets `{u_i}`,
       `e_local(S,t) = [Q_pred(o)−Q_true(o)] − Σ_i [Q_pred(u_i)−Q_true(u_i)]`.
       Report `rms(e_local)`, signed `mean(e_local)`, and a **specific injection**
@@ -221,17 +221,17 @@ reusing the now-promoted `resolve_staticmaps` / `load_regrid_nc` plus
       retraining.)** Re-run the trained model with *true* upstream inflow
       substituted at `S`'s boundary; measure outlet error to isolate local skill
       exactly. Inference-time intervention on fixed weights.
-- [ ] **Attribute aggregation (per subcatchment).** Outlet-cell value
+- [x] **Attribute aggregation (per subcatchment).** *(done via the `SUBCATCH_ATTRIBUTES` table; variables absent from `staticmaps.nc` are skipped.)* Outlet-cell value
       (`wflow_uparea`, `wflow_streamorder`, `RiverSlope`); incremental mean/median
       (`KsatVer`, `SoilThickness`, `M`, `f`, `PathFrac`, `WaterFrac`, `Slope`,
       `N_River`, `RiverSlope`); presence (reservoir `ResTrapEff>0`, glacier
       `wflow_glacierfrac>0`); nonlinearity (fraction of time `Q > qbankfull`).
-- [ ] **Attribute ranking.** Spearman rank-correlate each attribute vs the
+- [x] **Attribute ranking.** *(code done: permutation p, Fisher-z CI, Bonferroni, `low_power` flag, near-constant attributes skipped. **The `sava_v081` run is still open**: the only local full-Sava runs, `experiments/sava_full_v081` and `experiments/test_sava_v081`, have diverged predictions (|Q| ~ 1e38 from step 7), so rerun on a healthy full run, e.g. from the HPC.)* Spearman rank-correlate each attribute vs the
       local-error metric across subcatchments; scatter per attribute with ρ; rank
       by |ρ|. Report ρ CI/p; flag low power + multiple-comparison on small basins —
       run on **`sava_v081`** (many subcatchments) for a real test, not just
       `sava_small`.
-- [ ] **Outputs (mirror `spatial_eval.jl`).** `metrics/<split>_subcatch_error_attribution.csv`
+- [x] **Outputs (mirror `spatial_eval.jl`).** `metrics/<split>_subcatch_error_attribution.csv`
       (row per subcatchment: id, outlet node, incremental area, n_cells, outlet
       skill, `e_local` stats, specific injection, advected RMS, aggregated
       attributes); plots: subcatchment map coloured by local injection,

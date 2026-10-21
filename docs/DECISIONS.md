@@ -70,9 +70,13 @@ any model. The original proposal is preserved below.
 
 ---
 
-# PROPOSED 19-10-2026
+# IMPLEMENTED 19-10-2026 (shipped 2026-10-21)
 
 ## Subcatchment error-attribution diagnostic (post-hoc)
+
+**Status: IMPLEMENTED** (TODO §3e, [src/attribution.jl](../src/attribution.jl),
+[scripts/subcatch_error_attribution.jl](../scripts/subcatch_error_attribution.jl)).
+Open: the Tier-2 counterfactual and a run on a non-diverged full `sava_v081` model.
 
 - **Add a post-hoc analysis that attributes downstream error to the subcatchments
   that inject it**, testing the hypothesis that *some subcatchments contribute

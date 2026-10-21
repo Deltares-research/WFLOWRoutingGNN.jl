@@ -326,10 +326,16 @@ function resolve_staticmaps(wflow_model_path::AbstractString, run_dir::AbstractS
     direct = joinpath(wflow_model_path, "staticmaps.nc")
     isfile(direct) && return direct
     model_name = basename(rstrip(wflow_model_path, ['/', '\\']))
-    repo_root  = dirname(dirname(abspath(run_dir)))
-    local_path = joinpath(repo_root, "models", model_name, "staticmaps.nc")
-    isfile(local_path) && return local_path
-    error("could not locate staticmaps.nc (tried \"$direct\" and \"$local_path\")")
+    # `<repo>/experiments/<run>` or, for grouped runs, `<repo>/experiments/<group>/<run>`
+    tried = String[direct]
+    dir = dirname(abspath(run_dir))
+    for _ in 1:3
+        local_path = joinpath(dirname(dir), "models", model_name, "staticmaps.nc")
+        isfile(local_path) && return local_path
+        push!(tried, local_path)
+        dir = dirname(dir)
+    end
+    error("could not locate staticmaps.nc (tried " * join(("\"$p\"" for p in tried), ", ") * ")")
 end
 
 """

@@ -78,4 +78,9 @@ export river_layout, read_river_series, upstream_sum, MB_SCHEMES, mb_scheme_resi
        residual_summary, graph_topology_checks, river_mask_consistency,
        WFLOW_CONSISTENCY_VARS, wflow_output_consistency
 
+include("attribution.jl")
+export subcatch_error_attribution_run, subcatch_error_attribution, build_subcatchment_tree,
+       network_outlets, gauge_outlets, subcatch_error_decomposition, spearman_test,
+       plot_subcatch_error_attribution
+
 end # module WflowRoutingGNN
