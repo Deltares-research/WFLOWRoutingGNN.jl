@@ -113,6 +113,11 @@ function _set!(d::Dict, path::String, value)
     node[parts[end]] = value
 end
 
+# `missing` / `nothing` mark a metric that does not apply to the run's formulation
+# (e.g. a theta-only companion): written as an empty CSV cell, never as `NaN`.
+_hps_cell(v) = (v === missing || v === nothing) ? "" : string(v)
+_hps_present(x) = !(x === missing || x === nothing) && isfinite(x)
+
 # Write a Vector of NamedTuples as a CSV file.
 function _write_hps_csv(path::String, rows::Vector)
     isempty(rows) && return
@@ -120,9 +125,22 @@ function _write_hps_csv(path::String, rows::Vector)
     open(path, "w") do io
         println(io, join(string.(keys(first(rows))), ","))
         for row in rows
-            println(io, join(string.(values(row)), ","))
+            println(io, join(_hps_cell.(values(row)), ","))
         end
     end
+end
+
+# Per-formulation stability companions and secondary conservation numbers: only
+# written to the summary TOML for combinations where they exist.
+const _HPS_OPTIONAL_METRICS = (:volume_pbias, :mb_residual_rms, :analytic_gain,
+                               :q_to_h_amp, :backbone_rho_median, :backbone_rho_max)
+
+function _hps_add_optional!(entry::Dict, r)
+    for k in _HPS_OPTIONAL_METRICS
+        m = getfield(r, Symbol(k, "_mean"))
+        _hps_present(m) && (entry[String(k)] = Dict("mean" => m))
+    end
+    return entry
 end
 
 function _write_hps_summary_toml(path::String, rows::Vector)
@@ -131,7 +149,7 @@ function _write_hps_summary_toml(path::String, rows::Vector)
         "generated_at" => string(Dates.now()),
         "n_combinations" => length(rows),
         "combinations" => [
-            Dict(
+            _hps_add_optional!(Dict(
                 "combo_index" => r.combo_index,
                 "run_name_base" => r.run_name_base,
                 "n_repetitions" => r.n_repetitions,
@@ -159,11 +177,11 @@ function _write_hps_summary_toml(path::String, rows::Vector)
                     "mean" => r.river_h_nse_mean,
                     "std"  => r.river_h_nse_std,
                 ),
-                "final_amp" => Dict(
-                    "mean" => r.final_amp_mean,
-                    "std"  => r.final_amp_std,
+                "rollout_contraction" => Dict(
+                    "mean" => r.rollout_contraction_mean,
+                    "std"  => r.rollout_contraction_std,
                 ),
-            ) for r in rows
+            ), r) for r in rows
         ],
     )
     open(path, "w") do io
@@ -221,20 +239,43 @@ function _read_run_scalar_metrics(run_dir::AbstractString)
                             peak_ratio_frac_gt2 = NaN,
                             pooled_kge = NaN,
                             river_h_nse = NaN,
-                            final_amp = NaN)
+                            rollout_contraction = NaN,
+                            mb_residual_rms = NaN,
+                            volume_pbias = NaN,
+                            volume_drift = NaN,
+                            h_loss_weight_effective = NaN,
+                            analytic_gain = missing,
+                            q_to_h_amp = missing,
+                            backbone_rho_median = missing,
+                            backbone_rho_max = missing)
     d = TOML.parsefile(path)
     fh = get(d, "fixed_horizon", Dict{String,Any}())
     rp = get(d, "river_q_performance", Dict{String,Any}())
     rp_pooled = get(rp, "pooled", Dict{String,Any}())
     sp = get(d, "spatial_median", Dict{String,Any}())
     sp_h = get(sp, "river_h", Dict{String,Any}())
-    stab = get(d, "training_stability", Dict{String,Any}())
+    stab = get(d, "stability", Dict{String,Any}())
+    form = get(d, "formulation", Dict{String,Any}())
+    mbr  = get(d, "mass_balance_residual", Dict{String,Any}())
+    mbr_pred = get(mbr, "pred", Dict{String,Any}())
+    # `missing` when the key is absent: the metric does not apply to this formulation
+    opt(t, k) = haskey(t, k) ? Float64(t[k]) : missing
     return (
         fixed_val_rmse = Float64(get(fh, "final_val_rmse", NaN)),
         peak_ratio_frac_gt2 = Float64(get(fh, "final_peak_ratio_frac_gt2", NaN)),
         pooled_kge = Float64(get(rp_pooled, "kge", NaN)),
         river_h_nse = Float64(get(sp_h, "nse", NaN)),
-        final_amp = Float64(get(stab, "final_amp", NaN)),
+        # headline, formulation-agnostic
+        rollout_contraction = Float64(get(stab, "rollout_contraction", NaN)),
+        mb_residual_rms = Float64(get(mbr_pred, "rms", NaN)),
+        volume_pbias = Float64(get(mbr, "volume_pbias", NaN)),
+        volume_drift = Float64(get(mbr, "volume_drift", NaN)),
+        h_loss_weight_effective = Float64(get(form, "h_loss_weight", NaN)),
+        # per-formulation companions
+        analytic_gain = opt(stab, "analytic_gain"),
+        q_to_h_amp = opt(stab, "q_to_h_amp"),
+        backbone_rho_median = opt(stab, "backbone_rho_median"),
+        backbone_rho_max = opt(stab, "backbone_rho_max"),
     )
 end
 
@@ -245,7 +286,7 @@ function _aggregate_repetition_rows(rows::Vector)
     for combo_idx in combo_ids
         grp = filter(r -> r.combo_index == combo_idx, rows)
         function _stats(v)
-            fv = Float64[x for x in v if isfinite(x)]
+            fv = Float64[x for x in v if _hps_present(x)]
             isempty(fv) && return (mean = NaN, std = NaN, min = NaN, max = NaN)
             return (mean = mean(fv),
                     std  = length(fv) > 1 ? std(fv) : 0.0,
@@ -258,7 +299,9 @@ function _aggregate_repetition_rows(rows::Vector)
         st_pg2 = _stats(getfield.(grp, :peak_ratio_frac_gt2))
         st_kge = _stats(getfield.(grp, :pooled_kge))
         st_hn  = _stats(getfield.(grp, :river_h_nse))
-        st_amp = _stats(getfield.(grp, :final_amp))
+        st_rho = _stats(getfield.(grp, :rollout_contraction))
+        # mean over the repetitions where the metric applies; `missing` if none does
+        opt_mean(k) = (s = _stats(getfield.(grp, k)); isfinite(s.mean) ? s.mean : missing)
 
         push!(out, (
             combo_index = combo_idx,
@@ -278,8 +321,14 @@ function _aggregate_repetition_rows(rows::Vector)
             pooled_kge_std  = st_kge.std,
             river_h_nse_mean = st_hn.mean,
             river_h_nse_std  = st_hn.std,
-            final_amp_mean = st_amp.mean,
-            final_amp_std  = st_amp.std,
+            rollout_contraction_mean = st_rho.mean,
+            rollout_contraction_std  = st_rho.std,
+            mb_residual_rms_mean     = opt_mean(:mb_residual_rms),
+            volume_pbias_mean        = opt_mean(:volume_pbias),
+            analytic_gain_mean       = opt_mean(:analytic_gain),
+            q_to_h_amp_mean          = opt_mean(:q_to_h_amp),
+            backbone_rho_median_mean = opt_mean(:backbone_rho_median),
+            backbone_rho_max_mean    = opt_mean(:backbone_rho_max),
         ))
     end
     return out
@@ -384,6 +433,7 @@ function hpar_search(toml_path::String)
                 hidden_dim                      = ms.hidden_dim,
                 nlayers                         = ms.nlayers,
                 enforce_mass_balance            = ms.enforce_mass_balance,
+                mb_formulation                  = String(mb_formulation_kind(ms)),
                 batch_size                      = ts.batch_size,
                 epochs                          = ts.epochs,
                 n_params                        = metrics.n_params,
@@ -394,7 +444,15 @@ function hpar_search(toml_path::String)
                 peak_ratio_frac_gt2             = msc.peak_ratio_frac_gt2,
                 pooled_kge                      = msc.pooled_kge,
                 river_h_nse                     = msc.river_h_nse,
-                final_amp                       = msc.final_amp,
+                rollout_contraction             = msc.rollout_contraction,
+                mb_residual_rms                 = msc.mb_residual_rms,
+                volume_pbias                    = msc.volume_pbias,
+                volume_drift                    = msc.volume_drift,
+                h_loss_weight_effective         = msc.h_loss_weight_effective,
+                analytic_gain                   = msc.analytic_gain,
+                q_to_h_amp                      = msc.q_to_h_amp,
+                backbone_rho_median             = msc.backbone_rho_median,
+                backbone_rho_max                = msc.backbone_rho_max,
                 train_duration_s                = metrics.train_duration_s,
                 val_rollout_duration_s          = metrics.val_rollout_duration_s,
                 val_rollout_duration_per_step_s = metrics.val_rollout_duration_s /

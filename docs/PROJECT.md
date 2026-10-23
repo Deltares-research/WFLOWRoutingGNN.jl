@@ -88,6 +88,7 @@ Train stage (`pipeline.jl`):
 
 - `losses.png` — training vs validation loss curves (1-step and rollout, with grad-norm / LR / curriculum-step overlays).
 - `amplification.png` — the per-epoch `q→h` error amplification factor (mass-balance runs only), tracking how `q` error propagates into `h`.
+- `metrics/metrics.toml` stability tables (written by the analyze stage): `[formulation]` (`kind`, `carried_state` / `readout`, effective `h_loss_weight`) and `[stability]` with the formulation-agnostic headline `rollout_contraction` ρ̂ (one-step gain of the carried state; `< 1` contractive, `rollout_contraction_margin = 1 − ρ̂`) plus per-formulation companions that exist only for their arm (theta: `analytic_gain`, `q_to_h_amp`; hybrid: `backbone_rho_median`, `backbone_rho_max`). Formulation-independent conservation is `[mass_balance_residual]` `volume_pbias` / `volume_drift`.
 - `fixed_horizon.png` — per-epoch fixed-horizon validation discharge RMSE and peak ratio (overall and high-flow), a stable rollout-skill signal across epochs.
 
 Analyze stage (`analysis.jl`):

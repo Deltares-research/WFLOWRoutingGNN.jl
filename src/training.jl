@@ -576,8 +576,11 @@ Train `model` in-place and return a `NamedTuple` of per-epoch history arrays:
 
 For mass-balance models it also returns the per-component 1-step MSE
 (`train_q_1step`, `val_q_1step`, `train_h_1step`, `val_h_1step`), the q→h error
-amplification diagnostic (`train_amp`, `val_amp`; see [`mb_amplification`](@ref))
-and its analytic reference gain (`mb_gain`), plus `grad_norm`, the per-epoch
+amplification diagnostic (`train_amp`, `val_amp`; see [`mb_amplification`](@ref);
+`NaN` for the hybrid) and its analytic reference gain (`mb_gain`: the θ gain, or the
+median backbone contraction of the hybrid), the formulation-agnostic stability headline
+`val_contraction` (see [`rollout_contraction`](@ref); defined for every model) and the
+effective `h_loss_weight`, plus `grad_norm`, the per-epoch
 applied learning rate (`lr`) and curriculum rollout length (`steps`).
 Non-mass-balance models fill the mass-balance columns with `NaN32`.
 
@@ -678,7 +681,8 @@ function train_model!(model,
     val_h_1step   = Float32[]
     train_amp     = Float32[]   # q→h error amplification through the mass balance
     val_amp       = Float32[]
-    mb_gain       = Float32[]   # analytic self-gain θ·dt·σ_q/σ_h (reference)
+    mb_gain       = Float32[]   # theta: analytic self-gain θ·dt·σ_q/σ_h; hybrid: median backbone contraction
+    val_contraction = Float32[] # formulation-agnostic stability headline ρ̂ (see rollout_contraction)
     grad_norm     = Float32[]
     lr_hist       = Float32[]   # scheduled LR actually applied each epoch
     steps_hist    = Int[]       # curriculum rollout length (current_steps) each epoch
@@ -707,6 +711,10 @@ function train_model!(model,
     do_peak_diagnostics = strategy.loss_type == :huber
 
     has_components = has_mass_balance(model.mass_balance)
+    roles = mb_state_roles(model.mass_balance)
+    @info "Mass-balance formulation $(nameof(typeof(model.mass_balance))): carried state = " *
+          "$(roles.state), derived readout = $(roles.readout), h_loss_weight = " *
+          "$(strategy.h_loss_weight)"
 
     # Fixed-horizon validation metric + early stopping / best-weight tracking.
     do_fixed_eval = !isnothing(fixed_eval)
@@ -827,6 +835,7 @@ function train_model!(model,
         val_q_sum      = 0f0
         val_h_sum      = 0f0
         val_amp_sum    = 0f0
+        val_contr      = Float32[]
         n_val          = 0
         for b in val_loader_d
             ep_val_rollout += loss_function(model, b, strategy, static_d;
@@ -839,8 +848,11 @@ function train_model!(model,
                 val_h_sum  += hc
                 val_amp_sum += mb_amplification(model, b, static_d)[1]
             end
+            push!(val_contr, rollout_contraction(model, b, static_d))
             n_val += 1
         end
+        fin_contr         = filter(isfinite, val_contr)
+        ep_val_contraction = isempty(fin_contr) ? NaN32 : Float32(median(fin_contr))
         val_denom      = max(n_val, 1)
         ep_val_rollout /= val_denom
         ep_val_1step   /= val_denom
@@ -865,6 +877,7 @@ function train_model!(model,
         push!(train_amp,     has_components ? ep_train_amp : NaN32)
         push!(val_amp,       ep_val_amp)
         push!(mb_gain,       has_components ? ep_mb_gain : NaN32)
+        push!(val_contraction, ep_val_contraction)
         push!(grad_norm,     Float32(ep_grad_norm))
         push!(lr_hist,       Float32(lr))
         push!(steps_hist,    strategy.current_steps)
@@ -931,13 +944,16 @@ function train_model!(model,
             (:train_1step,   round(ep_train_1step,   sigdigits = 4)),
             (:val_1step,     round(ep_val_1step,     sigdigits = 4)),
         ]
-        comp_vals = has_components ? [
+        comp_vals = has_components ? Any[
             (:train_q_1step, round(ep_train_q_1step, sigdigits = 4)),
             (:val_q_1step,   round(ep_val_q_1step,   sigdigits = 4)),
             (:train_h_1step, round(ep_train_h_1step, sigdigits = 4)),
             (:val_h_1step,   round(ep_val_h_1step,   sigdigits = 4)),
-            (Symbol("q→h_amp"), round(ep_val_amp,    sigdigits = 3)),
         ] : []
+        # theta only: the q→h amplification (NaN, hence omitted, for the hybrid)
+        has_components && isfinite(ep_val_amp) &&
+            push!(comp_vals, (Symbol("q→h_amp"), round(ep_val_amp, sigdigits = 3)))
+        push!(comp_vals, (:rollout_contraction, round(ep_val_contraction, sigdigits = 3)))
         fixed_vals = do_fixed_eval ? [
             (:val_fixed_rmse, round(ep_fixed_rmse, sigdigits = 4)),
             (:val_peak_ratio, round(ep_peak_ratio, sigdigits = 3)),
@@ -984,6 +1000,8 @@ function train_model!(model,
             train_amp     = train_amp,
             val_amp       = val_amp,
             mb_gain       = mb_gain,
+            val_contraction = val_contraction,
+            h_loss_weight = Float32(strategy.h_loss_weight),
             grad_norm     = grad_norm,
             lr            = lr_hist,
             steps         = steps_hist,

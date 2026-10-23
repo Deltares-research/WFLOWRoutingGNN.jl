@@ -71,7 +71,7 @@ export rollout, evaluate_trajectory, rollout_mb_diagnostics, rollout_ensemble,
 
 include("postprocess.jl")
 export regrid, write_regrid_to_netcdf, load_regrid_nc, load_regrid_times,
-       gather_nodes, nodes_for_cells, mb_residual_diagnostics,
+       gather_nodes, nodes_for_cells, mb_residual_diagnostics, field_volume_bias,
        spatial_error_metrics, write_spatial_metrics_to_netcdf, overprediction_vs_ramp,
        spatial_metric_summary, write_spatial_metrics_to_csv,
        kge_metrics, mae_metric, pbias, event_peak_metrics, event_detection_metrics,

@@ -81,8 +81,11 @@ applicable): `spatial_summary` from [`spatial_metric_summary`](@ref), `ramp` fro
 [`overprediction_vs_ramp`](@ref), `river_q_perf` from
 [`river_q_performance_metrics`](@ref), `volume_budget` from
 [`volume_budget_diagnostics`](@ref), `mb_floor` / `mb_stiffness` from the
-mass-balance layer and `mb_residual` (`(; theta, pred, reference)` scalar summaries)
-from [`mb_residual_diagnostics`](@ref).
+mass-balance layer and `mb_residual` (`(; theta, pred, reference, volume_pbias,
+volume_drift)` scalar summaries) from [`mb_residual_diagnostics`](@ref) and
+[`field_volume_bias`](@ref). The last two are the formulation-independent conservation
+numbers (domain volume `Σ h·w·l` of the predicted vs the wflow field); the
+layer-internal `volume_budget` is a legacy θ-only diagnostic.
 """
 function analyze_run(prep::PrepBundle, ms::ModelSettings, ts::TrainSettings;
                      dirs, model = nothing, train_summary = nothing,
@@ -111,6 +114,7 @@ function analyze_run(prep::PrepBundle, ms::ModelSettings, ts::TrainSettings;
     volume_budget_summary = nothing
     mb_floor_summary      = nothing
     mb_stiffness_summary  = nothing
+    backbone_rho_max      = nothing
 
     plot_validation_movie(p_grids, t_grids, domain;
                           path       = joinpath(dirs.plots, "validation.mp4"),
@@ -177,6 +181,7 @@ function analyze_run(prep::PrepBundle, ms::ModelSettings, ts::TrainSettings;
             volume_budget_summary = layer.volume_budget
             mb_floor_summary      = layer.mb_floor
             mb_stiffness_summary  = layer.mb_stiffness
+            backbone_rho_max      = get(layer, :backbone_rho_max, nothing)
         end
     end
 
@@ -221,7 +226,9 @@ function analyze_run(prep::PrepBundle, ms::ModelSettings, ts::TrainSettings;
                                   train_duration_s        = summary.train_duration_s,
                                   val_rollout_duration_s  = infer === nothing ? nothing :
                                                             infer.val_rollout_duration_s,
-                                  val_n_timesteps         = size(p_states, 3)),
+                                  val_n_timesteps         = size(p_states, 3),
+                                  mb_kind                 = mb_formulation_kind(ms),
+                                  backbone_rho_max        = backbone_rho_max),
                                out.spatial_summary, out.ramp, out.river_q_perf,
                                out.volume_budget, out.mb_floor, out.mb_stiffness,
                                out.mb_residual)
@@ -303,7 +310,8 @@ covers such models.
 layer_mb_analysis(::NoMassBalance, model, prep, dirs, split_times) = nothing
 
 # Hybrid: report the backbone contraction (diagonal of P = spectrum) per node. There is
-# no floor/stiffness/volume-budget record for this formulation, so no layer summary.
+# no floor/stiffness/volume-budget record for this formulation; only the largest
+# contraction (`backbone_rho_max`, the spectral radius) is returned for `metrics.toml`.
 function layer_mb_analysis(mb::MuskingumContinuityHybrid, model, prep, dirs, split_times)
     c = backbone_contraction(mb)
     K = Array(mb.K)
@@ -316,7 +324,8 @@ function layer_mb_analysis(mb::MuskingumContinuityHybrid, model, prep, dirs, spl
     end
     @info "Muskingum-continuity backbone contraction: median=$(round(median(c); sigdigits=3)) " *
           "max=$(round(maximum(c); sigdigits=4)) (spectral radius of P; < 1)"
-    return nothing
+    return (; volume_budget = nothing, mb_floor = nothing, mb_stiffness = nothing,
+            backbone_rho_max = Float32(maximum(c)))
 end
 
 function layer_mb_analysis(::ThetaKinematicWave, model, prep, dirs, split_times)
@@ -412,9 +421,12 @@ function _analyze_mb_residual(prep::PrepBundle, ms::ModelSettings, p_states, t_s
         Any[collect(1:prep.n_nodes), prep.postscale["river_q"], pred.rms_node, ref.rms_node,
             pred.n_valid_node])
 
+    vb = field_volume_bias(p_states[hi, :, :], t_states[hi, :, :], wl)
     @info "Mass-balance residual (θ=$θ): predicted rms=$(round(pred.summary.rms; sigdigits=3)) m, " *
-          "reference (wflow) rms=$(round(ref.summary.rms; sigdigits=3)) m"
-    return (; theta = Float32(θ), pred = pred.summary, reference = ref.summary)
+          "reference (wflow) rms=$(round(ref.summary.rms; sigdigits=3)) m; domain volume " *
+          "pbias=$(round(vb.volume_pbias; digits=3))% drift=$(round(vb.volume_drift; sigdigits=3)) m^3/step"
+    return (; theta = Float32(θ), pred = pred.summary, reference = ref.summary,
+            volume_pbias = vb.volume_pbias, volume_drift = vb.volume_drift)
 end
 
 # ---------------------------------------------------------------------------

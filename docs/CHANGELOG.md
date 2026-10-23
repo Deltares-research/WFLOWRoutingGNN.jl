@@ -2,6 +2,22 @@ This document serves as a concrete changelog of the code, summarizing briefly th
 
 ## 2026-10-23
 
+- **Formulation-aware stability and conservation metrics (TODO §3h).** New
+        `rollout_contraction` (ρ̂, the measured one-step gain of the carried state under
+        teacher forcing; `q` rows for theta, `h` for the hybrid, all rows without a mass
+        balance) is evaluated per epoch for every model (`losses.val_contraction`, shown in
+        the progress meter) next to `h_loss_weight`; the training start logs which of
+        `river_q` / `river_h` is the carried state. `metrics.toml` gains `[formulation]` and
+        `[stability]` (headline plus presence-based companions: theta `analytic_gain` /
+        `q_to_h_amp`, hybrid `backbone_rho_median` / `backbone_rho_max`) and layer-free
+        `volume_pbias` / `volume_drift` in `[mass_balance_residual]` (new
+        `field_volume_bias`). `final_mb_gain` is no longer written for the hybrid. The hpar
+        results CSV / summary replace the `final_amp` columns by `rollout_contraction` and the
+        companions (empty cell / absent key when not applicable) and add `mb_formulation`,
+        `mb_residual_rms`, `volume_pbias`, `volume_drift`, `h_loss_weight_effective`.
+        Tests: [test/test_mb_hybrid.jl](../test/test_mb_hybrid.jl),
+        [test/test_pipeline.jl](../test/test_pipeline.jl),
+        [test/test_hparsearch.jl](../test/test_hparsearch.jl).
 - **Subcatchment error attribution in the analyze stage (TODO §3g).** `analyze_run` (and
         therefore every pipeline and `hpar_search` run) now writes the attribution products
         `val_subcatch_error_map.png`, `_mainstem.png`, `_attributes.png`,

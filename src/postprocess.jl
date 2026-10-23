@@ -900,3 +900,55 @@ function mb_residual_diagnostics(q::AbstractMatrix, h::AbstractMatrix, inwater::
 
     return (; residual, volume_residual, rms_node, n_valid_node, summary)
 end
+
+"""
+    field_volume_bias(h_pred, h_true, wl) -> (; volume_pbias, volume_drift)
+
+Formulation-independent domain water-volume bias of a predicted depth field against the
+reference, from `(n_nodes, T)` depths `h_pred` / `h_true` [m] and the channel area per node
+`wl = w·l` [m²]. With `V(t) = Σ_i h_i(t)·wl_i` over the nodes valid in both fields:
+
+- `volume_pbias`: `100 · Σ_t (V_pred − V_true) / Σ_t V_true` [%];
+- `volume_drift`: least-squares slope of `V_pred − V_true` against the step index [m³/step].
+
+Same definitions as [`volume_budget_diagnostics`](@ref) but needs no mass-balance layer, so
+it is defined for every model (the conservation companion to the stability headline).
+`NaN32` where undefined.
+"""
+function field_volume_bias(h_pred::AbstractMatrix, h_true::AbstractMatrix, wl::AbstractVector)
+    n, T = size(h_pred)
+    size(h_true) == (n, T) ||
+        throw(DimensionMismatch("h_pred $(size(h_pred)) and h_true $(size(h_true)) differ"))
+    length(wl) == n ||
+        throw(DimensionMismatch("wl has $(length(wl)) entries, expected $n"))
+    v_pred = fill(NaN, T)
+    v_true = fill(NaN, T)
+    for t in 1:T
+        sp = 0.0; st = 0.0; any_ = false
+        for i in 1:n
+            w = wl[i]; hp = h_pred[i, t]; ht = h_true[i, t]
+            if isfinite(w) && w > 0 && isfinite(hp) && isfinite(ht)
+                sp += Float64(hp) * w
+                st += Float64(ht) * w
+                any_ = true
+            end
+        end
+        if any_
+            v_pred[t] = sp
+            v_true[t] = st
+        end
+    end
+    ok = findall(isfinite, v_pred)
+    isempty(ok) && return (; volume_pbias = NaN32, volume_drift = NaN32)
+    dv    = v_pred[ok] .- v_true[ok]
+    denom = sum(v_true[ok])
+    pbias = abs(denom) > eps(Float32) ? Float32(100 * sum(dv) / denom) : NaN32
+    drift = NaN32
+    if length(ok) >= 2
+        x  = Float64.(ok)
+        xm = mean(x)
+        d  = sum(abs2, x .- xm)
+        d > 0 && (drift = Float32(sum((x .- xm) .* (dv .- mean(dv))) / d))
+    end
+    return (; volume_pbias = pbias, volume_drift = drift)
+end

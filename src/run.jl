@@ -390,10 +390,22 @@ available, the system volume-budget diagnostics (`volume_budget` from
 (`mb_floor`, derived from validation `h_raw`); the per-node MB stiffness summary
 (`mb_stiffness`, from `θ·dt·σ_q/σ_h`); the layer-free kinematic-wave residual
 summary of the predicted and wflow trajectories (`mb_residual`, from
-[`mb_residual_diagnostics`](@ref); written for every model); and, when `losses.loss_type == :huber`, the Tier-1 peak-loss diagnostics from
+[`mb_residual_diagnostics`](@ref); written for every model, together with the
+formulation-independent domain `volume_pbias` / `volume_drift`); and, when
+`losses.loss_type == :huber`, the Tier-1 peak-loss diagnostics from
 [`peak_epoch_diagnostics`](@ref). Non-finite values are omitted so the file
 stays a valid, parser-friendly TOML of plain numbers — a token-cheap single-file
 entry point for downstream evaluation agents.
+
+Formulation-aware tables (`run_meta.mb_kind` selects the arm):
+
+- `[formulation]`: `kind`, `carried_state` / `readout` (which of `river_q` / `river_h` is
+  the state, see [`MB_STATE_ROLES`](@ref)) and the effective `h_loss_weight`.
+- `[stability]`: `rollout_contraction` (the measured one-step state gain `ρ̂` of
+  [`rollout_contraction`](@ref), comparable across formulations) and
+  `rollout_contraction_margin = 1 − ρ̂`, plus per-arm companions: `analytic_gain` /
+  `q_to_h_amp` (θ only), `backbone_rho_median` / `backbone_rho_max` (hybrid only).
+  Companions are absent, not `NaN`, for the other arms.
 """
 function write_run_metrics_toml(path::AbstractString, losses, ts::TrainSettings,
                                 run_meta, spatial_summary, ramp,
@@ -443,13 +455,38 @@ function write_run_metrics_toml(path::AbstractString, losses, ts::TrainSettings,
     putf!(stab_t, "final_grad_norm", lastf(losses.grad_norm))
     putf!(stab_t, "max_grad_norm",   bestf(losses.grad_norm, maximum))
     putf!(stab_t, "final_lr",        lastf(losses.lr))
-    putf!(stab_t, "final_amp",       lastf(losses.val_amp))
-    putf!(stab_t, "final_mb_gain",   lastf(losses.mb_gain))
+    mb_kind   = get(run_meta, :mb_kind, nothing)
+    is_hybrid = mb_kind === :muskingum_continuity
+    is_theta  = mb_kind === :theta_kinematic_wave
+    putf!(stab_t, "final_amp",       lastf(losses.val_amp))   # theta only (NaN otherwise)
+    is_hybrid || putf!(stab_t, "final_mb_gain", lastf(losses.mb_gain))
     putf!(stab_t, "n_nonfinite_skips", get(losses, :n_nonfinite_skips, nothing))
     putf!(stab_t, "n_backoffs",        get(losses, :n_backoffs, nothing))
     stopped_early = get(losses, :stopped_early, nothing)
     stopped_early === nothing || (stab_t["stopped_early"] = stopped_early)
     root["training_stability"] = stab_t
+
+    rho_t = Dict{String, Any}()
+    rho   = lastf(get(losses, :val_contraction, nothing))
+    putf!(rho_t, "rollout_contraction", rho)
+    rho !== nothing && isfinite(rho) && putf!(rho_t, "rollout_contraction_margin", 1 - rho)
+    if is_theta
+        putf!(rho_t, "analytic_gain", lastf(losses.mb_gain))
+        putf!(rho_t, "q_to_h_amp",    lastf(losses.val_amp))
+    elseif is_hybrid
+        putf!(rho_t, "backbone_rho_median", lastf(losses.mb_gain))
+        putf!(rho_t, "backbone_rho_max",    get(run_meta, :backbone_rho_max, nothing))
+    end
+    isempty(rho_t) || (root["stability"] = rho_t)
+
+    if mb_kind !== nothing
+        roles = get(MB_STATE_ROLES, mb_kind, MB_STATE_ROLES[:none])
+        form_t = Dict{String, Any}("kind"          => String(mb_kind),
+                                   "carried_state" => roles.state,
+                                   "readout"       => roles.readout)
+        putf!(form_t, "h_loss_weight", get(losses, :h_loss_weight, nothing))
+        root["formulation"] = form_t
+    end
 
     fh_t = Dict{String, Any}()
     putf!(fh_t, "horizon",          ts.eval_horizon)
@@ -541,6 +578,8 @@ function write_run_metrics_toml(path::AbstractString, losses, ts::TrainSettings,
     if mb_residual !== nothing
         mbr_t = Dict{String, Any}()
         putf!(mbr_t, "theta", mb_residual.theta)
+        putf!(mbr_t, "volume_pbias", get(mb_residual, :volume_pbias, nothing))
+        putf!(mbr_t, "volume_drift", get(mb_residual, :volume_drift, nothing))
         for (key, s) in (("pred", mb_residual.pred), ("reference", mb_residual.reference))
             st = Dict{String, Any}()
             for f in (:n, :bias, :rms, :median_abs, :p95_abs, :max_abs, :rms_rel,

@@ -276,6 +276,28 @@ end
         edge_src = src, edge_tgt = tgt, wl, dt)
 end
 
+@testset "field_volume_bias (layer-free volume bias)" begin
+    wl = Float32[100, 200, 0, NaN]                 # nodes 3 and 4 have no valid channel area
+    T  = 5
+    h_true = fill(1f0, 4, T)
+    r0 = field_volume_bias(h_true, h_true, wl)
+    @test r0.volume_pbias == 0f0 && r0.volume_drift == 0f0
+    r = field_volume_bias(h_true .* 1.1f0, h_true, wl)
+    @test r.volume_pbias ≈ 10f0 atol = 1f-3
+    @test abs(r.volume_drift) < 1f-3 * 300
+    # linearly growing excess: the drift is the per-step slope of the volume difference
+    hg = h_true .+ reshape(Float32.(0:T-1), 1, T) .* 0.01f0
+    rg = field_volume_bias(hg, h_true, wl)
+    @test rg.volume_drift ≈ 0.01f0 * (100 + 200) rtol = 1f-3
+    @test rg.volume_pbias > 0
+    # NaN depths are ignored node-wise in both fields; no valid data -> NaN
+    hn = h_true .* 1.1f0; hn[1, :] .= NaN32
+    @test field_volume_bias(hn, h_true, wl).volume_pbias ≈ 10f0 atol = 1f-3
+    @test all(isnan, values(field_volume_bias(fill(NaN32, 4, T), h_true, wl)))
+    @test_throws DimensionMismatch field_volume_bias(h_true, h_true[:, 1:3], wl)
+    @test_throws DimensionMismatch field_volume_bias(h_true, h_true, wl[1:3])
+end
+
 @testset "analyze_run: residual for every model, layer diagnostics by formulation" begin
     mktempdir() do tmp
         ds, ms, ts = pl_settings(tmp)
@@ -299,7 +321,17 @@ end
         @test haskey(toml, "mass_balance_residual")
         @test haskey(toml["mass_balance_residual"]["pred"], "rms")
         @test haskey(toml["mass_balance_residual"]["reference"], "rms")
+        @test haskey(toml["mass_balance_residual"], "volume_pbias")   # layer-free, any model
         @test !haskey(toml, "mass_balance_floor")
+        # theta arm: q is the carried state, h the readout; analytic gain is its companion
+        @test toml["formulation"]["kind"] == "theta_kinematic_wave"
+        @test toml["formulation"]["carried_state"] == "river_q"
+        @test toml["formulation"]["readout"] == "river_h"
+        @test haskey(toml["formulation"], "h_loss_weight")
+        @test toml["stability"]["rollout_contraction"] ≥ 0
+        @test haskey(toml["stability"], "analytic_gain")
+        @test !haskey(toml["stability"], "backbone_rho_median")
+        @test haskey(toml["training_stability"], "final_mb_gain")
         rows = readlines(joinpath(dirs.metrics, "mb_residual.csv"))
         @test length(rows) == inf.val_n_timesteps          # header + (T-1) steps
         @test length(readlines(joinpath(dirs.metrics, "mb_residual_by_node.csv"))) ==
@@ -347,6 +379,12 @@ end
         @test haskey(toml_n, "mass_balance_residual")
         @test !haskey(toml_n, "mass_balance_floor")
         @test !haskey(toml_n, "volume_budget")
+        @test toml_n["formulation"]["kind"] == "none"
+        @test toml_n["formulation"]["carried_state"] == "all"
+        @test haskey(toml_n["stability"], "rollout_contraction")   # defined for every model
+        @test !haskey(toml_n["stability"], "analytic_gain")
+        @test !haskey(toml_n["stability"], "backbone_rho_max")
+        @test all(isfinite, tr_none.losses.val_contraction)
     end
 end
 
@@ -374,5 +412,21 @@ end
         @test length(readlines(csv)) == prep.n_nodes + 1
         @test rollout_mb_diagnostics(tr.model, prep.dataset.val, prep.static_arr) === nothing
         @test all(0 .< backbone_contraction(tr.model.mass_balance) .< 1)
+
+        # Hybrid arm: h is the carried state, q the readout; backbone spectrum is its companion
+        toml_h = TOML.parsefile(joinpath(dirs.metrics, "metrics.toml"))
+        @test toml_h["formulation"]["kind"] == "muskingum_continuity"
+        @test toml_h["formulation"]["carried_state"] == "river_h"
+        @test toml_h["formulation"]["readout"] == "river_q"
+        @test toml_h["stability"]["rollout_contraction"] ≥ 0
+        @test toml_h["stability"]["backbone_rho_max"] ≈
+              maximum(backbone_contraction(tr.model.mass_balance)) rtol = 1e-4
+        @test haskey(toml_h["stability"], "backbone_rho_median")
+        @test !haskey(toml_h["stability"], "analytic_gain") && !haskey(toml_h["stability"], "q_to_h_amp")
+        # the backbone median is no longer mislabelled as the theta gain
+        @test !haskey(toml_h["training_stability"], "final_mb_gain")
+        @test !haskey(toml_h["training_stability"], "final_amp")
+        @test haskey(toml_h["mass_balance_residual"], "volume_pbias")
+        @test all(isfinite, tr.losses.val_contraction)
     end
 end

@@ -133,3 +133,79 @@ using WflowRoutingGNN
         @test isempty(first(combos_empty))
     end
 end
+
+@testset "hparsearch: stability headline and per-formulation companions" begin
+    mktempdir() do tmp
+        function mk_run(name; kind, stab)
+            mkpath(joinpath(tmp, name, "metrics"))
+            d = Dict{String, Any}(
+                "formulation" => Dict{String, Any}("kind" => kind, "h_loss_weight" => 1.0),
+                "stability" => stab,
+                "mass_balance_residual" => Dict{String, Any}(
+                    "volume_pbias" => 1.5, "volume_drift" => -2.0,
+                    "pred" => Dict{String, Any}("rms" => 0.01)))
+            open(joinpath(tmp, name, "metrics", "metrics.toml"), "w") do io
+                TOML.print(io, d)
+            end
+            return joinpath(tmp, name)
+        end
+        rd = WflowRoutingGNN._read_run_scalar_metrics
+
+        th = rd(mk_run("th1"; kind = "theta_kinematic_wave",
+                       stab = Dict{String, Any}("rollout_contraction" => 0.8,
+                                                "analytic_gain" => 0.5, "q_to_h_amp" => 1.2)))
+        @test th.rollout_contraction == 0.8
+        @test th.analytic_gain == 0.5 && th.q_to_h_amp == 1.2
+        @test ismissing(th.backbone_rho_median) && ismissing(th.backbone_rho_max)
+        @test th.volume_pbias == 1.5 && th.mb_residual_rms == 0.01
+        @test th.h_loss_weight_effective == 1.0
+        @test !hasproperty(th, :final_amp)
+
+        hy = rd(mk_run("hy1"; kind = "muskingum_continuity",
+                       stab = Dict{String, Any}("rollout_contraction" => 0.6,
+                                                "backbone_rho_median" => 0.4,
+                                                "backbone_rho_max" => 0.9)))
+        @test hy.rollout_contraction == 0.6
+        @test hy.backbone_rho_max == 0.9
+        @test ismissing(hy.analytic_gain) && ismissing(hy.q_to_h_amp)
+
+        gone = rd(joinpath(tmp, "no_such_run"))          # no metrics.toml
+        @test isnan(gone.rollout_contraction) && ismissing(gone.analytic_gain)
+
+        th2 = rd(mk_run("th2"; kind = "theta_kinematic_wave",
+                        stab = Dict{String, Any}("rollout_contraction" => 0.6,
+                                                 "analytic_gain" => 0.7, "q_to_h_amp" => 1.0)))
+        base = (final_val_loss = 0.1, fixed_val_rmse = 0.2, peak_ratio_frac_gt2 = 0.0,
+                pooled_kge = 0.5, river_h_nse = 0.5)
+        row(combo, msc) = merge((combo_index = combo, run_name_base = "b$combo"), base, msc)
+        rows = [row(1, th), row(1, th2), row(2, hy)]
+        agg = WflowRoutingGNN._aggregate_repetition_rows(rows)
+        @test length(agg) == 2
+        @test agg[1].rollout_contraction_mean ≈ 0.7
+        @test agg[1].analytic_gain_mean ≈ 0.6
+        @test ismissing(agg[1].backbone_rho_max_mean)
+        @test agg[2].backbone_rho_max_mean == 0.9
+        @test ismissing(agg[2].analytic_gain_mean)
+        @test !hasproperty(agg[1], :final_amp_mean)
+
+        # CSV: a metric that does not apply is an empty cell, never NaN
+        csv = joinpath(tmp, "results.csv")
+        WflowRoutingGNN._write_hps_csv(csv, rows)
+        lines = readlines(csv)
+        header = split(lines[1], ",")
+        @test "rollout_contraction" in header && !("final_amp" in header)
+        cell(l, k) = split(lines[l], ","; keepempty = true)[findfirst(==(k), header)]
+        @test cell(2, "backbone_rho_max") == "" && cell(2, "analytic_gain") == "0.5"
+        @test cell(4, "analytic_gain") == "" && cell(4, "backbone_rho_max") == "0.9"
+        @test !occursin("missing", join(lines, "\n"))
+
+        # summary TOML: companions only for the combinations where they exist
+        toml = joinpath(tmp, "summary.toml")
+        WflowRoutingGNN._write_hps_summary_toml(toml, agg)
+        c = TOML.parsefile(toml)["combinations"]
+        @test c[1]["rollout_contraction"]["mean"] ≈ 0.7
+        @test haskey(c[1], "analytic_gain") && !haskey(c[1], "backbone_rho_max")
+        @test haskey(c[2], "backbone_rho_max") && !haskey(c[2], "analytic_gain")
+        @test !haskey(c[1], "final_amp")
+    end
+end

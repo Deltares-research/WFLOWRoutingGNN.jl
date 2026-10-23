@@ -3,6 +3,7 @@ using Flux
 using GraphNeuralNetworks
 using SparseArrays
 using LinearAlgebra
+using Random
 using MLUtils
 using TOML
 
@@ -233,5 +234,57 @@ hy_graph(N = HY_N) = rand_graph(N, 2N)
         o1 = model(g, state, forcing, static, forcing)
         o2 = model2(g, state, forcing, static, forcing)
         @test o1 == o2
+    end
+end
+
+@testset "formulation-agnostic stability headline (rollout_contraction)" begin
+    N      = HY_N
+    nf     = length(hy_vars()["forcing"])
+    static = randn(Float32, length(hy_vars()["static"]), N)
+    mkg(; state = randn(Float32, 2, N)) =
+        rand_graph(N, 2N; ndata = (; state, forcing = randn(Float32, nf, N)))
+    batch = [mkg(), mkg()]
+    rc    = WflowRoutingGNN.rollout_contraction
+
+    @testset "carried state and roles per formulation" begin
+        mb = hy_build()
+        @test WflowRoutingGNN.carried_state_rows(mb, 2) == 2:2
+        @test WflowRoutingGNN.carried_state_rows(WflowRoutingGNN.NoMassBalance(), 2) == 1:2
+        @test WflowRoutingGNN.mb_state_roles(mb) == (; state = "river_h", readout = "river_q")
+        @test WflowRoutingGNN.mb_state_roles(WflowRoutingGNN.NoMassBalance()).state == "all"
+        @test WflowRoutingGNN.MB_STATE_ROLES[:theta_kinematic_wave] ==
+              (; state = "river_q", readout = "river_h")
+    end
+
+    @testset "finite, non-negative, deterministic, RNG-free" begin
+        for mbf in (hy_build(), WflowRoutingGNN.NoMassBalance())
+            ms = ModelSettings(domain = "river", hidden_dim = 8, nlayers = 1,
+                               mb_formulation = mbf isa WflowRoutingGNN.NoMassBalance ?
+                                                "none" : "muskingum_continuity")
+            A_self = sparse(vcat(HY_TGT, 1:HY_N), vcat(HY_SRC, 1:HY_N),
+                            ones(Float32, length(HY_SRC) + HY_N), HY_N, HY_N)
+            model = WflowGNN(ms, mbf, A_self)
+            ρ = rc(model, batch, static)
+            @test ρ isa Float32 && isfinite(ρ) && ρ ≥ 0f0
+            Random.seed!(1); a = rc(model, batch, static)
+            Random.seed!(2); b = rc(model, batch, static)
+            @test a == b == ρ
+        end
+    end
+
+    @testset "matches the analytic backbone gain when the residual is off" begin
+        # bound = 0 and an inactive depth floor: h_new = D⁻¹ P D h (+ const), D = diag(pq·σ_h),
+        # so ρ̂ = ‖D⁻¹ P D δ‖ / ‖δ‖ for the injected pattern δ.
+        mb     = hy_build(bound = 0.0)
+        model  = hy_model(mb)
+        ns, ps = hy_inputs()
+        state  = vcat(randn(Float32, 1, N), fill(3f0, 1, N))
+        g1 = rand_graph(N, 2N; ndata = (; state, forcing = ones(Float32, nf, N)))
+        g2 = rand_graph(N, 2N; ndata = (; state, forcing = ones(Float32, nf, N)))
+        δ  = 1f-2 .* Float32[isodd((UInt32(i) * 0x9e3779b1) >> 15) ? 1 : -1 for i in 1:N]
+        D  = ps["river_q"] .* ns["river_h"].std
+        expected = norm((Matrix(mb.P) * (D .* δ)) ./ D) / norm(δ)
+        @test rc(model, [g1, g2], static) ≈ expected rtol = 1f-3
+        @test expected > 0
     end
 end

@@ -517,6 +517,225 @@ cell-for-cell against the attribution eval.
   docstring + `docs/PROJECT.md`. No model-source change.
 - **Implemented.** (a) done as `analyze_run` kwargs `outlet_gauge_var` / `outlet_min_area_km2` (default network route, 100 km^2), not yet in the run config / TOML; (b) not done (all retained outlets are plotted, whole-basin outlet first); (c) done (`_daterange` suffix). `nodes_for_cells` lives in `src/postprocess.jl`; outlet selection is `attribution_outlet_cells`; the diverged-rollout check is `rollout_diverged`. The whole-basin node (largest upstream area) is prepended to the attribution outlets, and files are un-prefixed like the other analyze-stage outputs (`outlet_timeseries*.png`).
 
+## 3g. Subcatchment error-attribution plots are not produced by the pipeline / hpar search
+
+**Symptom.** A hyperparameter search produces **no** subcatchment error-attribution
+figures for its cells. Only the `outlet_timeseries*.png`/`.csv` (3f) appear in each
+cell's `plots/`/`metrics/`; the actual attribution products — `<split>_subcatch_error_map.png`,
+`<split>_subcatch_mainstem.png`, `<split>_subcatch_attributes.png` and
+`<split>_subcatch_error_attribution.csv` / `<split>_subcatch_attribute_ranking.csv` —
+are missing.
+
+**Root cause.** The analyze stage ([`analyze_run`](../src/analysis.jl)) only calls
+`subcatch_error_attribution(...; rank = false)` **internally**, to pick the outlet
+*cells* for the 3f outlet timeseries. The attribution maps/ranking themselves are
+written only by the standalone `subcatch_error_attribution_run(run_dir)` /
+[scripts/subcatch_error_attribution.jl](../scripts/subcatch_error_attribution.jl),
+which must be invoked **per run directory** post-hoc. The 4-stage pipeline
+(`preprocess → train → infer → analyze`) — and therefore `hpar_search`, which runs
+`run_wflow_gnn` per cell — never invokes it, so a search of N cells yields N run dirs
+with no attribution plots. (A single run has the same gap; it only *looks* generated
+if the user ran the CLI afterwards.)
+
+- [x] **Pick the fix.** Either (a) call `subcatch_error_attribution_run`-equivalent
+      plotting from inside `analyze_run` (reuse the already-computed `res` from the
+      3f outlet-cell step so the 5000-shuffle ranking is the only extra cost; gate the
+      ranking behind a flag since it is expensive and degenerate on small basins),
+      **best-effort** (try/catch + `@info` skip, mirroring `_analyze_outlet_timeseries`),
+      so every pipeline/hpar run emits the plots; or (b) add a post-search hook in
+      `hpar_search` that runs `subcatch_error_attribution_run` over each cell's
+      `run_dir` after training. Prefer (a): one attribution pass, consistent with how
+      the outlet timeseries are already wired, and it also covers single runs.
+- [x] **Avoid double work / divergence guard.** Share the single
+      `subcatch_error_attribution` result between the 3f outlet-timeseries derivation
+      and the new plotting; keep the same `rollout_diverged` early-out so diverged
+      cells skip cleanly instead of plotting garbage.
+- [x] **Expose the toggle** (and the expensive ranking on/off) in the run config so a
+      search can turn it off for speed, defaulting to on for single runs. Document the
+      new analyze-stage outputs in the `analyze_run` docstring and
+      [PROJECT.md](PROJECT.md) Evaluation Metrics.
+- Touch: `src/analysis.jl` (`analyze_run` wiring + `rank`/plot flag), possibly
+  `src/hparsearch.jl` (if route (b)), config templates; no model-source change.
+- **Implemented (route a).** `analyze_run` now computes one `subcatch_error_attribution`
+  per rollout (`_analyze_subcatchments` in [src/analysis.jl](../src/analysis.jl)), uses it
+  for the 3f outlet timeseries and, when `[eval] subcatch_attribution` is on (default),
+  writes `val_subcatch_*` (and `val_daterange_subcatch_*`) via the new
+  `write_subcatch_error_attribution` ([src/attribution.jl](../src/attribution.jl), shared with
+  `subcatch_error_attribution_run`). `[eval] subcatch_rank` (default on) gates the
+  permutation ranking, i.e. the attribute figure and ranking CSV. Both are new
+  `TrainSettings` fields (TOML round trip, `[eval]` or `[train]` key, sweepable in an
+  hpar search as `eval.subcatch_attribution`). Best effort with the same
+  `rollout_diverged` early-out; each write is wrapped so a failure only skips that product.
+
+## 3h. MB diagnostics assume the old q/h roles — stale under the Muskingum-continuity hybrid
+
+**Why.** Several diagnostics were designed under the `ThetaKinematicWave` (Option A)
+assumption that **`q` is the fed-back state** and **`h` the stiff derived readout**.
+The hybrid (`MuskingumContinuityHybrid`) **switches those roles**: `h`/storage is the
+carried state and `q` is a diagnostic continuity readout out of the loop. Reported
+side-by-side in one hpar results CSV, the affected columns are either `NaN`/empty for
+the hybrid arm or silently mean something different, so cross-arm (A/B) comparison is
+misleading. This surfaced on the E15 A/B search
+([experiments/sava_small_v081_e15_newfeatures_ab](../experiments/sava_small_v081_e15_newfeatures_ab)).
+
+**Design (chosen; full rationale in [DECISIONS.md](DECISIONS.md) → PROPOSED
+23-10-2026).** Separate the **axis of comparison** (scientific skill — must be
+identical across arms) from the **mechanism diagnostic** (stability — must be
+meaningful per mechanism). Scientific metrics use a single *works-for-both* path;
+stability uses one measured *works-for-both* headline plus *auto-switched* analytic
+companions. Scope is reporting/labelling + the results-CSV schema, **not** the hybrid
+physics.
+
+**Implemented (2026-10-23).** `rollout_contraction` ([src/strategy.jl](../src/strategy.jl))
+is evaluated every epoch on all validation batches for every arm (`losses.val_contraction`).
+`metrics.toml` gains `[formulation]` (kind, carried state / readout, effective
+`h_loss_weight`) and `[stability]` (`rollout_contraction`, `rollout_contraction_margin`;
+theta: `analytic_gain`, `q_to_h_amp`; hybrid: `backbone_rho_median`, `backbone_rho_max`);
+`[mass_balance_residual]` gains layer-free `volume_pbias` / `volume_drift`
+(`field_volume_bias`); the hpar CSV / summary replace `final_amp` with
+`rollout_contraction` plus presence-based companions. ρ̂ is a one-step finite-difference
+gain, see [DECISIONS.md](DECISIONS.md) (implementation notes). Skill-metric audit: all of
+`river_q_performance_metrics`, the spatial medians and the fixed-horizon RMSE are computed
+from the gridded fields / physical `q`, none is gated on the formulation. **Still open:**
+the `increment` vs `absolute` default per formulation is not revisited, and
+`plot_amplification` still labels the hybrid backbone contraction as "gain".
+
+### Scientific-skill metrics — one formulation-agnostic path (no switching)
+
+- [x] **Keep the field-based skill metrics arm-independent.** `q` is physical
+      discharge in both arms, so `river_q_performance_metrics` (KGE, r/α/β, PBIAS,
+      peak_ratio, FHV, per-node NSE), `river_h` RMSE/NSE/spatial medians, and the
+      fixed-horizon RMSE on `q` are already comparable — just audit that none of them
+      route through a layer-internal readout or get gated on the formulation.
+- [x] **Unify conservation across arms.** Retire the theta-only *layer-internal*
+      volume budget as the canonical conservation number and promote the **layer-free**
+      `mb_residual_diagnostics` / `_analyze_mb_residual` (recomputed from the `q` & `h`
+      fields; already "applies to any model") to the single conservation metric for
+      both arms, writing the same `volume_pbias`/`drift` columns. The hybrid's exact
+      continuity readout should drive its field residual ≈ 0; theta exposes its
+      structural mismatch.
+
+### Stability / amplification metrics — measured headline + auto-switched companions
+
+- [x] **Add a works-for-both headline `rollout_contraction` ρ̂.** `ρ̂ =
+      median_t ‖Δs_{t+1}‖/‖Δs_t‖` under teacher forcing, where `s` is **the
+      formulation's own state row(s)** — dispatch only selects which row is the state
+      (`q`-row for theta, `h`-row for the hybrid, via the existing `encoder_state`/
+      state layout). Single orientation: **ρ̂ < 1 ⇒ contractive**, margin = 1 − ρ̂.
+      This **replaces `final_amp`** as the sortable stability column present for every
+      run, and fixes the current NaN-for-hybrid `final_amp`.
+- [x] **Keep the analytic companions, namespaced + presence-based (drill-down only).**
+      theta: `stability.analytic_gain = median(θ·dt·σ_q/σ_h)` (today's `gain`) and the
+      realised `stability.q_to_h_amp` (today's `amp`); hybrid:
+      `stability.backbone_rho = ρ(P)` (max + median backbone contraction, exact /
+      horizon-independent) from `backbone_contraction(mb)`. A companion column **exists
+      only for the arm it means something for** (not NaN for the other).
+- [x] **`fixed_horizon` framing.** The fixed-horizon RMSE / `peak_ratio_frac_gt2` on
+      `q` stay meaningful (physical), but any pass/fail gate or plot annotation keyed on
+      the theta `amp` blow-up must be conditioned on the formulation (use ρ̂/margin, not
+      `amp`, for the cross-arm gate).
+
+### Results-CSV schema
+
+- [x] **Headline always present, companions skipped-not-NaN.** `_read_run_scalar_metrics`
+      / `_aggregate_repetition_rows` ([src/hparsearch.jl](../src/hparsearch.jl)) emit
+      `rollout_contraction` for every run (the one stability column the summary
+      averages) and the companions under their own keys, **skipping keys absent for an
+      arm** (explicit not-applicable) so the aggregation never averages a NaN or
+      compares incomparable quantities. Scientific columns stay identical-definition
+      across arms.
+
+### Loss weighting & labels (A/B fairness; not reported metrics)
+
+- [x] **Keep the scientific loss identical across arms** (physical `q` and `h` errors)
+      for a fair A/B; let each formulation declare its internal weighting via the
+      existing `mb_h_loss_weight` dispatch (hybrid returns `nothing` = plain strategy
+      weight; theta keeps the q→h-stiffness compensation that justified
+      `h_loss_scale = "increment"` — a rationale that no longer holds when `h` is the
+      primary state). Record the **effective** weight in `metrics.toml` so the
+      comparison is auditable; revisit whether `increment` vs `absolute` is the right
+      default per formulation.
+- [x] **Annotate `loss_components`.** Keep the physical column names (`q_mse`,`h_mse`)
+      but tag which row is the carried **state** vs the diagnostic **readout** for the
+      active formulation, so logs/plots don't flip meaning silently between arms.
+- **Scope:** reporting/labelling + the results-CSV schema, not the hybrid physics
+  (which is correct). Record the chosen reporting convention in
+  [DECISIONS.md](DECISIONS.md) (done: IMPLEMENTED 23-10-2026).
+- Touch: `src/strategy.jl` (`_mb_amplification` → `rollout_contraction` headline +
+  companions), `src/analysis.jl` / `src/postprocess.jl` (`layer_mb_analysis`,
+  unified conservation via the layer-free residual, metrics.toml fields),
+  `src/hparsearch.jl` (`_read_run_scalar_metrics` + summary aggregation: headline +
+  skip-not-NaN companions), plotting/labels; no change to the MB layer itself.
+
+---
+
+# Resumable hpar search & training runs (opt-in CLI flag)
+
+**Why.** An interrupted run restarts from scratch today. `hpar_search`
+([src/hparsearch.jl](../src/hparsearch.jl)) unconditionally loops over every
+combination and calls `run_wflow_gnn` ([src/run.jl](../src/run.jl)), which always runs
+all four stages (`preprocess → train → infer → analyze`) from the beginning; there is
+no completion check, progress file, or skip-if-exists logic. So relaunching an
+interrupted search **reruns every cell** (overwriting the already-finished ones, since
+the combo→folder map `<run_name>_hps<NN>[_s<seed>]` is deterministic) and, because the
+aggregate `*_hps_results.csv` / `*_hps_summary.*` are only written at the very end, an
+interrupted search leaves **no** results CSV. A single `scripts/train.jl` run has the
+same all-or-nothing behaviour across its four stages.
+
+**Scope decision (from discussion).** Resume at **cell / stage granularity** — *no*
+checkpointing or warm-start of an individual training run; a cell that was mid-train is
+simply **rerun from scratch**. Resumability is **off by default** and enabled by an
+explicit CLI flag on both the hpar-search and train scripts (so default behaviour and
+existing reproducibility are unchanged).
+
+- [ ] **Define "cell complete".** A run directory counts as done iff its terminal
+      artifact exists and is self-consistent — propose `metrics/metrics.toml` present
+      (written last by `analyze_run` when `metrics_toml = true`) **and** the expected
+      `output/<split>_{pred,true}.nc` present. A partial/aborted cell (no/stale
+      `metrics.toml`) is treated as incomplete and **rerun from scratch** (its dir is
+      overwritten), per the scope decision.
+- [ ] **Hpar-search resume.** When the flag is set, before calling `run_wflow_gnn` for
+      a cell, check the deterministic run dir (`joinpath(ds.runs_dir, ds.run_name)`): if
+      complete, `@info` skip and `continue`; else run it. Keep the deterministic
+      combo/seed → folder naming so the check is a pure function of the config (already
+      the case).
+- [ ] **Reconstruct the aggregate on resume.** The results CSV must still be produced
+      even though skipped cells weren't run this invocation: read each finished cell's
+      `metrics/metrics.toml` via the existing `_read_run_scalar_metrics` to rebuild its
+      `rows` entry (metrics come from disk; `n_params`/durations that currently come
+      from the in-memory `metrics` return need a disk fallback — persist them into
+      `metrics.toml` if not already there, or mark them `NaN`/missing for skipped
+      cells). Then `_write_hps_csv` / `_aggregate_repetition_rows` as today over the
+      full set.
+- [ ] **Singleton `run_wflow_gnn` / train resume.** Add the same opt-in skip to the
+      four-stage `AllStages` fold so a resumed single run skips stages whose artifacts
+      already exist (prep → `prep/` + datasets; train → `model/model.jld2`; infer →
+      `output/<split>_{pred,true}.nc`; analyze → `metrics/metrics.toml`). A stage with
+      a missing/stale artifact and **all** later stages are (re)run. This also makes the
+      existing per-stage `scripts/pipeline.jl` entry points composable for manual resume.
+      Still **no** intra-train checkpoint resume — `train` reruns fully when selected.
+- [ ] **CLI flag on both scripts.** Add an opt-in flag (e.g. `--resume`) to
+      [scripts/hparsearch.jl](../scripts/hparsearch.jl) and
+      [scripts/train.jl](../scripts/train.jl) (and optionally
+      [scripts/pipeline.jl](../scripts/pipeline.jl)). Both scripts currently parse
+      **positional args only** (`ARGS` length checks), so add minimal flag parsing that
+      keeps the existing positional usage working when the flag is absent; thread a
+      `resume::Bool` kwarg through `hpar_search` / `run_wflow_gnn_from_toml` /
+      `run_wflow_gnn`. Default `false` (today's behaviour). Update each script's usage
+      string / header comment.
+- **Caveats to document.** (a) Resume trusts on-disk artifacts — a config edited
+      between runs is **not** detected, so a changed cell with a stale complete dir is
+      skipped; note this (optionally hash the effective per-cell config into
+      `metrics.toml` for a mismatch warning, out of scope for v1). (b) Skipped cells
+      contribute their **persisted** metrics to the CSV, so columns sourced only from
+      the in-memory return must gain a disk fallback (above).
+- Touch: `src/hparsearch.jl` (`hpar_search` skip + CSV reconstruction),
+  `src/run.jl` (`run_wflow_gnn` / `AllStages` stage-skip + `resume` kwarg),
+  `src/pipeline.jl` (artifact-existence predicates, if not reused from the stage
+  readers), `scripts/hparsearch.jl` + `scripts/train.jl` (+ optionally
+  `scripts/pipeline.jl`) flag parsing; a test that a resumed search skips a
+  pre-populated cell dir and still writes the full results CSV.
+
 ---
 
 # Computational performance

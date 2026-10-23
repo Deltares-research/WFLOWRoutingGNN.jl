@@ -6,11 +6,12 @@ note that holds the full reasoning. Newest at the top.
 ---
 
 
-# PROPOSED 23-10-2026
+# IMPLEMENTED 23-10-2026
 
 ## Diagnostic-metric convention for A/B across mass-balance formulations
 
-**Status: PROPOSED (design only; see [TODO.md](TODO.md) §3h).** Several MB
+**Status: IMPLEMENTED (see [TODO.md](TODO.md) §3h and the implementation notes at the
+end of this entry).** Several MB
 diagnostics were written under the `ThetaKinematicWave` assumption that **`q` is the
 fed-back state** and **`h` the stiff derived readout**. The hybrid
 (`MuskingumContinuityHybrid`) **switches those roles** (`h`/storage is the carried
@@ -67,6 +68,34 @@ be meaningful per mechanism)** and treat each with a different strategy.
 - **Scope.** Reporting/labelling + the results-CSV schema, **not** the hybrid physics
   (which is correct). Goal: an A/B search over `model.mb_formulation` yields columns
   that are either directly comparable or clearly marked not-applicable per arm.
+
+**Implementation notes (deviations from the proposal).**
+
+- **ρ̂ is a one-step finite-difference gain, not a trajectory median.** Each epoch, on
+  every validation batch, the carried-state rows of the teacher-forced input are perturbed
+  by a fixed pseudo-random ±ε pattern (ε = 0.01 in normalised units; no RNG consumed) and
+  `ρ̂ = ‖Δ(next state)‖ / ‖Δ(input state)‖` over those rows (`rollout_contraction`,
+  `src/strategy.jl`); the per-epoch value is the median over batches and the last epoch is
+  reported. This needs no extra rollout, does not depend on the size of the prediction
+  error, and is defined for every model (all state rows for `NoMassBalance`). It is the gain
+  along one fixed direction, so it lower-bounds the local spectral radius; it equals
+  `‖D⁻¹PD δ‖/‖δ‖` exactly for the hybrid with `mb_residual_bound = 0` (unit-tested).
+- **Names.** `metrics.toml` `[stability]`: `rollout_contraction`,
+  `rollout_contraction_margin` (`1 − ρ̂`); theta: `analytic_gain`, `q_to_h_amp`; hybrid:
+  `backbone_rho_median`, `backbone_rho_max` (the proposal's single `backbone_rho`).
+  `[formulation]`: `kind`, `carried_state`, `readout`, effective `h_loss_weight`.
+- **Backward compatibility.** `training_stability.final_amp` / `final_mb_gain` are kept
+  for theta and no-MB runs (`EXPERIMENTS.md` references them); `final_mb_gain` is no longer
+  written for the hybrid, where it held the backbone median under a theta label (now
+  `stability.backbone_rho_median`). The hpar CSV/summary drop `final_amp` for
+  `rollout_contraction` + companions (CSV: empty cell when not applicable).
+- **Conservation.** `[mass_balance_residual]` gained the layer-free `volume_pbias` /
+  `volume_drift` (`field_volume_bias`, same definitions as the layer-internal budget); the
+  theta-only `[volume_budget]` remains as a legacy table.
+- **Not done.** Revisiting the `increment` vs `absolute` default per formulation, and the
+  `plot_amplification` labelling for the hybrid (it still draws the backbone as "gain").
+  `loss_components` keeps its physical names; the carried state / readout roles are logged
+  at the start of training and recorded in `[formulation]`.
 
 ---
 

@@ -961,3 +961,33 @@ end
 
 # Diagonal (= spectrum) of the backbone operator, per node: `1/(1 + dt/K_i)`.
 backbone_contraction(f::MuskingumContinuityHybrid) = Array(f.contraction)
+
+"""
+    carried_state_rows(f, n_state) -> UnitRange{Int}
+
+Rows of the `(n_state, n_nodes)` state matrix that the formulation actually carries from
+one step to the next: `river_q` (row 1) for [`ThetaKinematicWave`](@ref) (`river_h` is a
+derived readout), `river_h` (row 2) for [`MuskingumContinuityHybrid`](@ref) (`river_q` is a
+continuity readout, never fed back) and every row for [`NoMassBalance`](@ref). Selects the
+state of the formulation-agnostic stability headline [`rollout_contraction`](@ref).
+"""
+carried_state_rows(::NoMassBalance, n_state::Int)          = 1:n_state
+carried_state_rows(::ThetaKinematicWave, ::Int)            = 1:1
+carried_state_rows(::MuskingumContinuityHybrid, ::Int)     = 2:2
+
+"""
+    MB_STATE_ROLES
+
+Per effective formulation kind (see `mb_formulation_kind`) the name of the carried state and
+of the derived readout, so logs and `metrics.toml` state which of `river_q` / `river_h` is the
+state in the active arm of an A/B comparison.
+"""
+const MB_STATE_ROLES = Dict{Symbol, NamedTuple{(:state, :readout), Tuple{String, String}}}(
+    :none                 => (state = "all",      readout = "none"),
+    :theta_kinematic_wave => (state = "river_q",  readout = "river_h"),
+    :muskingum_continuity => (state = "river_h",  readout = "river_q"),
+)
+
+mb_state_roles(::NoMassBalance)             = MB_STATE_ROLES[:none]
+mb_state_roles(::ThetaKinematicWave)        = MB_STATE_ROLES[:theta_kinematic_wave]
+mb_state_roles(::MuskingumContinuityHybrid) = MB_STATE_ROLES[:muskingum_continuity]

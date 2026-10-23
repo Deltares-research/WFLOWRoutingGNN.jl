@@ -665,6 +665,45 @@ function _mb_amplification(mb::MuskingumContinuityHybrid, model, batch, static)
     (NaN32, Float32(median(backbone_contraction(mb))))
 end
 
+"""
+    rollout_contraction(model, batch, static; epsilon = 1f-2) -> Float32
+
+Formulation-agnostic stability headline `ρ̂`: the measured one-step gain of the carried
+state under teacher forcing. The carried-state rows ([`carried_state_rows`](@ref): `q` for
+`ThetaKinematicWave`, `h` for `MuskingumContinuityHybrid`, all rows without a mass balance)
+of the ground-truth input are perturbed by `epsilon` (normalised units, a fixed
+pseudo-random sign pattern, so no RNG is consumed), and
+
+    ρ̂ = ‖Δs_{t+1}‖ / ‖Δs_t‖,   Δs_t = injected perturbation,  Δs_{t+1} = change of the same
+                                      rows of the predicted next state.
+
+`ρ̂ < 1` ⇒ a state error is damped in one step (contractive; margin `1 − ρ̂`), `ρ̂ > 1` ⇒
+amplified. Unlike [`mb_amplification`](@ref) it is defined for every formulation and measures
+the object each one actually carries forward. Non-differentiable; `NaN32` for a zero
+perturbation.
+"""
+function rollout_contraction(model::WflowGNN, batch::Vector{<:GNNGraph},
+                             static::AbstractMatrix; epsilon::Real = 1f-2)
+    Flux.ignore_derivatives() do
+        g            = batch[1]
+        state        = g.ndata.state
+        forcing      = g.ndata.forcing
+        forcing_next = batch[2].ndata.forcing
+        rows = carried_state_rows(model.mass_balance, size(state, 1))
+        n    = size(state, 2)
+        signs = Float32[isodd((UInt32(i) * 0x9e3779b1) >> 15) ? 1f0 : -1f0 for i in 1:n]
+        sgn   = similar(state, 1, n)
+        copyto!(sgn, reshape(signs, 1, n))
+        δ = zero(state)
+        view(δ, rows, :) .= Float32(epsilon) .* sgn
+        base = model(g, state, forcing, static, forcing_next)
+        pert = model(g, state .+ δ, forcing, static, forcing_next)
+        num  = sqrt(sum(abs2, view(pert, rows, :) .- view(base, rows, :)))
+        den  = sqrt(sum(abs2, view(δ, rows, :)))
+        den > 0f0 ? Float32(num / den) : NaN32
+    end
+end
+
 function _mb_amplification(mb::ThetaKinematicWave, model, batch, static)
     Flux.ignore_derivatives() do
         g            = batch[1]
