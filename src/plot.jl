@@ -8,33 +8,25 @@ _csv_from_path(path) = isnothing(path) ? nothing : string(splitext(path)[1], ".c
 _path_with_suffix(path::AbstractString, suffix::AbstractString) =
     string(splitext(path)[1], suffix, splitext(path)[2])
 
-# Select K active nodes spanning the upstream-area distribution from
-# downstream (largest catchment) to upstream (smallest catchment).
-function _upstream_percentile_nodes(upstream_area::AbstractVector{<:Real}, k::Int)
+# Select K headwater / far-upstream nodes: spread evenly over the lowest `band`
+# fraction of the upstream-area distribution (smallest catchments), ordered by
+# decreasing area. Nodes in `exclude` (e.g. the attribution outlets) and non-finite
+# areas are never chosen, so the whole-basin outlet is never part of the selection.
+function _headwater_nodes(upstream_area::AbstractVector{<:Real}, k::Int;
+                          exclude = Int[], band::Real = 0.25)
     k > 0 || throw(ArgumentError("k must be positive"))
-    idx_active = [i for i in eachindex(upstream_area) if isfinite(upstream_area[i])]
-    isempty(idx_active) && throw(ArgumentError("upstream_area has no finite entries"))
+    0 < band <= 1 || throw(ArgumentError("band must be in (0, 1]"))
+    ex   = Set(exclude)
+    cand = [i for i in eachindex(upstream_area)
+            if isfinite(upstream_area[i]) && !(i in ex)]
+    isempty(cand) &&
+        throw(ArgumentError("upstream_area has no finite entries outside `exclude`"))
 
-    vals = Float32.(upstream_area[idx_active])
-    k_eff = min(k, length(idx_active))
-    qs = reverse(collect(range(0f0, 1f0; length = k_eff)))
-    chosen = Int[]
-    for q in qs
-        target = quantile(vals, q)
-        best = idx_active[argmin(abs.(vals .- target))]
-        if !(best in chosen)
-            push!(chosen, best)
-        end
-    end
-
-    if length(chosen) < k_eff
-        by_area = sort(idx_active; by = i -> upstream_area[i], rev = true)
-        for i in by_area
-            (i in chosen) || push!(chosen, i)
-            length(chosen) == k_eff && break
-        end
-    end
-
+    sort!(cand; by = i -> (upstream_area[i], i))      # smallest catchment first
+    n_band = clamp(ceil(Int, band * length(cand)), min(k, length(cand)), length(cand))
+    k_eff  = min(k, n_band)
+    pos    = k_eff == 1 ? [1] : round.(Int, range(1, n_band; length = k_eff))
+    chosen = cand[pos]
     sort!(chosen; by = i -> upstream_area[i], rev = true)
     return chosen
 end
@@ -214,39 +206,65 @@ function plot_losses(train_rollout, val_rollout, train_1step, val_1step;
 end
 
 """
-    plot_amplification(train_amp, val_amp; mb_gain = nothing, path = nothing,
+    plot_amplification(train_amp, val_amp; mb_gain = nothing, contraction = nothing,
+                       kind = :theta_kinematic_wave, path = nothing,
                        csv = true, csv_path = nothing) -> Figure
 
-Plot the per-epoch **q→h error amplification** produced by
+Per-epoch stability diagnostic of the mass-balance formulation `kind`
+(`mb_formulation_kind`); the curves and labels depend on what the formulation carries.
+
+`:theta_kinematic_wave` (default): the **q→h error amplification** produced by
 [`mb_amplification`](@ref): the realised ratio `RMS(h_pred − h_ref) /
 RMS(q_pred − q_true)` in normalised units, where `h_ref = MB(q_true, …)` is the
 counterfactual depth for a perfect discharge. Values above `1` (dashed grey
 reference) mean a one-step discharge error is *magnified* into a depth error by
-the hard mass-balance decoder — the mechanism behind rollout h-overshoots.
+the hard mass-balance decoder — the mechanism behind rollout h-overshoots. If `mb_gain`
+is supplied, the analytic self-gain `θ·dt·σ_q/σ_h` is drawn as a reference line
+(constant unless θ changes during training).
 
-If `mb_gain` is supplied, the analytic self-gain `θ·dt·σ_q/σ_h` is drawn as a
-reference line (constant unless θ changes during training).
+`:muskingum_continuity`: there is no q→h readout to amplify (`h` is the carried state,
+`q` a readout), so `train_amp`/`val_amp` (NaN) are not drawn; `mb_gain` is then the
+median **backbone contraction** (the spectral bound of the reservoir cascade, `< 1` by
+construction) and is labelled as such, not as a gain.
 
-Writes the plotted arrays to CSV alongside the figure when `csv` is `true`.
+If `contraction` (the per-epoch validation `rollout_contraction` ρ̂, the measured
+one-step gain of the carried state) is supplied it is drawn for every formulation.
+
+Writes the plotted arrays to CSV alongside the figure when `csv` is `true` (theta:
+`train_amp`, `val_amp`, `mb_gain`; hybrid: `backbone_rho_median`; both: `val_contraction`).
 Returns the `Figure`.
 """
 function plot_amplification(train_amp, val_amp;
-                            mb_gain  = nothing,
-                            path     = nothing,
-                            csv      = true,
-                            csv_path = nothing)
+                            mb_gain     = nothing,
+                            contraction = nothing,
+                            kind        = :theta_kinematic_wave,
+                            path        = nothing,
+                            csv         = true,
+                            csv_path    = nothing)
+    hybrid = kind === :muskingum_continuity
+    has_gain = !isnothing(mb_gain) && !isempty(mb_gain) && any(isfinite, mb_gain)
+    has_contr = !isnothing(contraction) && !isempty(contraction) && any(isfinite, contraction)
     epochs = 1:length(train_amp)
     fig = Figure(size = (600, 400))
     ax  = Axis(fig[1, 1];
-               title  = "Q→H error amplification through the mass balance",
+               title  = hybrid ? "Carried-state (h) contraction, Muskingum-continuity hybrid" :
+                                 "Q→H error amplification through the mass balance",
                xlabel = "Epoch",
-               ylabel = "RMS(Δh_norm from Q err) / RMS(Δq_norm)")
-    lines!(ax, epochs, train_amp; label = "train", color = :steelblue)
-    lines!(ax, epochs, val_amp;   label = "val",   color = :steelblue, linestyle = :dash)
-    hlines!(ax, [1f0]; color = :gray, linestyle = :dot)  # amplification threshold
-    if !isnothing(mb_gain) && !isempty(mb_gain) && any(isfinite, mb_gain)
-        lines!(ax, epochs, mb_gain; label = "analytic gain θ·dt·σq/σh",
+               ylabel = hybrid ? "one-step gain of the carried state" :
+                                 "RMS(Δh_norm from Q err) / RMS(Δq_norm)")
+    if !hybrid
+        lines!(ax, epochs, train_amp; label = "train", color = :steelblue)
+        lines!(ax, epochs, val_amp;   label = "val",   color = :steelblue, linestyle = :dash)
+    end
+    hlines!(ax, [1f0]; color = :gray, linestyle = :dot)  # amplification / contraction threshold
+    if has_gain
+        lines!(ax, epochs, mb_gain;
+               label = hybrid ? "median backbone contraction" : "analytic gain θ·dt·σq/σh",
                color = :orangered, linestyle = :dashdot)
+    end
+    if has_contr
+        lines!(ax, epochs, contraction; label = "measured ρ̂ (val, carried state)",
+               color = :seagreen, linestyle = :dash)
     end
     axislegend(ax; position = :rt)
 
@@ -254,11 +272,19 @@ function plot_amplification(train_amp, val_amp;
 
     csv_out = isnothing(csv_path) ? _csv_from_path(path) : csv_path
     if csv && !isnothing(csv_out)
-        header  = ["epoch", "train_amp", "val_amp"]
-        columns = Any[collect(epochs), train_amp, val_amp]
+        header  = ["epoch"]
+        columns = Any[collect(epochs)]
+        if !hybrid
+            push!(header, "train_amp", "val_amp")
+            push!(columns, train_amp, val_amp)
+        end
         if !isnothing(mb_gain) && !isempty(mb_gain)
-            push!(header, "mb_gain")
+            push!(header, hybrid ? "backbone_rho_median" : "mb_gain")
             push!(columns, mb_gain)
+        end
+        if !isnothing(contraction) && !isempty(contraction)
+            push!(header, "val_contraction")
+            push!(columns, contraction)
         end
         _write_plot_csv(csv_out, header, columns)
     end
@@ -640,15 +666,15 @@ end
 """
     plot_downstream_timeseries(pred_grids, true_grids, domain, grid, upstream_area; path) -> Figure
 
-Plot longitudinal node timeseries chosen from upstream-area percentiles.
+Plot timeseries at headwater / far-upstream nodes.
 
-With `upstream_points = 1`, this reproduces the legacy behaviour: select the
-most downstream active node (largest upstream catchment area) and call
-`plot_timeseries` once.
-
-With `upstream_points > 1`, selects a percentile ladder over active nodes
-(downstream to upstream), writes one figure per selected node and reuses
-`plot_timeseries` CSV export per node.
+Selects `upstream_points` nodes spread evenly over the smallest-catchment quarter of
+the active nodes (lowest 25 % of `upstream_area`), ordered by decreasing area, writes
+one figure per selected node and reuses `plot_timeseries` CSV export per node. The
+most-downstream node is never selected: downstream / large-catchment behaviour is
+covered by the subcatchment-attribution outlet timeseries (`outlet_timeseries*`,
+which always include the whole-basin outlet), so the two figure sets are disjoint
+in purpose. Only `upstream_area` is needed, so this works for any domain.
 
 Arguments:
 - `pred_grids`    : `Dict{String, Array{Float32,3}}` as returned by `ungrid`.
@@ -667,10 +693,13 @@ Arguments:
                     available, the plotted timeseries are written to CSV
                     (forwarded to `plot_timeseries`).
 - `csv_path`      : optional explicit CSV output path.
+- `upstream_points`: number of headwater nodes to plot (default 1).
+- `exclude_nodes` : graph-node indices never chosen by the headwater selection
+                    (e.g. the attribution outlets, to keep the figures disjoint).
 - `nodes`         : optional vector of graph-node indices to plot, in order,
-                    instead of the upstream-area percentile ladder (then
-                    `upstream_points` and `upstream_area` are not used for the
-                    selection). Default `nothing` keeps the ladder.
+                    instead of the headwater selection (then `upstream_points`,
+                    `exclude_nodes` and `upstream_area` are not used for the
+                    selection). Default `nothing` keeps the headwater selection.
 
 Returns the last generated `Figure` object.
 """
@@ -687,10 +716,12 @@ function plot_downstream_timeseries(
         timestamps    = nothing,
         csv           = true,
         csv_path      = nothing,
+        exclude_nodes = Int[],
         nodes         = nothing)
     if nodes === nothing
         upstream_points > 0 || throw(ArgumentError("upstream_points must be positive"))
-        node_idxs = _upstream_percentile_nodes(upstream_area, upstream_points)
+        node_idxs = _headwater_nodes(upstream_area, upstream_points;
+                                     exclude = exclude_nodes)
     else
         node_idxs = collect(Int, nodes)
         isempty(node_idxs) && throw(ArgumentError("nodes must not be empty"))

@@ -87,14 +87,14 @@ Plots are written to a run's `plots/` directory (metrics CSV/NetCDF alongside in
 Train stage (`pipeline.jl`):
 
 - `losses.png` — training vs validation loss curves (1-step and rollout, with grad-norm / LR / curriculum-step overlays).
-- `amplification.png` — the per-epoch `q→h` error amplification factor (mass-balance runs only), tracking how `q` error propagates into `h`.
+- `amplification.png` — per-epoch stability diagnostic (mass-balance runs only), formulation-aware: for `theta_kinematic_wave` the `q→h` error amplification factor (train/val) with the analytic gain `θ·dt·σq/σh`; for `muskingum_continuity` (no readout to amplify) the median backbone contraction (columns `backbone_rho_median`), not labelled a gain. Both draw the measured validation carried-state gain `ρ̂` (`val_contraction`).
 - `metrics/metrics.toml` stability tables (written by the analyze stage): `[formulation]` (`kind`, `carried_state` / `readout`, effective `h_loss_weight`) and `[stability]` with the formulation-agnostic headline `rollout_contraction` ρ̂ (one-step gain of the carried state; `< 1` contractive, `rollout_contraction_margin = 1 − ρ̂`) plus per-formulation companions that exist only for their arm (theta: `analytic_gain`, `q_to_h_amp`; hybrid: `backbone_rho_median`, `backbone_rho_max`). Formulation-independent conservation is `[mass_balance_residual]` `volume_pbias` / `volume_drift`.
 - `fixed_horizon.png` — per-epoch fixed-horizon validation discharge RMSE and peak ratio (overall and high-flow), a stable rollout-skill signal across epochs.
 
 Analyze stage (`analysis.jl`):
 
 - `validation.mp4` — animated predicted-vs-true gridded `river_q`/`river_h` fields over the split (and `validation_daterange.mp4` for the optional date-range window).
-- `downstream_timeseries.png` — predicted vs true discharge timeseries at successive downstream points along the main stem (and `downstream_timeseries_daterange.png` for the date-range window).
+- `downstream_timeseries.png` — predicted vs true discharge timeseries at `[eval].upstream_points` headwater / far-upstream nodes (evenly spread over the smallest-catchment quarter of the nodes; never the most-downstream node nor an attribution outlet; one file per node, suffixed `_node<idx>_r<rank>`; `downstream_timeseries_daterange*.png` for the date-range window). Always written (needs only the upstream area); complements the attribution outlets below.
 - `outlet_timeseries*.png` (+ `metrics/outlet_timeseries*.csv`) — predicted vs true discharge at the subcatchment-attribution outlets (whole-basin outlet first, then the retained outlets by decreasing area; one file per outlet, suffixed `_node<idx>_r<rank>`; `_daterange` variants for the date-range window). Written best-effort: skipped when there is no `river_q` state, the rollout is diverged, or `staticmaps.nc` cannot supply the outlets.
 - `spatial_metrics.png` — per-cell maps of rollout error metrics across the domain, one row per state variable with these panels:
   - `rmse` — per-cell root-mean-square error over the rollout.

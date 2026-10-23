@@ -75,7 +75,9 @@ function main(argv)
                     r.low_power ? "  (low power)" : "")
         end
     end
-    println("\nWrote: $(res.csv)\n       $(res.ranking_csv)")
+    println("\nWrote: $(res.csv)")
+    isnothing(res.ranking_csv) ? println("       (no attribute ranking written: no attribute with enough variation / pairs)") :
+                                 println("       $(res.ranking_csv)")
     foreach(p -> println("       $p"), res.plots)
 end
 

@@ -43,6 +43,9 @@ NetCDF outputs (`<dirs.output>/val_pred.nc`, `val_true.nc`) and writes
 `outlet_timeseries*` are the discharge series at the subcatchment-attribution outlets
 ([`subcatch_error_attribution`](@ref)): the whole-basin outlet first, then the retained
 outlets by decreasing area (one figure/CSV per outlet, suffixed `_node<idx>_r<rank>`).
+`downstream_timeseries*` are the complementary headwater / far-upstream nodes
+(`[eval].upstream_points` of them, from the smallest-catchment quarter of the nodes,
+never the attribution outlets); written always, as they need only the upstream area.
 They are best effort: skipped with a notice when the run has no `river_q` state, the
 rollout is diverged, `staticmaps.nc` lacks what the outlet selection needs, or anything
 else in the selection fails.
@@ -121,18 +124,21 @@ function analyze_run(prep::PrepBundle, ms::ModelSettings, ts::TrainSettings;
                           framerate  = 10,
                           timestamps = split_times)
 
+    outlet_nodes = _analyze_subcatchments(prep, ms, ts, p_grids, t_grids, split_times, dirs;
+                                          gauge_var = outlet_gauge_var,
+                                          min_area_km2 = outlet_min_area_km2)
+
+    # Headwater / far-upstream nodes (the regime the attribution outlets do not cover);
+    # always on, disjoint from the attribution outlets when those were derived.
     plot_downstream_timeseries(p_grids, t_grids, domain, grid,
                                prep.postscale["river_q"];  # upstream area per node
                                path       = joinpath(dirs.plots, "downstream_timeseries.png"),
                                upstream_points = ts.upstream_points,
+                               exclude_nodes = something(outlet_nodes, Int[]),
                                edge_sources = prep.edge_src,
                                edge_targets = prep.edge_tgt,
                                timestamps = split_times,
                                csv_path   = joinpath(dirs.metrics, "downstream_timeseries.csv"))
-
-    _analyze_subcatchments(prep, ms, ts, p_grids, t_grids, split_times, dirs;
-                           gauge_var = outlet_gauge_var,
-                           min_area_km2 = outlet_min_area_km2)
 
     # Spatial performance: per-cell error maps + Q overprediction vs ramp
     sp_metrics = spatial_error_metrics(p_grids, t_grids, domain)
@@ -198,17 +204,18 @@ function analyze_run(prep::PrepBundle, ms::ModelSettings, ts::TrainSettings;
                               framerate  = 10,
                               timestamps = dr_pred_times)
 
+        dr_outlet_nodes = _analyze_subcatchments(prep, ms, ts, dr_p_grids, dr_t_grids, dr_pred_times, dirs;
+                                                 suffix = "_daterange", gauge_var = outlet_gauge_var,
+                                                 min_area_km2 = outlet_min_area_km2)
         plot_downstream_timeseries(dr_p_grids, dr_t_grids, domain, grid,
                                    prep.postscale["river_q"];
                                    path       = joinpath(dirs.plots, "downstream_timeseries_daterange.png"),
                                    upstream_points = ts.upstream_points,
+                                   exclude_nodes = something(dr_outlet_nodes, Int[]),
                                    edge_sources = prep.edge_src,
                                    edge_targets = prep.edge_tgt,
                                    timestamps = dr_pred_times,
                                    csv_path   = joinpath(dirs.metrics, "downstream_timeseries_daterange.csv"))
-        _analyze_subcatchments(prep, ms, ts, dr_p_grids, dr_t_grids, dr_pred_times, dirs;
-                               suffix = "_daterange", gauge_var = outlet_gauge_var,
-                               min_area_km2 = outlet_min_area_km2)
     end
 
     out = (; spatial_summary, ramp = ramp_summary, river_q_perf,

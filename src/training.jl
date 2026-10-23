@@ -71,9 +71,10 @@ Fields:
 - `eval_anchors`   : number of evenly-spaced start points in the validation split
                      used as anchors for the fixed-horizon rollout (batched into a
                      single ensemble forward pass per step).
-- `upstream_points`: number of percentile-ladder nodes to plot for validation
-                     upstream/downstream timeseries diagnostics. `1` reproduces
-                     the previous outlet-only behaviour.
+- `upstream_points`: number of headwater / far-upstream nodes to plot in the
+                     downstream-timeseries diagnostic (drawn from the smallest-catchment
+                     quarter of the nodes, never the attribution outlets; the
+                     downstream/large outlets are in `outlet_timeseries*`).
 - `subcatch_attribution` : write the subcatchment error-attribution products in the
                      analyze stage (`<split>_subcatch_error_map.png`,
                      `_mainstem.png`, `_attributes.png`, `_error_attribution.csv`,

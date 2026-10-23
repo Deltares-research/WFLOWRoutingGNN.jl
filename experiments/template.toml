@@ -246,7 +246,8 @@ pushforward_tf_weight = 0.0
 
 # Analysis-stage options (optional).
 [eval]
-# Number of percentile-ladder nodes in the downstream-timeseries plot (1 = outlet only).
+# Number of headwater / far-upstream nodes in the downstream-timeseries plot (the
+# downstream/large outlets are in outlet_timeseries*).
 upstream_points = 5
 
 # Subcatchment error attribution (TODO 3g): maps, main-stem and attribute figures

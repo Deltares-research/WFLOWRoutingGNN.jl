@@ -517,6 +517,42 @@ cell-for-cell against the attribution eval.
   docstring + `docs/PROJECT.md`. No model-source change.
 - **Implemented.** (a) done as `analyze_run` kwargs `outlet_gauge_var` / `outlet_min_area_km2` (default network route, 100 km^2), not yet in the run config / TOML; (b) not done (all retained outlets are plotted, whole-basin outlet first); (c) done (`_daterange` suffix). `nodes_for_cells` lives in `src/postprocess.jl`; outlet selection is `attribution_outlet_cells`; the diverged-rollout check is `rollout_diverged`. The whole-basin node (largest upstream area) is prepended to the attribution outlets, and files are un-prefixed like the other analyze-stage outputs (`outlet_timeseries*.png`).
 
+## 3f-bis. Refocus `downstream_timeseries` on headwater / far-upstream nodes only
+
+**Why.** With §3f the subcatchment-attribution outlet timeseries
+(`outlet_timeseries*.png`) now cover the large, downstream, confluence/gauge outlets.
+The longitudinal `downstream_timeseries*.png` currently plots an **upstream-area
+percentile ladder** (`_upstream_percentile_nodes`, [src/plot.jl](../src/plot.jl)) from
+the most-downstream node up — so its downstream/mid nodes are **redundant** with the
+attribution outlets (only the single largest-area node is guaranteed to coincide).
+Keep the ladder, but **repurpose it to the one regime attribution does not cover**: the
+headwater / far-upstream nodes (small catchments, below the `outlet_min_area_km2`
+filter — exactly the dry/floored regime where behaviour is often worst).
+
+- [x] **Select only the upstream tail.** Replace/augment `_upstream_percentile_nodes`
+      so the ladder draws from the **low** end of the upstream-area distribution
+      (headwaters) rather than spanning 0→100th percentile. Options: take the `k`
+      smallest-area active nodes, or sample percentiles within the lowest band (e.g.
+      ≤ 25th), optionally excluding nodes already emitted as attribution outlets so the
+      two figures are disjoint. Keep `k` = `upstream_points`.
+- [x] **Drop the guaranteed most-downstream node** from this plot (it is the
+      whole-basin attribution outlet, already plotted by §3f) — or keep exactly one as
+      an anchor if a single downstream reference line is still wanted; decide and
+      document.
+- [x] **Keep it always-on / robust.** The ladder needs only `upstream_area`, so it
+      still works for non-river domains and when the attribution timeseries is skipped
+      (missing `wflow_uparea`/subcatch, diverged rollout). This makes it the headwater
+      complement to the (best-effort) attribution outlets, not a competitor.
+- [x] **Docs.** Update the `plot_downstream_timeseries` docstring (the
+      `upstream_points` semantics change from "percentile ladder over all nodes" to
+      "headwater/far-upstream nodes") and [PROJECT.md](PROJECT.md) Evaluation Metrics to
+      state the split of responsibility (attribution outlets = downstream/large;
+      downstream_timeseries = headwater/upstream).
+- Touch: `src/plot.jl` (`_upstream_percentile_nodes` → headwater selection, docstring),
+  `src/analysis.jl` (optionally pass the attribution outlet nodes to exclude);
+  `docs/PROJECT.md`. No model-source change.
+- **Implemented (2026-10-23).** `_headwater_nodes` (`src/plot.jl`) replaces `_upstream_percentile_nodes`: `upstream_points` nodes evenly spread over the smallest-catchment quarter of the finite-area nodes, ordered by decreasing area. The most-downstream node is dropped entirely (no anchor; the whole-basin outlet is the first `outlet_timeseries` figure). `plot_downstream_timeseries` gains `exclude_nodes`; `analyze_run` now runs it after the outlet derivation and excludes the attribution outlets (empty when those were skipped, so it stays always-on). File names are unchanged (`downstream_timeseries*.png`).
+
 ## 3g. Subcatchment error-attribution plots are not produced by the pipeline / hpar search
 
 **Symptom.** A hyperparameter search produces **no** subcatchment error-attribution
@@ -597,8 +633,9 @@ theta: `analytic_gain`, `q_to_h_amp`; hybrid: `backbone_rho_median`, `backbone_r
 gain, see [DECISIONS.md](DECISIONS.md) (implementation notes). Skill-metric audit: all of
 `river_q_performance_metrics`, the spatial medians and the fixed-horizon RMSE are computed
 from the gridded fields / physical `q`, none is gated on the formulation. **Still open:**
-the `increment` vs `absolute` default per formulation is not revisited, and
-`plot_amplification` still labels the hybrid backbone contraction as "gain".
+the `increment` vs `absolute` default per formulation is not revisited.
+`plot_amplification` is formulation-aware (`kind`, `contraction`; the hybrid shows the
+backbone contraction and the measured ρ̂, not a "gain").
 
 ### Scientific-skill metrics — one formulation-agnostic path (no switching)
 

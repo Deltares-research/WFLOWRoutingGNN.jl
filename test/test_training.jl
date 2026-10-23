@@ -226,13 +226,52 @@ end
 # Upstream percentile node selection
 # ---------------------------------------------------------------------------
 
-@testset "upstream percentile ladder selection" begin
-    areas = Float32[100, 80, 60, 40, 20]
-    idxs = WflowRoutingGNN._upstream_percentile_nodes(areas, 3)
-    @test idxs == [1, 3, 5]
+@testset "headwater node selection" begin
+    areas = Float32[100, 80, 60, 40, 20, 10, 5, 1]
+    # k smallest-area nodes of the lowest quarter, ordered by decreasing area
+    @test WflowRoutingGNN._headwater_nodes(areas, 2) == [7, 8]
+    @test WflowRoutingGNN._headwater_nodes(areas, 3) == [6, 7, 8]
+    @test WflowRoutingGNN._headwater_nodes(areas, 1) == [8]
+    # k beyond the band widens it just enough; the largest catchment stays out
+    @test !(1 in WflowRoutingGNN._headwater_nodes(areas, 4))
+    # k larger than the number of active nodes returns every node once
+    @test sort(WflowRoutingGNN._headwater_nodes(areas, 100)) == 1:8
 
-    idxs_nan = WflowRoutingGNN._upstream_percentile_nodes(Float32[NaN, 90, 30, NaN, 10], 4)
-    @test idxs_nan == [2, 3, 5]
+    # excluded nodes are skipped
+    @test WflowRoutingGNN._headwater_nodes(areas, 2; exclude = [8]) == [6, 7]
+
+    # non-finite areas are ignored
+    @test WflowRoutingGNN._headwater_nodes(Float32[NaN, 90, 30, NaN, 10], 2) == [3, 5]
+
+    @test_throws ArgumentError WflowRoutingGNN._headwater_nodes(areas, 0)
+    @test_throws ArgumentError WflowRoutingGNN._headwater_nodes(Float32[NaN, NaN], 1)
+    @test_throws ArgumentError WflowRoutingGNN._headwater_nodes(Float32[1, 2], 1; exclude = [1, 2])
+end
+
+@testset "plot_amplification is formulation-aware" begin
+    n   = 4
+    amp = Float32[2, 1.5, 1.2, 1.1]
+    nan = fill(NaN32, n)
+    gain = fill(0.7f0, n)
+    rho  = Float32[0.9, 0.8, 0.75, 0.7]
+    mktempdir() do tmp
+        # theta: legacy columns kept, measured rho appended
+        pt = joinpath(tmp, "theta.png")
+        WflowRoutingGNN.plot_amplification(amp, amp .* 0.9f0; mb_gain = gain, contraction = rho,
+                                           kind = :theta_kinematic_wave, path = pt)
+        @test isfile(pt)
+        hdr = split(readlines(joinpath(tmp, "theta.csv"))[1], ",")
+        @test hdr == ["epoch", "train_amp", "val_amp", "mb_gain", "val_contraction"]
+
+        # hybrid: no amplification columns, backbone contraction is not called a gain
+        ph = joinpath(tmp, "hybrid.png")
+        WflowRoutingGNN.plot_amplification(nan, nan; mb_gain = gain, contraction = rho,
+                                           kind = :muskingum_continuity, path = ph)
+        @test isfile(ph)
+        lines_h = readlines(joinpath(tmp, "hybrid.csv"))
+        @test split(lines_h[1], ",") == ["epoch", "backbone_rho_median", "val_contraction"]
+        @test length(lines_h) == n + 1
+    end
 end
 
 @testset "inset network edge segments" begin

@@ -454,10 +454,14 @@ function train_run(prep::PrepBundle, ds::DataSettings, ms::ModelSettings, ts::Tr
                 path     = joinpath(dirs.plots, "losses.png"),
                 csv_path = joinpath(dirs.metrics, "losses.csv"))
 
-    # Q→H error amplification diagnostic (mass-balance runs only)
-    if haskey(losses, :train_amp) && any(isfinite, losses.train_amp)
+    # Stability diagnostic (mass-balance runs only): q→h amplification for theta,
+    # backbone contraction for the hybrid, plus the measured carried-state gain ρ̂.
+    if (haskey(losses, :train_amp) && any(isfinite, losses.train_amp)) ||
+       (haskey(losses, :mb_gain) && any(isfinite, losses.mb_gain))
         plot_amplification(losses.train_amp, losses.val_amp;
-                           mb_gain = get(losses, :mb_gain, nothing),
+                           mb_gain     = get(losses, :mb_gain, nothing),
+                           contraction = get(losses, :val_contraction, nothing),
+                           kind        = mb_formulation_kind(ms),
                            path     = joinpath(dirs.plots, "amplification.png"),
                            csv_path = joinpath(dirs.metrics, "amplification.csv"))
     end

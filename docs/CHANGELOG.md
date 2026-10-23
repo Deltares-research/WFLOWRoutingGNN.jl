@@ -2,6 +2,25 @@ This document serves as a concrete changelog of the code, summarizing briefly th
 
 ## 2026-10-23
 
+- **Formulation-aware `plot_amplification`; attribution CLI fix.** `plot_amplification`
+        takes `kind` and `contraction`: the hybrid plot no longer shows the (undefined) q→h
+        amplification curves nor calls the backbone contraction a "gain" (it is labelled
+        "median backbone contraction", CSV column `backbone_rho_median`), and for every
+        formulation the measured validation `ρ̂` (`val_contraction`) is drawn
+        (CSV column `val_contraction`). `train_run` now also writes `amplification.png` for
+        the hybrid (previously skipped because `train_amp` is all NaN) and passes
+        `mb_formulation_kind(ms)`. `scripts/subcatch_error_attribution.jl` no longer prints
+        `nothing` when no attribute ranking was written.
+
+- **Headwater-focused `downstream_timeseries` (TODO §3f-bis).** The longitudinal
+        timeseries plot no longer draws an upstream-area percentile ladder (its
+        downstream/mid nodes duplicated the attribution outlets of §3f). It now plots
+        `[eval].upstream_points` headwater nodes, spread over the smallest-catchment
+        quarter of the nodes (`_headwater_nodes` replaces `_upstream_percentile_nodes`),
+        never the most-downstream node and, in `analyze_run`, never an attribution outlet
+        (new `exclude_nodes` kwarg of `plot_downstream_timeseries`; the plot now runs after
+        the outlet derivation). Still always written. Tests:
+        [test/test_training.jl](../test/test_training.jl).
 - **Formulation-aware stability and conservation metrics (TODO §3h).** New
         `rollout_contraction` (ρ̂, the measured one-step gain of the carried state under
         teacher forcing; `q` rows for theta, `h` for the hybrid, all rows without a mass

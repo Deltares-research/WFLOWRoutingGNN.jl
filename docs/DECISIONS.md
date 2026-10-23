@@ -92,8 +92,9 @@ be meaningful per mechanism)** and treat each with a different strategy.
 - **Conservation.** `[mass_balance_residual]` gained the layer-free `volume_pbias` /
   `volume_drift` (`field_volume_bias`, same definitions as the layer-internal budget); the
   theta-only `[volume_budget]` remains as a legacy table.
-- **Not done.** Revisiting the `increment` vs `absolute` default per formulation, and the
-  `plot_amplification` labelling for the hybrid (it still draws the backbone as "gain").
+- **Not done.** Revisiting the `increment` vs `absolute` default per formulation.
+  (`plot_amplification` was made formulation-aware afterwards: the hybrid shows the backbone
+  contraction and the measured ρ̂, no amplification curves.)
   `loss_components` keeps its physical names; the carried state / readout roles are logged
   at the start of training and recorded in `[formulation]`.
 
@@ -134,7 +135,7 @@ the default `"theta_kinematic_wave"` and its checkpoints are untouched. Design:
   non-negative `h` floor.
 - **Not done / deferred.** The `K, x` bank and iterative variants; a rollout/volume-budget
   diagnostic for the hybrid (`layer_mb_analysis` only writes the contraction CSV);
-  `amplification.png` shows the backbone contraction as the "gain" and no amplification.
+  `amplification.png` shows the backbone contraction (labelled as such) and the measured ρ̂.
 
 ---
 # IMPLEMENTED 19-10-2026 (shipped 2026-10-21)
