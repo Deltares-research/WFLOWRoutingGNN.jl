@@ -141,6 +141,8 @@ function settings_from_config(d::AbstractDict, toml_dir::AbstractString)
         eval_horizon     = get(td, "eval_horizon", 30),
         eval_anchors     = get(td, "eval_anchors", 32),
         upstream_points  = get(ed, "upstream_points", get(td, "upstream_points", 5)),
+        subcatch_attribution = get(ed, "subcatch_attribution", get(td, "subcatch_attribution", true)),
+        subcatch_rank    = get(ed, "subcatch_rank", get(td, "subcatch_rank", true)),
         early_stopping   = get(td, "early_stopping", false),
         early_stopping_patience = get(td, "early_stopping_patience", 20),
         checkpoint_every = get(td, "checkpoint_every", 0),

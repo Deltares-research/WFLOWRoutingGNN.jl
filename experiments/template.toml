@@ -243,3 +243,17 @@ noise_scale = 0.0
 # where teacher-forced uses ground-truth input states at each step.
 # Default 0.0 keeps today's pure pushforward behavior exactly.
 pushforward_tf_weight = 0.0
+
+# Analysis-stage options (optional).
+[eval]
+# Number of percentile-ladder nodes in the downstream-timeseries plot (1 = outlet only).
+upstream_points = 5
+
+# Subcatchment error attribution (TODO 3g): maps, main-stem and attribute figures
+# plus CSVs, written next to the outlet timeseries as <split>_subcatch_*.
+# Best effort; needs river_q. Switch off for speed (e.g. in a hyperparameter search,
+# "eval.subcatch_attribution" is a valid search-space key).
+subcatch_attribution = true
+# Also run the 5000-shuffle Spearman ranking of subcatchment attributes against the
+# error (the attribute figure and ranking CSV). Only used with subcatch_attribution.
+subcatch_rank = true

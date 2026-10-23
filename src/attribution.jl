@@ -702,15 +702,33 @@ function subcatch_error_attribution_run(run_dir::AbstractString;
     pg = load_regrid_nc(pred_path, [qvar])[qvar]
     tg = load_regrid_nc(true_path, [qvar])[qvar]
     res = subcatch_error_attribution(sm, schema, pg, tg; kwargs...)
+    out = write_subcatch_error_attribution(res; metrics_dir = dirs.metrics, plots_dir = dirs.plots,
+                                           prefix = "$(split)_subcatch")
+    return merge(res, out)
+end
 
-    csv  = joinpath(dirs.metrics, "$(split)_subcatch_error_attribution.csv")
-    rcsv = joinpath(dirs.metrics, "$(split)_subcatch_attribute_ranking.csv")
+"""
+    write_subcatch_error_attribution(res; metrics_dir, plots_dir, prefix)
+        -> (; csv, ranking_csv, plots)
+
+Write the products of a [`subcatch_error_attribution`](@ref) result `res`:
+`<metrics_dir>/<prefix>_error_attribution.csv` (one row per subcatchment),
+`<metrics_dir>/<prefix>_attribute_ranking.csv` (only when `res` carries a ranking) and the
+figures of [`plot_subcatch_error_attribution`](@ref) as `<plots_dir>/<prefix>_*.png`.
+Shared by [`subcatch_error_attribution_run`](@ref) (`prefix = "<split>_subcatch"`) and
+the analyze stage.
+"""
+function write_subcatch_error_attribution(res; metrics_dir::AbstractString,
+                                          plots_dir::AbstractString, prefix::AbstractString)
+    foreach(mkpath, (metrics_dir, plots_dir))
+    csv  = joinpath(metrics_dir, "$(prefix)_error_attribution.csv")
+    rcsv = joinpath(metrics_dir, "$(prefix)_attribute_ranking.csv")
     _write_rows_csv(csv, res.rows)
     rk = [merge((; target = t), r) for t in sort(collect(keys(res.ranking))) for r in res.ranking[t]]
-    _write_rows_csv(rcsv, rk)
-    pngs = plot_subcatch_error_attribution(res; dir = dirs.plots, prefix = "$(split)_subcatch")
-    @info "Wrote $csv, $rcsv and $(length(pngs)) plots" check = res.tree.check
-    return merge(res, (; csv, ranking_csv = rcsv, plots = pngs))
+    isempty(rk) || _write_rows_csv(rcsv, rk)
+    pngs = plot_subcatch_error_attribution(res; dir = plots_dir, prefix)
+    @info "Wrote $csv$(isempty(rk) ? "" : ", $rcsv") and $(length(pngs)) plots" check = res.tree.check
+    return (; csv, ranking_csv = isempty(rk) ? nothing : rcsv, plots = pngs)
 end
 
 # ---------------------------------------------------------------------------

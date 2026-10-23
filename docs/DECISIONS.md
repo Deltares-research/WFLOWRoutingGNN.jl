@@ -6,6 +6,71 @@ note that holds the full reasoning. Newest at the top.
 ---
 
 
+# PROPOSED 23-10-2026
+
+## Diagnostic-metric convention for A/B across mass-balance formulations
+
+**Status: PROPOSED (design only; see [TODO.md](TODO.md) §3h).** Several MB
+diagnostics were written under the `ThetaKinematicWave` assumption that **`q` is the
+fed-back state** and **`h` the stiff derived readout**. The hybrid
+(`MuskingumContinuityHybrid`) **switches those roles** (`h`/storage is the carried
+state, `q` a continuity readout out of the loop), so reported side-by-side in one
+hpar CSV the affected columns are `NaN`/empty for the hybrid arm or silently mean
+something different, making the A/B over `model.mb_formulation` misleading
+(surfaced on the E15 search). Decision: **separate the axis of comparison (scientific
+skill, must be identical across arms) from the mechanism diagnostic (stability, must
+be meaningful per mechanism)** and treat each with a different strategy.
+
+- **Scientific-skill metrics → one formulation-agnostic path, no switching.** All
+  skill numbers are computed post-hoc from the physical `val_pred.nc`/`val_true.nc`
+  fields and must never route through a layer-internal readout or be gated on the
+  formulation. `q` is physical discharge in both arms (readout in the hybrid, state
+  in theta), so `river_q_performance_metrics` (KGE, r/α/β, PBIAS, peak_ratio, FHV,
+  per-node NSE), `river_h` RMSE/NSE/spatial medians, and the fixed-horizon RMSE on
+  `q` are already directly comparable and stay as-is.
+  - **Conservation is unified:** retire the theta-only *layer-internal* volume budget
+    as the canonical conservation number and promote the **layer-free**
+    `mb_residual_diagnostics` / `_analyze_mb_residual` (recomputed from the `q` & `h`
+    fields, already "applies to any model with or without a MB layer") to the single
+    conservation metric for both arms. The hybrid's exact continuity readout drives
+    its field residual ≈ 0; theta exposes its structural mismatch — both land in the
+    same `volume_pbias`/`drift` columns.
+- **Stability metrics → one measured works-for-both headline + auto-switched analytic
+  companions.** `amp` (q→h cross-amplification) and backbone contraction (h self-map
+  spectral radius) measure different objects, but both proxy the per-step growth of
+  the carried-state error. Define a single comparable **headline**:
+  - `rollout_contraction` ρ̂ = `median_t ‖Δs_{t+1}‖/‖Δs_t‖` under teacher forcing,
+    where `s` is **the formulation's own state row(s)** (dispatch only selects which
+    row is the state: `q`-row for theta, `h`-row for the hybrid, via the existing
+    `encoder_state`/state layout). Single orientation/target: **ρ̂ < 1 ⇒ contractive**,
+    margin = 1 − ρ̂. This replaces `final_amp` as the sortable stability column.
+  - **Companions (drill-down, namespaced, presence-based):** theta keeps
+    `stability.analytic_gain = median(θ·dt·σ_q/σ_h)` and the realised
+    `stability.q_to_h_amp`; the hybrid keeps `stability.backbone_rho = ρ(P)` (max and
+    median backbone contraction, exact and horizon-independent). A companion column
+    **exists only for the arm it means something for**.
+- **Results-CSV schema.** The hpar scalar reader/aggregator
+  (`_read_run_scalar_metrics`, `_aggregate_repetition_rows`) emits `rollout_contraction`
+  for every run (the one stability column it averages) and the companions under their
+  own keys, **skipping keys absent for an arm** (explicit not-applicable, never a NaN
+  that silently averages to NaN — which is the current `final_amp` bug). Scientific
+  columns are identical-definition across arms.
+- **Loss weighting & labels (A/B fairness, not reported metrics).** Keep the
+  *scientific* loss (physical `q` and `h` errors) identical across arms for a fair
+  A/B; each formulation declares its internal weighting via the existing
+  `mb_h_loss_weight` dispatch (hybrid returns `nothing` = plain strategy weight; theta
+  keeps its q→h-stiffness compensation, the original rationale for
+  `h_loss_scale="increment"`, which no longer applies when `h` is the primary state).
+  Record the *effective* weight in `metrics.toml` so the comparison is auditable. Keep
+  `loss_components` column names physical (`q_mse`,`h_mse`) but annotate which is the
+  carried state vs the diagnostic readout per formulation.
+- **Scope.** Reporting/labelling + the results-CSV schema, **not** the hybrid physics
+  (which is correct). Goal: an A/B search over `model.mb_formulation` yields columns
+  that are either directly comparable or clearly marked not-applicable per arm.
+
+---
+
+
 # IMPLEMENTED 21-10-2026
 
 ## Mass-balance redesign: reservoir backbone + continuity readout (`muskingum_continuity`)

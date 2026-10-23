@@ -217,3 +217,56 @@ end
         @test !any(startswith("outlet_timeseries"), readdir(dirs.plots))
     end
 end
+
+@testset "Subcatchment error attribution in the analyze stage (3g)" begin
+    model_path = joinpath(@__DIR__, "..", "test_data", "test_model")
+    mktempdir() do tmp
+        ds = DataSettings(run_name = "sa", runs_dir = tmp, wflow_model_path = model_path,
+                          train_frac = 0.6, val_frac = 0.2)
+        ms = ModelSettings(domain = "river", hidden_dim = 8, nlayers = 1)
+        mk(; kw...) = TrainSettings(epochs = 1, batch_size = 4, lr_start = 1f-3, lr_final = 1f-5,
+                                    lr_steps = 1, seed = 7, device = :cpu,
+                                    strategy = TrainingStrategy([1, 2], [1, 1], 0.0); kw...)
+        ts = mk()
+        @test ts.subcatch_attribution && ts.subcatch_rank       # defaults: on
+        run_dir = joinpath(tmp, "sa")
+        prep = preprocess_run(ds, ms, ts)
+        tr   = train_run(prep, ds, ms, ts)
+        dirs = (; model = joinpath(run_dir, "model"), output = joinpath(run_dir, "output"),
+                  plots = joinpath(run_dir, "plots"), metrics = joinpath(run_dir, "metrics"))
+        infer_run(tr.model, prep, ms, ts; dirs, splits = (:val,))
+        fresh() = (isdir(dirs.plots) && rm(dirs.plots; recursive = true);
+                   isdir(dirs.metrics) && rm(dirs.metrics; recursive = true))
+        subcatch_files() = sort(filter(f -> occursin("_subcatch_", f),
+                                       vcat(readdir(dirs.plots), readdir(dirs.metrics))))
+
+        # Default: attribution products next to the outlet timeseries (route A on the test model).
+        analyze_run(prep, ms, ts; dirs, metrics_toml = false, outlet_gauge_var = "gauges_grdc")
+        @test isfile(joinpath(dirs.metrics, "val_subcatch_error_attribution.csv"))
+        @test isfile(joinpath(dirs.plots, "val_subcatch_error_map.png"))
+        @test any(startswith("outlet_timeseries"), readdir(dirs.plots))
+        with_rank = subcatch_files()
+
+        # Without the permutation ranking: no ranking CSV / attribute figure, rest unchanged.
+        fresh()
+        analyze_run(prep, ms, mk(subcatch_rank = false); dirs, metrics_toml = false,
+                    outlet_gauge_var = "gauges_grdc")
+        @test isfile(joinpath(dirs.metrics, "val_subcatch_error_attribution.csv"))
+        @test !isfile(joinpath(dirs.metrics, "val_subcatch_attribute_ranking.csv"))
+        @test !isfile(joinpath(dirs.plots, "val_subcatch_attributes.png"))
+        @test issubset(subcatch_files(), with_rank)
+
+        # Switched off: only the outlet timeseries remain.
+        fresh()
+        analyze_run(prep, ms, mk(subcatch_attribution = false); dirs, metrics_toml = false,
+                    outlet_gauge_var = "gauges_grdc")
+        @test isempty(subcatch_files())
+        @test any(startswith("outlet_timeseries"), readdir(dirs.plots))
+
+        # An unusable gauge variable skips both, without failing the stage.
+        fresh()
+        analyze_run(prep, ms, ts; dirs, metrics_toml = false, outlet_gauge_var = "no_such_var")
+        @test any(startswith("downstream_timeseries"), readdir(dirs.plots))
+        @test isempty(subcatch_files())
+    end
+end

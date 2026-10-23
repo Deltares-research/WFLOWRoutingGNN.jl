@@ -86,6 +86,7 @@ export river_layout, read_river_series, upstream_sum, MB_SCHEMES, mb_scheme_resi
 include("attribution.jl")
 export subcatch_error_attribution_run, subcatch_error_attribution, build_subcatchment_tree,
        network_outlets, gauge_outlets, subcatch_error_decomposition, spearman_test,
-       plot_subcatch_error_attribution, attribution_outlet_cells
+       plot_subcatch_error_attribution, attribution_outlet_cells,
+       write_subcatch_error_attribution
 
 end # module WflowRoutingGNN

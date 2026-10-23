@@ -27,12 +27,16 @@ NetCDF outputs (`<dirs.output>/val_pred.nc`, `val_true.nc`) and writes
     <dirs.plots>/    validation.mp4, downstream_timeseries.png, spatial_metrics.png,
                      q_overprediction_vs_ramp.png, [mb_diagnostics.png, volume_budget.png],
                      [outlet_timeseries*.png],
+                     [val_subcatch_error_map.png, val_subcatch_mainstem.png,
+                      val_subcatch_attributes.png],
                      [validation_daterange.mp4, downstream_timeseries_daterange.png,
-                      outlet_timeseries_daterange*.png]
+                      outlet_timeseries_daterange*.png, val_daterange_subcatch_*.png]
     <dirs.metrics>/  downstream_timeseries.csv, spatial_metrics.csv,
                      q_overprediction_vs_ramp.csv, mb_residual.csv, mb_residual_by_node.csv,
                      [mb_*.csv, volume_budget.csv], [outlet_timeseries*.csv],
-                     [downstream_timeseries_daterange.csv, outlet_timeseries_daterange*.csv],
+                     [val_subcatch_error_attribution.csv, val_subcatch_attribute_ranking.csv],
+                     [downstream_timeseries_daterange.csv, outlet_timeseries_daterange*.csv,
+                      val_daterange_subcatch_*.csv],
                      metrics.toml
     <dirs.output>/   spatial_metrics.nc
 
@@ -42,6 +46,14 @@ outlets by decreasing area (one figure/CSV per outlet, suffixed `_node<idx>_r<ra
 They are best effort: skipped with a notice when the run has no `river_q` state, the
 rollout is diverged, `staticmaps.nc` lacks what the outlet selection needs, or anything
 else in the selection fails.
+
+`val_subcatch_*` (`val_daterange_subcatch_*` for the date-range rollout) are the
+subcatchment error-attribution products of [`write_subcatch_error_attribution`](@ref),
+computed from the same attribution result as the outlets (one pass). They are written
+when `ts.subcatch_attribution` is `true` (the default; `[eval] subcatch_attribution`),
+with the attribute ranking (`_attributes.png`, `_attribute_ranking.csv`) only when
+`ts.subcatch_rank` is `true`. Best effort like the outlet timeseries; a diverged rollout
+skips both.
 
 Node-order arrays (for [`river_q_performance_metrics`](@ref)) are recovered with
 [`gather_nodes`](@ref) and the node↔cell mapping `prep.grid`; the gauge/network
@@ -114,9 +126,9 @@ function analyze_run(prep::PrepBundle, ms::ModelSettings, ts::TrainSettings;
                                timestamps = split_times,
                                csv_path   = joinpath(dirs.metrics, "downstream_timeseries.csv"))
 
-    _analyze_outlet_timeseries(prep, ms, p_grids, t_grids, split_times, dirs;
-                               gauge_var = outlet_gauge_var,
-                               min_area_km2 = outlet_min_area_km2)
+    _analyze_subcatchments(prep, ms, ts, p_grids, t_grids, split_times, dirs;
+                           gauge_var = outlet_gauge_var,
+                           min_area_km2 = outlet_min_area_km2)
 
     # Spatial performance: per-cell error maps + Q overprediction vs ramp
     sp_metrics = spatial_error_metrics(p_grids, t_grids, domain)
@@ -189,9 +201,9 @@ function analyze_run(prep::PrepBundle, ms::ModelSettings, ts::TrainSettings;
                                    edge_targets = prep.edge_tgt,
                                    timestamps = dr_pred_times,
                                    csv_path   = joinpath(dirs.metrics, "downstream_timeseries_daterange.csv"))
-        _analyze_outlet_timeseries(prep, ms, dr_p_grids, dr_t_grids, dr_pred_times, dirs;
-                                   suffix = "_daterange", gauge_var = outlet_gauge_var,
-                                   min_area_km2 = outlet_min_area_km2)
+        _analyze_subcatchments(prep, ms, ts, dr_p_grids, dr_t_grids, dr_pred_times, dirs;
+                               suffix = "_daterange", gauge_var = outlet_gauge_var,
+                               min_area_km2 = outlet_min_area_km2)
     end
 
     out = (; spatial_summary, ramp = ramp_summary, river_q_perf,
@@ -217,21 +229,43 @@ function analyze_run(prep::PrepBundle, ms::ModelSettings, ts::TrainSettings;
     return out
 end
 
-# Discharge timeseries at the subcatchment-attribution outlets (3f): the
-# whole-basin outlet first, then the largest-area root and the retained outlets of
-# `subcatch_error_attribution`. Best effort: never fails the analyze stage.
-function _analyze_outlet_timeseries(prep, ms, p_grids, t_grids, times, dirs;
-                                    suffix::AbstractString = "", gauge_var = nothing,
-                                    min_area_km2::Real = 100.0)
+# Subcatchment products of one rollout, from a single `subcatch_error_attribution`
+# pass: the discharge timeseries at the attribution outlets (3f; the whole-basin
+# outlet first, then the largest-area root and the retained outlets) and, when
+# `ts.subcatch_attribution`, the error-attribution maps/CSVs (3g; the permutation
+# ranking only when `ts.subcatch_rank`). Best effort: never fails the analyze stage.
+function _analyze_subcatchments(prep, ms, ts, p_grids, t_grids, times, dirs;
+                                suffix::AbstractString = "", gauge_var = nothing,
+                                min_area_km2::Real = 100.0)
     "river_q" in DOMAIN_VARS[ms.domain]["state"] || return nothing
     pq, tq = p_grids["river_q"], t_grids["river_q"]
     if rollout_diverged(pq, tq)
-        @info "Skipping outlet timeseries$suffix: the predicted discharge is diverged"
+        @info "Skipping subcatchment outlet timeseries/attribution$suffix: the predicted discharge is diverged"
         return nothing
     end
+    res = try
+        subcatch_error_attribution(prep.staticmaps_file, load_schema(prep.wflow_schema),
+                                   pq, tq; gauge_var, min_area_km2,
+                                   rank = ts.subcatch_attribution && ts.subcatch_rank)
+    catch err
+        @warn "Skipping subcatchment outlet timeseries/attribution$suffix" exception = (err, catch_backtrace())
+        return nothing
+    end
+    nodes = _analyze_outlet_timeseries(prep, ms, res, p_grids, t_grids, times, dirs; suffix)
+    if ts.subcatch_attribution
+        try
+            write_subcatch_error_attribution(res; metrics_dir = dirs.metrics, plots_dir = dirs.plots,
+                                             prefix = "val$(suffix)_subcatch")
+        catch err
+            @warn "Skipping subcatchment error attribution$suffix" exception = (err, catch_backtrace())
+        end
+    end
+    return nodes
+end
+
+function _analyze_outlet_timeseries(prep, ms, res, p_grids, t_grids, times, dirs;
+                                    suffix::AbstractString = "")
     try
-        res   = subcatch_error_attribution(prep.staticmaps_file, load_schema(prep.wflow_schema),
-                                           pq, tq; gauge_var, min_area_km2, rank = false)
         nodes = nodes_for_cells(prep.grid, attribution_outlet_cells(res))
         ua    = prep.postscale["river_q"]
         any(isfinite, ua) && pushfirst!(nodes, argmax(replace(ua, NaN => -Inf)))

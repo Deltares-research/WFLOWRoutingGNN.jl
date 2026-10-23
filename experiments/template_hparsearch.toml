@@ -134,6 +134,14 @@ durations   = [15, 15, 20]
 noise_scale = 0.0
 pushforward_tf_weight = 0.0
 
+[eval]
+upstream_points = 5
+# Subcatchment error attribution (<split>_subcatch_* maps/CSVs) per run, with the
+# permutation ranking of attributes. Both default to true; a large search can turn
+# them off (or sweep "eval.subcatch_attribution") to save analysis time.
+subcatch_attribution = true
+subcatch_rank = true
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Hyperparameter search settings

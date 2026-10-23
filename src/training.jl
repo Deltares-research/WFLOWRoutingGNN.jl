@@ -74,6 +74,14 @@ Fields:
 - `upstream_points`: number of percentile-ladder nodes to plot for validation
                      upstream/downstream timeseries diagnostics. `1` reproduces
                      the previous outlet-only behaviour.
+- `subcatch_attribution` : write the subcatchment error-attribution products in the
+                     analyze stage (`<split>_subcatch_error_map.png`,
+                     `_mainstem.png`, `_attributes.png`, `_error_attribution.csv`,
+                     `_attribute_ranking.csv`; best effort, needs `river_q`). Default
+                     `true`; switch off in a hyperparameter search for speed.
+- `subcatch_rank`  : with `subcatch_attribution`, also run the permutation-test
+                     Spearman ranking of subcatchment attributes against the error
+                     (the attribute figure and ranking CSV). Default `true`.
 - `early_stopping` : when `true`, stop training once the fixed-horizon validation
                      discharge RMSE has not improved for `early_stopping_patience`
                      epochs, and restore the best-metric weights. Requires
@@ -106,6 +114,8 @@ struct TrainSettings
     eval_horizon     :: Int
     eval_anchors     :: Int
     upstream_points  :: Int
+    subcatch_attribution :: Bool
+    subcatch_rank    :: Bool
     early_stopping   :: Bool
     early_stopping_patience :: Int
     checkpoint_every :: Int
@@ -137,6 +147,8 @@ function TrainSettings(;
         eval_horizon     :: Int = 30,
         eval_anchors     :: Int = 32,
         upstream_points  :: Int = 5,
+        subcatch_attribution :: Bool = true,
+        subcatch_rank    :: Bool = true,
         early_stopping   :: Bool = false,
         early_stopping_patience :: Int = 20,
         checkpoint_every :: Int = 0,
@@ -189,6 +201,7 @@ function TrainSettings(;
                   h_loss_scale, Float32(phase_backoff_factor), rollout_grad,
                   seed, strategy, device, val_daterange,
                   eval_horizon, eval_anchors, upstream_points,
+                  subcatch_attribution, subcatch_rank,
                   early_stopping, early_stopping_patience,
                   checkpoint_every, checkpoint_full_eval)
 end
@@ -213,6 +226,8 @@ function Base.show(io::IO, s::TrainSettings)
     println(io, "  eval_horizon     : ", s.eval_horizon)
     println(io, "  eval_anchors     : ", s.eval_anchors)
     println(io, "  upstream_points  : ", s.upstream_points)
+    println(io, "  subcatch_attribution : ", s.subcatch_attribution)
+    println(io, "  subcatch_rank    : ", s.subcatch_rank)
     println(io, "  early_stopping   : ", s.early_stopping)
     println(io, "  early_stopping_patience : ", s.early_stopping_patience)
     println(io, "  checkpoint_every : ", s.checkpoint_every)
@@ -243,6 +258,8 @@ function save_train_settings(path::String, s::TrainSettings)
         "eval_horizon"     => s.eval_horizon,
         "eval_anchors"     => s.eval_anchors,
         "upstream_points"  => s.upstream_points,
+        "subcatch_attribution" => s.subcatch_attribution,
+        "subcatch_rank"    => s.subcatch_rank,
         "early_stopping"   => s.early_stopping,
         "early_stopping_patience" => s.early_stopping_patience,
         "checkpoint_every" => s.checkpoint_every,
@@ -308,6 +325,8 @@ function load_train_settings(path::String)
         eval_horizon     = get(d, "eval_horizon", 30),
         eval_anchors     = get(d, "eval_anchors", 32),
         upstream_points  = get(d, "upstream_points", 5),
+        subcatch_attribution = get(d, "subcatch_attribution", true),
+        subcatch_rank    = get(d, "subcatch_rank", true),
         early_stopping   = get(d, "early_stopping", false),
         early_stopping_patience = get(d, "early_stopping_patience", 20),
         checkpoint_every = get(d, "checkpoint_every", 0),

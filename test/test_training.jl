@@ -169,6 +169,8 @@ end
     @test s.eval_horizon            == 30
     @test s.eval_anchors            == 32
     @test s.upstream_points         == 5
+    @test s.subcatch_attribution    == true
+    @test s.subcatch_rank           == true
     @test s.rollout_grad            == :full_bptt
     @test s.early_stopping          == false
     @test s.early_stopping_patience == 20
@@ -187,6 +189,7 @@ end
     @testset "TOML round-trip" begin
         sc = TrainSettings(; VALID_TS_KWARGS..., eval_horizon = 12, eval_anchors = 5,
                              upstream_points = 7,
+                             subcatch_attribution = false, subcatch_rank = false,
                              early_stopping = true, early_stopping_patience = 7,
                              checkpoint_every = 3, checkpoint_full_eval = true)
         path = tempname() * ".toml"
@@ -196,6 +199,8 @@ end
         @test sc2.eval_horizon            == 12
         @test sc2.eval_anchors            == 5
         @test sc2.upstream_points         == 7
+        @test sc2.subcatch_attribution    == false
+        @test sc2.subcatch_rank           == false
         @test sc2.early_stopping          == true
         @test sc2.early_stopping_patience == 7
         @test sc2.checkpoint_every        == 3

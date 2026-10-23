@@ -43,6 +43,7 @@ using WflowRoutingGNN
             ),
             "eval" => Dict{String, Any}(
                 "upstream_points" => 6,
+                "subcatch_attribution" => false,
             ),
             "hparsearch" => Dict{String, Any}(
                 "search_type" => "box",
@@ -77,6 +78,8 @@ using WflowRoutingGNN
         @test ts_b.strategy.pushforward_tf_weight ≈ 0.25f0
         @test ts_a.upstream_points == 6
         @test ts_b.upstream_points == 6
+        @test !ts_a.subcatch_attribution && !ts_b.subcatch_attribution   # [eval] key
+        @test ts_a.subcatch_rank && ts_b.subcatch_rank                    # default
         @test ts_a.rollout_grad == :detached
         @test ts_b.rollout_grad == :detached
         @test ts_a.seed == 123

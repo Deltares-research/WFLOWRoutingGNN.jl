@@ -1,5 +1,19 @@
 This document serves as a concrete changelog of the code, summarizing briefly the changes of each commit.
 
+## 2026-10-23
+
+- **Subcatchment error attribution in the analyze stage (TODO §3g).** `analyze_run` (and
+        therefore every pipeline and `hpar_search` run) now writes the attribution products
+        `val_subcatch_error_map.png`, `_mainstem.png`, `_attributes.png`,
+        `_error_attribution.csv` and `_attribute_ranking.csv` (and `val_daterange_subcatch_*`
+        for the date-range window). One `subcatch_error_attribution` pass per rollout feeds
+        both these and the 3f outlet timeseries; best effort, skipped for a diverged rollout.
+        New `TrainSettings` fields `subcatch_attribution` (default `true`) and `subcatch_rank`
+        (default `true`, the permutation ranking), read from `[eval]` (or `[train]`), saved in
+        `train_settings.toml` and sweepable (`eval.subcatch_attribution`). New export
+        `write_subcatch_error_attribution`, shared with `subcatch_error_attribution_run`.
+        Tests: [test/test_attribution.jl](../test/test_attribution.jl).
+
 ## 2026-10-21
 
 - **Mass-balance redesign: `muskingum_continuity` formulation (TODO "Mass-balance
