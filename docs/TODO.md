@@ -551,7 +551,6 @@ filter — exactly the dry/floored regime where behaviour is often worst).
 - Touch: `src/plot.jl` (`_upstream_percentile_nodes` → headwater selection, docstring),
   `src/analysis.jl` (optionally pass the attribution outlet nodes to exclude);
   `docs/PROJECT.md`. No model-source change.
-- **Implemented (2026-10-23).** `_headwater_nodes` (`src/plot.jl`) replaces `_upstream_percentile_nodes`: `upstream_points` nodes evenly spread over the smallest-catchment quarter of the finite-area nodes, ordered by decreasing area. The most-downstream node is dropped entirely (no anchor; the whole-basin outlet is the first `outlet_timeseries` figure). `plot_downstream_timeseries` gains `exclude_nodes`; `analyze_run` now runs it after the outlet derivation and excludes the attribution outlets (empty when those were skipped, so it stays always-on). File names are unchanged (`downstream_timeseries*.png`).
 
 ## 3g. Subcatchment error-attribution plots are not produced by the pipeline / hpar search
 
@@ -633,9 +632,8 @@ theta: `analytic_gain`, `q_to_h_amp`; hybrid: `backbone_rho_median`, `backbone_r
 gain, see [DECISIONS.md](DECISIONS.md) (implementation notes). Skill-metric audit: all of
 `river_q_performance_metrics`, the spatial medians and the fixed-horizon RMSE are computed
 from the gridded fields / physical `q`, none is gated on the formulation. **Still open:**
-the `increment` vs `absolute` default per formulation is not revisited.
-`plot_amplification` is formulation-aware (`kind`, `contraction`; the hybrid shows the
-backbone contraction and the measured ρ̂, not a "gain").
+the `increment` vs `absolute` default per formulation is not revisited, and
+`plot_amplification` still labels the hybrid backbone contraction as "gain".
 
 ### Scientific-skill metrics — one formulation-agnostic path (no switching)
 
@@ -859,3 +857,59 @@ Each item should land behind a toggle / be A/B-tested with the existing
       fewer kernels; keep the θ=1 fast path bit-identical.
 - [ ] Quantify launch-count/time change with `CUDA.@profile` before committing.
 - Touch: `src/massbalance.jl` (`ThetaKinematicWave` forward).
+
+## 8. Trim wasteful / redundant tests (runtime, not coverage)
+
+**Context.** `test/runtests.jl` takes ~14 min (measured per-file: pipeline 275 s,
+training 173 s, gnn 135 s, attribution 85 s, preprocess 48 s, stages 43 s,
+lr_autotune 24 s, mb_hybrid 17 s, the rest ≤ 10 s each; total ≈ 837 s). The
+~5 000 runtime `@test`s are a **red herring** — only ~1 100 are statically written;
+the rest are loop-expanded per-element assertions costing microseconds. Cutting
+assertions saves ~nothing. The cost is (a) Julia first-time compilation (TTFX) and
+(b) a handful of heavy integration operations. Evidence for (a): `test_gnn.jl`
+burns 135 s on forward/gradient passes with **no training and no I/O** — nearly
+pure compilation of the Flux/GNN/Zygote paths, paid once regardless of test count.
+So the goal here is to remove *genuinely wasteful work*, not real correctness
+checks. The physics/math suites (`test_mb_hybrid`, `test_consistency`,
+`test_strategy`, `test_hparsearch`, `test_normalization`) are exemplary, fast, and
+must stay untouched.
+
+**Do not** delete correctness assertions to chase the number down; target the
+~100–150 s of recoverable waste below. Realistic default-suite target ≈ 10–11 min.
+
+- [ ] **Stop launching cold Julia subprocesses for arg-validation.** `test_stages.jl`
+      `cli_exit(...)` spawns **three** `julia --project` subprocesses (each pays a full
+      package load/compile) only to assert `scripts/pipeline.jl` returns exit code 1 on
+      bad args. The same validation is already covered **in-process** in the same file
+      via `run_stage_from_toml("bogus", cfg)` / a missing-file path. Keep **one**
+      subprocess as a smoke test of the actual CLI entry point and drop the other two
+      (or replace all three with the in-process checks).
+- [ ] **Gate MP4 video rendering behind an opt-in flag.** `test_pipeline.jl` and
+      `test_attribution.jl` encode `validation.mp4` / `validation_daterange.mp4` just to
+      assert `isfile(...)`. Video encoding is among the slowest steps and tests plumbing,
+      not correctness. Put it (and any other heavy render-only `isfile` checks) behind a
+      `WFLOW_SLOW_TESTS` env gate (default off), run in CI's slow lane only. Keep a cheap
+      assertion that the analyze stage *requests* the animation (e.g. mock/flag) in the
+      default suite.
+- [ ] **Share one trained-run fixture instead of re-training per block.**
+      `test_pipeline.jl`, `test_stages.jl`, `test_analysis.jl` and `test_attribution.jl`
+      each independently re-run `preprocess_run` + `train_run` inside multiple
+      `mktempdir` blocks on the same tiny test model. Build one preprocessed+trained run
+      once (module-level `const`, as `test_training.jl`/`test_strategy.jl` already do with
+      `TR_*`/`ST_*`) and have the analyze/infer-stage assertions reuse it. Removes several
+      cold pipeline runs without losing any assertion.
+- [ ] **Decide an explicit slow/integration tier.** Introduce a single
+      `WFLOW_SLOW_TESTS` (or `@testset`-level `slow`) convention so the default
+      `julia test/runtests.jl` runs the fast correctness suite (~target 10–11 min) and the
+      full video/subprocess/large-rollout set runs only in CI or on request. Document the
+      flag in `test/runtests.jl` and `README`/`docs`.
+- [ ] **(Investigate, optional) Cut first-time-compilation latency.** The dominant
+      cost is TTFX, not assertions. Evaluate a `PrecompileTools`-based workload (or
+      ensuring the package is precompiled before the test run) so the Flux/GNN forward and
+      gradient paths compile once at build time rather than inside `test_gnn.jl`. Measure
+      before/after; only adopt if it meaningfully moves the 135 s gnn figure.
+- Touch: `test/test_stages.jl` (drop 2 of 3 `cli_exit` subprocess checks),
+  `test/test_pipeline.jl` + `test/test_attribution.jl` (gate video rendering; reuse
+  fixture), `test/test_analysis.jl` (reuse fixture), `test/runtests.jl` (slow-tier flag
+  + docs), optionally `src/WflowRoutingGNN.jl` (PrecompileTools workload). No change to
+  the physics/math test files, and no correctness assertion removed.
