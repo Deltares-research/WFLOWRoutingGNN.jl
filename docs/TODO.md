@@ -602,6 +602,49 @@ if the user ran the CLI afterwards.)
   hpar search as `eval.subcatch_attribution`). Best effort with the same
   `rollout_diverged` early-out; each write is wrapped so a failure only skips that product.
 
+## 3g-bis. Overlay the river network and subcatchment boundaries on the attribution maps
+
+**Why.** The `<split>_subcatch_error_map.png` figure
+([`plot_subcatch_error_attribution`](../src/attribution.jl), figure (1)) draws two
+`lon/lat` heatmaps (specific local error `rms(e_local)/area` and the local share
+`rms(e_local)/rms(ΔQ outlet)`) coloured per subcatchment, with only the outlet cells
+marked as red dots. Without the river channels or the subcatchment outlines it is hard
+to read *where* a highlighted region sits in the drainage network and *which* cells
+belong to which subcatchment — especially where neighbouring subcatchments take similar
+colours. Adding (a) the river network and (b) the subcatchment boundaries on top of
+**each** of the two subplots makes the spatial story legible at a glance.
+
+- [ ] **Draw subcatchment boundaries on every map subplot.** Derive the outlines from
+      `tree.label` (already on `res.tree`: per-cell subcatchment id, `0` = unassigned):
+      for each active cell, compare its label with the right and lower neighbours and
+      emit a short border segment (at the shared cell edge, in `lon/lat`) wherever the
+      labels differ or the neighbour is unassigned/off-grid — i.e. the outer boundary too.
+      Overlay as thin dark `lines!`/`linesegments!` on both the specific-error and the
+      local-share axes. A small helper `_subcatch_boundary_segments(label, nrows, ncols,
+      lon, lat; flip)` keeps it reusable and honours the existing `flip`
+      (descending-latitude) handling so the overlay registers with the heatmap.
+- [ ] **Draw the river network on every map subplot.** Thread the flow network into the
+      result so the plotter can draw it: `subcatch_error_attribution` already has the
+      land `down` map (and the `river` mask) in scope — return them on `res` (e.g.
+      `res.down`, `res.river`) so no re-read of staticmaps is needed. For each river cell
+      draw a segment from its centre to its downstream cell centre (reuse the
+      cell→`lon/lat` mapping, mirror the `_inset_edge_segments` pattern in
+      [src/plot.jl](../src/plot.jl) but in geographic coords), optionally scaling width by
+      `wflow_uparea` if cheap. Keep the channels visually subordinate to the boundaries
+      (e.g. thin steel-blue under dark boundary lines) and under the red outlet dots.
+- [ ] **Keep it robust and cheap.** Both overlays are pure geometry from data already on
+      `res` (or newly threaded through it) — no model, no extra rollout. They must not
+      break the best-effort contract: if `down`/`river`/`label` are missing or empty,
+      skip that overlay and still save the heatmaps. Guard against the diverged-rollout
+      and non-river cases the surrounding code already tolerates.
+- [ ] **Docs.** Note the two overlays in the `plot_subcatch_error_attribution` docstring
+      and the [PROJECT.md](PROJECT.md) Evaluation Metrics description of the attribution
+      map, so the figure legend is self-explanatory.
+- Touch: `src/attribution.jl` (`subcatch_error_attribution` return gains `down`/`river`;
+  `plot_subcatch_error_attribution` figure (1) overlays + a boundary/river segment
+  helper), optionally `src/plot.jl` if the segment helper is shared; `docs/PROJECT.md`.
+  No model-source change.
+
 ## 3h. MB diagnostics assume the old q/h roles — stale under the Muskingum-continuity hybrid
 
 **Why.** Several diagnostics were designed under the `ThetaKinematicWave` (Option A)
