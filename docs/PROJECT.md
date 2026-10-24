@@ -115,7 +115,7 @@ Spatial-evaluation helper (`spatial_eval`, per split):
 
 Subcatchment error attribution (`attribution.jl`). The analyze stage writes these for the validation split (`val_subcatch_*`) and the date-range window (`val_daterange_subcatch_*`) from the same attribution pass as the outlet timeseries, unless `[eval] subcatch_attribution = false`; `[eval] subcatch_rank = false` skips the permutation ranking (and with it the attribute figure and ranking CSV). Best effort: skipped when there is no `river_q`, the rollout is diverged or `staticmaps.nc` cannot supply the outlets. `scripts/subcatch_error_attribution.jl` produces the same files post hoc for any split:
 
-- `<split>_subcatch_error_map.png` — maps of each subcatchment's specific local error and its local share of the outlet error (injected vs advected).
+- `<split>_subcatch_error_map.png` — maps of each subcatchment's specific local error and its local share of the outlet error (injected vs advected). Each map also shows the river network (thin blue lines, cell to downstream cell), the subcatchment boundaries (thin black lines, outer rim included) and the outlet cells (red dots).
 - `<split>_subcatch_mainstem.png` — advected vs locally injected RMS error along the main stem, showing where error enters vs compounds.
 - `<split>_subcatch_attributes.png` — the strongest Spearman rank correlations between subcatchment attributes and local error injection.
 - `metrics/<split>_subcatch_error_attribution.csv` (one row per subcatchment) and `metrics/<split>_subcatch_attribute_ranking.csv` (Spearman ρ of each attribute vs error).

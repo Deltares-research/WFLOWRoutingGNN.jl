@@ -166,6 +166,47 @@ const _AT_UPAREA = Float64[1, 3, 7, 8, 3, 2, 1, 1, 1]
         @test !WflowRoutingGNN.rollout_diverged(fill(NaN32, 2, 2, 2), fill(1f0, 2, 2, 2))
     end
 
+    @testset "map overlays: subcatchment boundaries and river network (3g-bis)" begin
+        lon = [0.0, 1.0, 2.0]; lat = [0.0, 1.0, 2.0]
+        # 3x3 grid, labels [1,1,3 | 3,2,2 | 2,1,0]: 6 vertical + 8 horizontal edges between
+        # different labels (outer rim included) + 3 left + 3 bottom border edges
+        pts = WflowRoutingGNN._subcatch_boundary_segments(tree.label, 3, 3, lon, lat)
+        @test length(pts) == 2 * (6 + 8 + 3 + 3)
+        @test all(p -> -0.5 <= p[1] <= 2.5 && -0.5 <= p[2] <= 2.5, pts)
+        # a single region: its perimeter only
+        one = WflowRoutingGNN._subcatch_boundary_segments(fill(1, 4), 2, 2, [0.0, 1.0], [0.0, 1.0])
+        @test length(one) == 2 * 8
+        # nothing assigned, or inconsistent sizes: no segments
+        @test isempty(WflowRoutingGNN._subcatch_boundary_segments(fill(0, 4), 2, 2, [0.0, 1.0], [0.0, 1.0]))
+        @test isempty(WflowRoutingGNN._subcatch_boundary_segments(tree.label, 2, 2, lon, lat))
+        # descending latitude: same geometry, registered in real coordinates
+        pts_desc = WflowRoutingGNN._subcatch_boundary_segments(tree.label, 3, 3, lon, [2.0, 1.0, 0.0])
+        @test length(pts_desc) == length(pts)
+        @test all(p -> -0.5 <= p[2] <= 2.5, pts_desc)
+
+        river = fill(true, 9)
+        rp = WflowRoutingGNN._river_segments(_AT_DOWN, river, 3, 3, lon, lat)
+        @test length(rp) == 2 * 7                     # every cell with a downstream cell but the pits
+        @test Tuple(rp[1]) == (0f0, 0f0) && Tuple(rp[2]) == (1f0, 0f0)   # cell 1 -> cell 2
+        river2 = copy(river); river2[2] = false
+        @test length(WflowRoutingGNN._river_segments(_AT_DOWN, river2, 3, 3, lon, lat)) == 2 * 4
+        @test isempty(WflowRoutingGNN._river_segments(_AT_DOWN, river, 2, 2, lon, lat))
+
+        # the map is still written with and without the overlay data
+        rows = [(; retained = true, lon = lon[mod1(c, 3)], lat = lat[cld(c, 3)],
+                   rms_local_per_km2 = 0.1k, local_over_total = 0.2k, cum_area_km2 = tree.cum_area_km2[k],
+                   rms_adv = 0.0, rms_local = 1.0, rms_total = 1.0)
+                for (k, c) in enumerate(outlets)]
+        res0 = (; tree, rows, ranking = Dict{String,Vector{NamedTuple}}(), nrows = 3, ncols = 3, lon, lat)
+        mktempdir() do tmp
+            p0 = plot_subcatch_error_attribution(res0; dir = tmp, prefix = "a")
+            @test isfile(joinpath(tmp, "a_error_map.png")) && p0 isa Vector{String}
+            p1 = plot_subcatch_error_attribution(merge(res0, (; down = _AT_DOWN, river)); dir = tmp, prefix = "b")
+            @test isfile(joinpath(tmp, "b_error_map.png"))
+            @test filesize(joinpath(tmp, "b_error_map.png")) != filesize(joinpath(tmp, "a_error_map.png"))
+        end
+    end
+
     @testset "plot_downstream_timeseries with explicit nodes" begin
         T = 5
         q = rand(Float32, 3, 3, T)

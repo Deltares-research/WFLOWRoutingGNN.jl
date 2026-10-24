@@ -545,8 +545,10 @@ explicit cell vector `outlets`; the gauge cells of the raster `gauge_var` (Route
 the network confluence outlets (Route B, [`network_outlets`](@ref)). Outlets without a
 finite discharge series are dropped.
 
-Returns `(; tree, rows, attributes, ranking, route, nrows, ncols, lon, lat, min_area_km2)`.
-`rows` has one `NamedTuple` per outlet (skill, error decomposition, attributes, `retained`);
+Returns `(; tree, rows, attributes, ranking, route, nrows, ncols, lon, lat, min_area_km2, down, river)`.
+`down` (downstream cell per linear index, `0` = none) and `river` (`Bool` mask) are the flow
+network used for the tessellation, kept for the map overlays of
+[`plot_subcatch_error_attribution`](@ref). `rows` has one `NamedTuple` per outlet (skill, error decomposition, attributes, `retained`);
 `ranking` maps each target (`"rms_local_per_km2"`, `"rel_local"`) to the
 [`rank_attributes`](@ref) result over the retained regions; with `rank = false` the
 permutation ranking is skipped and `ranking` is empty.
@@ -651,7 +653,8 @@ function subcatch_error_attribution(staticmaps_file::AbstractString, schema::Wfl
         sub = [n => v[sel] for (n, v) in attrs]
         ranking[String(tname)] = rank_attributes(sub, y; min_n = min_n_rank, nperm)
     end
-    return (; tree, rows, attributes = attrs, ranking, route, nrows, ncols, lon, lat, min_area_km2)
+    return (; tree, rows, attributes = attrs, ranking, route, nrows, ncols, lon, lat, min_area_km2,
+              down, river)
 end
 
 function _write_rows_csv(path::AbstractString, rows::AbstractVector{<:NamedTuple})
@@ -735,13 +738,74 @@ end
 # Plots
 # ---------------------------------------------------------------------------
 
+# Cell-edge half steps (signed) of the regular lon/lat axes.
+_half_step(v::AbstractVector) = length(v) > 1 ? (v[2] - v[1]) / 2 : 0.5
+
+"""
+    _subcatch_boundary_segments(label, nrows, ncols, lon, lat) -> Vector{Point2f}
+
+Line-segment endpoints (consecutive pairs, `lon/lat` coordinates) of the subcatchment
+outlines: a short segment on every cell edge where the labels of the two sides differ and
+at least one side is assigned (`label > 0`), including the outer boundary against
+unassigned or off-grid cells. `label` is indexed by linear cell index `i + (j-1) * nrows`.
+Geometry is in real coordinates, so it registers with the heatmap whichever way the
+latitude axis runs. Returns an empty vector on inconsistent sizes.
+"""
+function _subcatch_boundary_segments(label::AbstractVector{<:Integer}, nrows::Integer, ncols::Integer,
+                                     lon::AbstractVector, lat::AbstractVector)
+    pts = Point2f[]
+    (length(label) == nrows * ncols && length(lon) == nrows && length(lat) == ncols) || return pts
+    hx, hy = _half_step(lon), _half_step(lat)
+    lab(i, j) = (1 <= i <= nrows && 1 <= j <= ncols) ? Int(label[i + (j - 1) * nrows]) : 0
+    vseg!(x, y) = (push!(pts, Point2f(x, y - hy)); push!(pts, Point2f(x, y + hy)))
+    hseg!(x, y) = (push!(pts, Point2f(x - hx, y)); push!(pts, Point2f(x + hx, y)))
+    for j in 1:ncols, i in 1:nrows
+        a = lab(i, j)
+        if i == 1 && a > 0
+            vseg!(lon[i] - hx, lat[j])
+        end
+        if j == 1 && a > 0
+            hseg!(lon[i], lat[j] - hy)
+        end
+        b = lab(i + 1, j)
+        (a != b && (a > 0 || b > 0)) && vseg!(lon[i] + hx, lat[j])
+        b = lab(i, j + 1)
+        (a != b && (a > 0 || b > 0)) && hseg!(lon[i], lat[j] + hy)
+    end
+    return pts
+end
+
+"""
+    _river_segments(down, river, nrows, ncols, lon, lat) -> Vector{Point2f}
+
+Line-segment endpoints (consecutive pairs, `lon/lat` cell centres) of the river network:
+one segment from every river cell to its downstream cell when that is a river cell too.
+Returns an empty vector on inconsistent sizes.
+"""
+function _river_segments(down::AbstractVector{<:Integer}, river::AbstractVector{Bool},
+                         nrows::Integer, ncols::Integer, lon::AbstractVector, lat::AbstractVector)
+    pts = Point2f[]
+    n = nrows * ncols
+    (length(down) == n && length(river) == n && length(lon) == nrows && length(lat) == ncols) || return pts
+    for c in findall(river)
+        d = Int(down[c])
+        (1 <= d <= n && river[d]) || continue
+        push!(pts, Point2f(lon[mod1(c, nrows)], lat[cld(c, nrows)]))
+        push!(pts, Point2f(lon[mod1(d, nrows)], lat[cld(d, nrows)]))
+    end
+    return pts
+end
+
 """
     plot_subcatch_error_attribution(res; dir, prefix) -> Vector{String}
 
 Three figures from a [`subcatch_error_attribution`](@ref) result: (1) maps of the
 subcatchments coloured by specific local error `rms_local / area` and by the local share
-of the outlet error; (2) advected vs local RMS error along the main stem; (3) the
-strongest attribute-vs-error rank correlations. Returns the written paths.
+of the outlet error, each with the river network (thin blue lines), the subcatchment
+boundaries (thin black lines) and the outlet cells (red dots) drawn on top (an overlay is
+skipped when `res` carries no `down`/`river`, or no subcatchment labels); (2) advected vs
+local RMS error along the main stem; (3) the strongest attribute-vs-error rank
+correlations. Returns the written paths.
 """
 function plot_subcatch_error_attribution(res; dir::AbstractString, prefix::AbstractString)
     mkpath(dir)
@@ -753,6 +817,9 @@ function plot_subcatch_error_attribution(res; dir::AbstractString, prefix::Abstr
     lon, lat = res.lon, res.lat
     flip = length(lat) > 1 && lat[1] > lat[end]
     latp = flip ? reverse(lat) : lat
+    bnd_pts = _subcatch_boundary_segments(tree.label, res.nrows, res.ncols, lon, lat)
+    riv_pts = hasproperty(res, :down) && hasproperty(res, :river) ?
+              _river_segments(res.down, res.river, res.nrows, res.ncols, lon, lat) : Point2f[]
     fig = Figure(size = (1300, 560))
     for (j, (field, ttl)) in enumerate(((:rms_local_per_km2, "specific local error rms(e_local)/area  [m³/s/km²]"),
                                         (:local_over_total,  "local share rms(e_local)/rms(ΔQ outlet)")))
@@ -766,6 +833,8 @@ function plot_subcatch_error_attribution(res; dir::AbstractString, prefix::Abstr
         ax = Axis(fig[1, 2j - 1]; title = ttl, titlesize = 12, xlabel = "lon", ylabel = "lat",
                   aspect = DataAspect())
         hm = heatmap!(ax, lon, latp, G; colormap = :viridis, nan_color = (:lightgray, 0.6))
+        isempty(riv_pts) || linesegments!(ax, riv_pts; color = (:steelblue, 0.8), linewidth = 0.8)
+        isempty(bnd_pts) || linesegments!(ax, bnd_pts; color = (:black, 0.85), linewidth = 0.7)
         scatter!(ax, [r.lon for r in rows], [r.lat for r in rows]; color = :red, markersize = 7,
                  strokecolor = :black, strokewidth = 0.5)
         Colorbar(fig[1, 2j], hm)

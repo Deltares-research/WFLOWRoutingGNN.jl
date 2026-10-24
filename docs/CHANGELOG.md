@@ -2,6 +2,15 @@ This document serves as a concrete changelog of the code, summarizing briefly th
 
 ## 2026-10-24
 
+- **River network and subcatchment boundaries on the attribution maps (TODO §3g-bis).**
+        Both panels of `<split>_subcatch_error_map.png` now draw the river network (thin blue
+        cell-to-downstream segments), the subcatchment boundaries (thin black segments on every
+        cell edge where the label changes, outer rim included) and the red outlet dots.
+        `subcatch_error_attribution` additionally returns `down` and `river`; the geometry comes
+        from the new `_subcatch_boundary_segments` / `_river_segments` helpers in
+        [src/attribution.jl](../src/attribution.jl) and is skipped when the data is missing.
+        Tests: [test/test_attribution.jl](../test/test_attribution.jl).
+
 - **Resumable `hpar_search` / training runs; robust search loop.** `hpar_search(toml; resume)`,
         `run_wflow_gnn(ds, ms, ts; resume)` and `run_wflow_gnn_from_toml(path; resume)` take an
         opt-in `resume` (default `false`); `scripts/hparsearch.jl` and `scripts/train.jl` accept
@@ -73,7 +82,7 @@ This document serves as a concrete changelog of the code, summarizing briefly th
         `mb_formulation = "muskingum_continuity"`: storage `h` is the carried state, advanced
         by an implicit-Euler reservoir-cascade backbone (sparse `P`, spectrum `1/(1+dt/K) < 1`)
         plus a bounded learned residual (`mb_residual_bound`, default 0.5), and `q` is the
-        exact continuity readout `(Iâˆ’A)â»Â¹(I_lat âˆ’ dS/dt)`, never fed back (`encoder_state`
+        exact continuity readout `(I−A)⁻¹(I_lat − dS/dt)`, never fed back (`encoder_state`
         zeroes the `q` row in the encoder input). Wired into `_loss_components`,
         `_mb_amplification`, `_rollout_mb_diagnostics`, `layer_mb_analysis`
         (`metrics/mb_backbone_contraction_by_node.csv`), `MB_FORMULATIONS`,

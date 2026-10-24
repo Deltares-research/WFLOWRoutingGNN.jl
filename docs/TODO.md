@@ -24,17 +24,17 @@ lateral-inflow experimental follow-up (below) is still open.
 Behaviour-changing, so kept out of the restructuring steps; done as a separate,
 A/B-tested change (default now uses the fixed physics).
 
-- [x] Confirm the discrepancy: `inwater_phys = forcingÂ·Ïƒ_iw + Î¼_iw` lacked the
+- [x] Confirm the discrepancy: `inwater_phys = forcing·σ_iw + μ_iw` lacked the
       `postscale["river_inwater"]` (upstream area `a`) factor, whereas
       preprocessing divides inwater by `a` before z-scoring. True-data check
-      (`sava_small_v081`, val split, layer `h_raw(true q)` âˆ’ wflow `river_h`):
+      (`sava_small_v081`, val split, layer `h_raw(true q)` − wflow `river_h`):
       legacy rms 3.92 m / median 0.29 m / max 252 m; fixed rms 0.0331 m /
       median 0.0016 m / max 2.7 m (equal to the wflow reference residual, so the
       remaining error is data-intrinsic, see last item).
 - [x] Where the factor lives: `build_massbalance(...; unscale_inwater = true)`
       stores the per-node `postscale["river_inwater"]` in the new
       `ThetaKinematicWave.postscale_inwater` field; forward, `mb_decoder_features`
-      and `mb_diagnostics` use `(forcingÂ·Ïƒ + Î¼)Â·a`. Toggle:
+      and `mb_diagnostics` use `(forcing·σ + μ)·a`. Toggle:
       `ModelSettings.mb_inwater_unscale` (config key `mb_inwater_unscale`,
       default `true`; `load_model_settings` defaults a missing key to `false`, so
       old checkpoints keep the legacy behaviour; `Flux.loadmodel!` fills the new
@@ -45,14 +45,14 @@ A/B-tested change (default now uses the fixed physics).
       changes `h_raw`, floor fractions, `net_flux` and volume-budget numbers of
       **all** runs (old values in `docs/EXPERIMENTS.md` are not comparable).
 - [x] Tests: `test/test_gnn.jl` ("lateral inflow un-scaling (R5b)": toggle,
-      physical budget, legacy layer, Î¸ < 1, gpu/cpu/precompute, legacy checkpoint
+      physical budget, legacy layer, θ < 1, gpu/cpu/precompute, legacy checkpoint
       loading, settings round-trip); `test/test_pipeline.jl` residual agreement
       now compares the layer's own `pred_q/pred_h/inwater`. Full suite 4870/4870.
 - [x] Effect on a learned model. (a) e13b weights (co-adapted to the legacy layer),
       inference only, val: legacy toggle reproduces e13b (pooled q KGE 0.877 vs.
       stored 0.887); the fixed layer with those weights degrades (0.379), as
       expected for a mismatched layer. (b) Compressed retrain from scratch, GPU,
-      seed 1, 42 epochs (strategy steps [1,2,4,6,8,10] Ã— 7), same hyper-parameters
+      seed 1, 42 epochs (strategy steps [1,2,4,6,8,10] × 7), same hyper-parameters
       as e13b (legacy | fixed): pooled q KGE 0.490 | 0.547, gauge q KGE
       0.281 | 0.370, gauge peak ratio 1.27 | 0.98, `frac_h_raw_neg_node_mean`
       0.587 | 0.120, layer residual rms 2.06 | 1.60 m; but depth worse: median
@@ -262,9 +262,9 @@ Both operators are static SpMVs → precompute once (`A` is static, constraint 3
   `mb_residual_bound` (default 0.5). Deviations from the text above, all recorded in
   [DECISIONS.md](DECISIONS.md): the backbone is an implicit-Euler *linear-reservoir cascade*
   (Muskingum with `x = 0`), not the three-coefficient MC form (daily steps give Courant
-  numbers â‰« 1, so `Câ‚ƒ < 0` for physical `K` and the "abort on a negative coefficient" check
+  numbers ≫ 1, so `C₃ < 0` for physical `K` and the "abort on a negative coefficient" check
   would always fire; the reservoir backbone has spectrum `1/(1+dt/K) < 1` for any `K > 0`
-  and `P â‰¥ 0`); the residual guarantee is bounded-input/bounded-state, not "cannot move the
+  and `P ≥ 0`); the residual guarantee is bounded-input/bounded-state, not "cannot move the
   spectrum"; the encoder sees a zeroed `q` row (`encoder_state`) so `q` is out of the loop.
   The hybrid has no rollout/volume-budget layer record yet (`layer_mb_analysis` writes
   `metrics/mb_backbone_contraction_by_node.csv`); a volume budget for it is a follow-up.
@@ -614,7 +614,7 @@ belong to which subcatchment — especially where neighbouring subcatchments tak
 colours. Adding (a) the river network and (b) the subcatchment boundaries on top of
 **each** of the two subplots makes the spatial story legible at a glance.
 
-- [ ] **Draw subcatchment boundaries on every map subplot.** Derive the outlines from
+- [x] **Draw subcatchment boundaries on every map subplot.** Derive the outlines from
       `tree.label` (already on `res.tree`: per-cell subcatchment id, `0` = unassigned):
       for each active cell, compare its label with the right and lower neighbours and
       emit a short border segment (at the shared cell edge, in `lon/lat`) wherever the
@@ -623,7 +623,7 @@ colours. Adding (a) the river network and (b) the subcatchment boundaries on top
       local-share axes. A small helper `_subcatch_boundary_segments(label, nrows, ncols,
       lon, lat; flip)` keeps it reusable and honours the existing `flip`
       (descending-latitude) handling so the overlay registers with the heatmap.
-- [ ] **Draw the river network on every map subplot.** Thread the flow network into the
+- [x] **Draw the river network on every map subplot.** Thread the flow network into the
       result so the plotter can draw it: `subcatch_error_attribution` already has the
       land `down` map (and the `river` mask) in scope — return them on `res` (e.g.
       `res.down`, `res.river`) so no re-read of staticmaps is needed. For each river cell
@@ -632,12 +632,12 @@ colours. Adding (a) the river network and (b) the subcatchment boundaries on top
       [src/plot.jl](../src/plot.jl) but in geographic coords), optionally scaling width by
       `wflow_uparea` if cheap. Keep the channels visually subordinate to the boundaries
       (e.g. thin steel-blue under dark boundary lines) and under the red outlet dots.
-- [ ] **Keep it robust and cheap.** Both overlays are pure geometry from data already on
+- [x] **Keep it robust and cheap.** Both overlays are pure geometry from data already on
       `res` (or newly threaded through it) — no model, no extra rollout. They must not
       break the best-effort contract: if `down`/`river`/`label` are missing or empty,
       skip that overlay and still save the heatmaps. Guard against the diverged-rollout
       and non-river cases the surrounding code already tolerates.
-- [ ] **Docs.** Note the two overlays in the `plot_subcatch_error_attribution` docstring
+- [x] **Docs.** Note the two overlays in the `plot_subcatch_error_attribution` docstring
       and the [PROJECT.md](PROJECT.md) Evaluation Metrics description of the attribution
       map, so the figure legend is self-explanatory.
 - Touch: `src/attribution.jl` (`subcatch_error_attribution` return gains `down`/`river`;
