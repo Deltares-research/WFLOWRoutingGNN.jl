@@ -133,3 +133,38 @@ end
         @test cli_exit("prep", joinpath(tmp, "missing.toml")) == 1
     end
 end
+
+@testset "run_wflow_gnn(; resume): skips finished stages" begin
+    mktempdir() do tmp
+        ds, ms, ts = pl_settings(tmp)
+        root = joinpath(tmp, "pl")
+        mt(f) = mtime(joinpath(root, f))
+        done = WflowRoutingGNN._stage_done
+        dirs = WflowRoutingGNN._run_dirs(ds)
+        @test !done(AnalyzeStage(), dirs) && !done(AllStages(), dirs)
+
+        model, m0 = run_wflow_gnn(ds, ms, ts)
+        @test all(s -> done(s, dirs), AllStages().stages)
+
+        # everything finished: nothing is rerun, results come from disk
+        t_model, t_metrics = mt("model/model.jld2"), mt("metrics/metrics.toml")
+        model1, m1 = run_wflow_gnn(ds, ms, ts; resume = true)
+        @test model1 isa WflowGNN
+        @test mt("model/model.jld2") == t_model && mt("metrics/metrics.toml") == t_metrics
+        @test m1.n_params == m0.n_params && m1.val_n_timesteps == m0.val_n_timesteps
+        @test m1.final_val_loss ≈ m0.final_val_loss rtol = 1e-4
+
+        # analyze artifact missing: only that stage reruns, the model is not retrained
+        rm(joinpath(root, "metrics", "metrics.toml"))
+        model2, m2 = run_wflow_gnn(ds, ms, ts; resume = true)
+        @test isfile(joinpath(root, "metrics", "metrics.toml"))
+        @test mt("model/model.jld2") == t_model
+        @test m2.n_params == m0.n_params
+
+        # train artifact missing: train and everything after it rerun
+        rm(joinpath(root, "model", "model.jld2"))
+        run_wflow_gnn(ds, ms, ts; resume = true)
+        @test isfile(joinpath(root, "model", "model.jld2"))
+        @test mt("model/model.jld2") > t_model
+    end
+end

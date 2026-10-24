@@ -47,10 +47,13 @@ Relative paths in `[data]` are resolved relative to the directory containing
 the TOML file.
 
 Returns the trained model.
+
+With `resume = true` the stages whose artifacts already exist in the run directory
+are skipped (see [`run_wflow_gnn`](@ref)).
 """
-function run_wflow_gnn_from_toml(toml_path::String)
+function run_wflow_gnn_from_toml(toml_path::String; resume::Bool = false)
     ds, ms, ts = parse_run_config(toml_path)
-    return first(run_wflow_gnn(ds, ms, ts))
+    return first(run_wflow_gnn(ds, ms, ts; resume))
 end
 
 """
@@ -754,9 +757,33 @@ function run_stage(::AnalyzeStage, ctx::StageContext)
     return ctx
 end
 
-function run_stage(all::AllStages, ctx::StageContext)
-    foldl((c, stage) -> run_stage(stage, c), all.stages; init = ctx)
+function run_stage(all::AllStages, ctx::StageContext; resume::Bool = false)
+    stages = all.stages
+    if resume
+        dirs = _run_dirs(ctx.ds)
+        todo = findfirst(s -> !_stage_done(s, dirs), stages)
+        n_skip = todo === nothing ? length(stages) : todo - 1
+        for s in stages[1:n_skip]
+            @info "Resume: stage $(nameof(typeof(s))) already finished in $(dirs.root); skipping"
+        end
+        stages = stages[n_skip + 1:end]
+    end
+    foldl((c, stage) -> run_stage(stage, c), stages; init = ctx)
 end
+
+# Terminal artifacts of each stage, used by `resume = true`. A stage counts as finished
+# when all of them exist; the artifacts are trusted as they are (no check that the
+# settings match). `false` for anything else (e.g. a nested `AllStages`).
+_stage_done(::Stage, dirs) = false
+_stage_done(::PreprocessStage, dirs) =
+    isfile(joinpath(dirs.prep, "preprocessed.jld2")) &&
+    all(f -> isfile(joinpath(dirs.data, f * ".jld2")), ("grid", "train", "val", "test"))
+_stage_done(::TrainStage, dirs) =
+    isfile(joinpath(dirs.model, "model.jld2")) && isfile(joinpath(dirs.model, "train_summary.jld2"))
+_stage_done(::InferStage, dirs) =
+    all(f -> isfile(joinpath(dirs.output, f)),
+        ("train_pred.nc", "train_true.nc", "val_pred.nc", "val_true.nc"))
+_stage_done(::AnalyzeStage, dirs) = isfile(joinpath(dirs.metrics, "metrics.toml"))
 
 """
     run_stage_from_toml(stage, toml_path) -> StageContext
@@ -773,7 +800,7 @@ run_stage_from_toml(name::AbstractString, toml_path::AbstractString) =
     run_stage_from_toml(stage_from_name(name), toml_path)
 
 """
-    run_wflow_gnn(ds, ms, ts) -> model
+    run_wflow_gnn(ds, ms, ts; resume = false) -> (model, metrics)
 
 Execute the full training workflow and save all artefacts.
 
@@ -821,11 +848,24 @@ Returns `(model, metrics)` where `metrics` is a `NamedTuple` with fields:
 - `train_duration_s`            : wall-clock seconds spent in `train_model!`
 - `val_rollout_duration_s`      : wall-clock seconds spent on the val trajectory rollout
 - `val_n_timesteps`             : number of timesteps in the val trajectory
-"""
-function run_wflow_gnn(ds::DataSettings, ms::ModelSettings, ts::TrainSettings)
+# Resuming
+With `resume = true` (default `false`) the leading stages whose terminal artifact is
+already in the run directory are skipped: preprocess → `prep/preprocessed.jld2` +
+`output/data/*.jld2`; train → `model/model.jld2` + `model/train_summary.jld2`; infer →
+`output/{train,val}_{pred,true}.nc`; analyze → `metrics/metrics.toml`. The first stage
+without its artifact and every later one are rerun, from scratch (a train stage is never
+continued from a partial state). Skipped stages are read back from disk. The artifacts
+are trusted: a run directory left by a different configuration is **not** detected."""
+function run_wflow_gnn(ds::DataSettings, ms::ModelSettings, ts::TrainSettings;
+                       resume::Bool = false)
     # preprocess → train → infer → analyze, handing results over in memory.
-    ctx = run_stage(AllStages(), StageContext(ds, ms, ts))
-    tr, inf = ctx.train, ctx.infer
+    ctx = run_stage(AllStages(), StageContext(ds, ms, ts); resume)
+    dirs = _run_dirs(ds)
+
+    # Stages skipped by `resume` leave their result out of `ctx`: read it from disk.
+    tr    = ctx.train === nothing ? load_train_summary(dirs.model) : ctx.train
+    model = ctx.train === nothing ? load_model(_stage_prep(ctx), ms, dirs.model) : ctx.train.model
+    inf   = ctx.infer === nothing ? _read_run_core_metrics(dirs.root) : ctx.infer
 
     metrics = (
         final_train_loss           = last(tr.losses.train_rollout),
@@ -835,5 +875,5 @@ function run_wflow_gnn(ds::DataSettings, ms::ModelSettings, ts::TrainSettings)
         val_rollout_duration_s     = inf.val_rollout_duration_s,
         val_n_timesteps            = inf.val_n_timesteps,
     )
-    return tr.model, metrics
+    return model, metrics
 end

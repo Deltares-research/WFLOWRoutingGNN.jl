@@ -335,11 +335,89 @@ function _aggregate_repetition_rows(rows::Vector)
 end
 
 # ---------------------------------------------------------------------------
+# Resume / failure handling helpers
+# ---------------------------------------------------------------------------
+
+# Core per-run numbers (the `metrics` NamedTuple of `run_wflow_gnn`) recovered from
+# a finished run's `metrics/metrics.toml`. Non-finite values are absent from that
+# file and come back as `NaN` / `0`.
+function _read_run_core_metrics(run_dir::AbstractString)
+    d = TOML.parsefile(joinpath(run_dir, "metrics", "metrics.toml"))
+    r = get(d, "run",  Dict{String,Any}())
+    l = get(d, "loss", Dict{String,Any}())
+    return (
+        final_train_loss       = Float64(get(l, "final_train_rollout", NaN)),
+        final_val_loss         = Float64(get(l, "final_val_rollout",   NaN)),
+        n_params               = Int(get(r, "n_params", 0)),
+        train_duration_s       = Float64(get(r, "train_duration_s",       NaN)),
+        val_rollout_duration_s = Float64(get(r, "val_rollout_duration_s", NaN)),
+        val_n_timesteps        = Int(get(r, "val_n_timesteps", 0)),
+    )
+end
+
+# A cell counts as finished when its terminal artifacts (`metrics/metrics.toml`, written
+# last by the analysis stage, and the gridded `output/<split>_{pred,true}.nc`) exist AND
+# the settings it was produced with equal the settings this search would use now. The
+# latter guards against silently reusing a cell left behind by an earlier, different
+# configuration (stricter than the stage-level `resume` of `run_wflow_gnn`).
+function _hps_run_is_complete(run_dir::AbstractString, ds, ms, ts)
+    dirs = _run_dirs(run_dir)
+    isfile(joinpath(dirs.metrics, "metrics.toml")) || return false
+    all(f -> isfile(joinpath(dirs.output, f)),
+        ("train_pred.nc", "train_true.nc", "val_pred.nc", "val_true.nc")) || return false
+    mdir = dirs.model
+    return mktempdir() do tmp
+        for (name, save!, s) in (("data_settings.toml",  save_data_settings,  ds),
+                                 ("model_settings.toml", save_model_settings, ms),
+                                 ("train_settings.toml", save_train_settings, ts))
+            saved = joinpath(mdir, name)
+            isfile(saved) || return false
+            fresh = joinpath(tmp, name)
+            save!(fresh, s)
+            TOML.parsefile(saved) == TOML.parsefile(fresh) || return false
+        end
+        return true
+    end
+end
+
+# Release the Julia-side and (if present) CUDA-side memory of the finished run so
+# successive runs do not accumulate GPU allocations.
+function _hps_free_memory()
+    GC.gc(true)
+    CUDA.functional() && CUDA.reclaim()
+    return nothing
+end
+
+_hps_oneline(e) = strip(replace(first(split(sprint(showerror, e), '\n')), r"[,\"\r]" => " "))
+
+# (Re)write the results CSV, the failure list and, for replicated searches, the
+# per-combination summaries. Called after every run so partial results survive a
+# crash or kill.
+function _hps_write_outputs(runs_dir::AbstractString, base_name::AbstractString,
+                            rows::Vector, failures::Vector, replicated::Bool)
+    _write_hps_csv(joinpath(runs_dir, base_name * "_hps_results.csv"), rows)
+
+    fail_path = joinpath(runs_dir, base_name * "_hps_failures.csv")
+    if isempty(failures)
+        isfile(fail_path) && rm(fail_path)
+    else
+        _write_hps_csv(fail_path, failures)
+    end
+
+    if replicated && !isempty(rows)
+        summary_rows = _aggregate_repetition_rows(rows)
+        _write_hps_csv(joinpath(runs_dir, base_name * "_hps_summary.csv"), summary_rows)
+        _write_hps_summary_toml(joinpath(runs_dir, base_name * "_hps_summary.toml"), summary_rows)
+    end
+    return nothing
+end
+
+# ---------------------------------------------------------------------------
 # Main search entry point
 # ---------------------------------------------------------------------------
 
 """
-    hpar_search(toml_path) -> Vector
+    hpar_search(toml_path; resume = false) -> Vector
 
 Read a TOML file containing `[data]`, `[model]`, `[train]`, and `[hparsearch]`
 tables, then perform a hyperparameter search by iterating over all parameter
@@ -354,7 +432,21 @@ product combination is evaluated.
 For each combination, `[data].run_name` is suffixed with a zero-padded run
 index so results are written to separate output folders.
 
-Returns a `Vector` of trained models (one per combination).
+Robustness:
+- `resume = true` (CLI: `--resume`; default `false`): a cell whose `metrics/metrics.toml`
+  and `output/<split>_{pred,true}.nc` exist, and whose saved `model/*_settings.toml`
+  equal the settings of this search, is not retrained; its result row is rebuilt from
+  disk. An incomplete (or differently configured) cell is rerun from scratch. Without
+  the flag every cell is run and overwritten.
+- Optional `[hparsearch] continue_on_error = true` (default): a failing run is logged
+  (`@error` with backtrace), listed in `<run_name>_hps_failures.csv` and skipped; the
+  search goes on. `InterruptException` always aborts. `false` stops at the first failure.
+- `<run_name>_hps_results.csv` (and, for replicated searches, the summary CSV / TOML)
+  is rewritten after every run, so partial results survive a crash.
+- After each run the GPU model is dropped and GPU memory reclaimed.
+
+Returns a `Vector` of the models trained in this call (on the CPU; resumed and
+failed runs contribute none).
 
 # Example TOML
 
@@ -367,7 +459,7 @@ search_type = "box"
 "train.lr_start"   = [1e-3, 5e-4]
 ```
 """
-function hpar_search(toml_path::String)
+function hpar_search(toml_path::String; resume::Bool = false)
     isfile(toml_path) || throw(ArgumentError("TOML file not found: $toml_path"))
     toml_dir = dirname(abspath(toml_path))
     d_orig   = TOML.parsefile(toml_path)
@@ -394,6 +486,10 @@ function hpar_search(toml_path::String)
     base_name = d_orig["data"]["run_name"]
     models    = []
     rows      = NamedTuple[]
+    failures  = NamedTuple[]
+
+    continue_on_error = get(hps_d, "continue_on_error", true)
+    continue_on_error isa Bool || throw(ArgumentError("[hparsearch].continue_on_error must be a Bool"))
 
     @info "HParSearch: $(hps.search_type) search, $n_combos combinations, $(length(seed_values)) repetition(s), $n_runs total runs"
 
@@ -420,60 +516,86 @@ function hpar_search(toml_path::String)
                 d_train["seed"] = seed
             end
 
-            ds, ms, ts = settings_from_config(d, toml_dir)
+            try
+                ds, ms, ts = settings_from_config(d, toml_dir)
+                run_dir    = joinpath(ds.runs_dir, ds.run_name)
 
-            model, metrics = run_wflow_gnn(ds, ms, ts)
-            push!(models, model)
-            msc = _read_run_scalar_metrics(joinpath(ds.runs_dir, ds.run_name))
-            push!(rows, (
-                run_name                        = ds.run_name,
-                run_name_base                   = run_base,
-                combo_index                     = combo_idx,
-                seed                            = isnothing(ts.seed) ? -1 : ts.seed,
-                hidden_dim                      = ms.hidden_dim,
-                nlayers                         = ms.nlayers,
-                enforce_mass_balance            = ms.enforce_mass_balance,
-                mb_formulation                  = String(mb_formulation_kind(ms)),
-                batch_size                      = ts.batch_size,
-                epochs                          = ts.epochs,
-                n_params                        = metrics.n_params,
-                max_train_steps                 = maximum(ts.strategy.steps),
-                final_train_loss                = metrics.final_train_loss,
-                final_val_loss                  = metrics.final_val_loss,
-                fixed_val_rmse                  = msc.fixed_val_rmse,
-                peak_ratio_frac_gt2             = msc.peak_ratio_frac_gt2,
-                pooled_kge                      = msc.pooled_kge,
-                river_h_nse                     = msc.river_h_nse,
-                rollout_contraction             = msc.rollout_contraction,
-                mb_residual_rms                 = msc.mb_residual_rms,
-                volume_pbias                    = msc.volume_pbias,
-                volume_drift                    = msc.volume_drift,
-                h_loss_weight_effective         = msc.h_loss_weight_effective,
-                analytic_gain                   = msc.analytic_gain,
-                q_to_h_amp                      = msc.q_to_h_amp,
-                backbone_rho_median             = msc.backbone_rho_median,
-                backbone_rho_max                = msc.backbone_rho_max,
-                train_duration_s                = metrics.train_duration_s,
-                val_rollout_duration_s          = metrics.val_rollout_duration_s,
-                val_rollout_duration_per_step_s = metrics.val_rollout_duration_s /
-                                                 max(1, metrics.val_n_timesteps),
-            ))
+                if resume && _hps_run_is_complete(run_dir, ds, ms, ts)
+                    @info "Run $run_idx / $n_runs already finished with identical settings; " *
+                          "reusing $(ds.run_name)"
+                    metrics = _read_run_core_metrics(run_dir)
+                else
+                    # never let a stale `metrics.toml` make an interrupted rerun look finished
+                    rm(joinpath(run_dir, "metrics", "metrics.toml"); force = true)
+                    model, metrics = run_wflow_gnn(ds, ms, ts)
+                    push!(models, Flux.cpu(model))
+                    model = nothing
+                end
+                push!(rows, _hps_result_row(ds, ms, ts, run_base, combo_idx, metrics))
+            catch e
+                e isa InterruptException && rethrow()
+                continue_on_error || rethrow()
+                run_name = d["data"]["run_name"]
+                @error "HParSearch run $run_idx / $n_runs ($run_name) failed; continuing" exception = (e, catch_backtrace())
+                push!(failures, (run_name = run_name, run_name_base = run_base,
+                                 combo_index = combo_idx,
+                                 seed = isnothing(seed) ? -1 : seed,
+                                 error = _hps_oneline(e)))
+            finally
+                _hps_free_memory()
+            end
+            _hps_write_outputs(runs_dir_resolved, base_name, rows, failures, length(seed_values) > 1)
         end
     end
 
-    csv_path = joinpath(runs_dir_resolved, base_name * "_hps_results.csv")
-    _write_hps_csv(csv_path, rows)
-    @info "HParSearch results written to $csv_path"
-
-    if length(seed_values) > 1
-        summary_rows = _aggregate_repetition_rows(rows)
-        summary_path = joinpath(runs_dir_resolved, base_name * "_hps_summary.csv")
-        _write_hps_csv(summary_path, summary_rows)
-        @info "HParSearch replicate summary written to $summary_path"
-        summary_toml_path = joinpath(runs_dir_resolved, base_name * "_hps_summary.toml")
-        _write_hps_summary_toml(summary_toml_path, summary_rows)
-        @info "HParSearch replicate summary written to $summary_toml_path"
+    results_path  = joinpath(runs_dir_resolved, base_name * "_hps_results.csv")
+    failures_path = joinpath(runs_dir_resolved, base_name * "_hps_failures.csv")
+    if isempty(failures)
+        @info "HParSearch finished: $(length(rows)) / $n_runs runs, results in $results_path"
+    else
+        @warn "HParSearch finished with $(length(failures)) failed run(s) of $n_runs; " *
+              "see $failures_path. Re-run the same command with --resume to retry only " *
+              "the failed runs." failed = [f.run_name for f in failures]
     end
 
     return models
+end
+
+# One results-CSV row from the run's settings, the core metrics and the per-run
+# `metrics.toml` scalars.
+function _hps_result_row(ds, ms, ts, run_base, combo_idx, metrics)
+    msc = _read_run_scalar_metrics(joinpath(ds.runs_dir, ds.run_name))
+    return (
+        run_name                        = ds.run_name,
+        run_name_base                   = run_base,
+        combo_index                     = combo_idx,
+        seed                            = isnothing(ts.seed) ? -1 : ts.seed,
+        hidden_dim                      = ms.hidden_dim,
+        nlayers                         = ms.nlayers,
+        enforce_mass_balance            = ms.enforce_mass_balance,
+        mb_formulation                  = String(mb_formulation_kind(ms)),
+        batch_size                      = ts.batch_size,
+        epochs                          = ts.epochs,
+        n_params                        = metrics.n_params,
+        max_train_steps                 = maximum(ts.strategy.steps),
+        final_train_loss                = metrics.final_train_loss,
+        final_val_loss                  = metrics.final_val_loss,
+        fixed_val_rmse                  = msc.fixed_val_rmse,
+        peak_ratio_frac_gt2             = msc.peak_ratio_frac_gt2,
+        pooled_kge                      = msc.pooled_kge,
+        river_h_nse                     = msc.river_h_nse,
+        rollout_contraction             = msc.rollout_contraction,
+        mb_residual_rms                 = msc.mb_residual_rms,
+        volume_pbias                    = msc.volume_pbias,
+        volume_drift                    = msc.volume_drift,
+        h_loss_weight_effective         = msc.h_loss_weight_effective,
+        analytic_gain                   = msc.analytic_gain,
+        q_to_h_amp                      = msc.q_to_h_amp,
+        backbone_rho_median             = msc.backbone_rho_median,
+        backbone_rho_max                = msc.backbone_rho_max,
+        train_duration_s                = metrics.train_duration_s,
+        val_rollout_duration_s          = metrics.val_rollout_duration_s,
+        val_rollout_duration_per_step_s = metrics.val_rollout_duration_s /
+                                         max(1, metrics.val_n_timesteps),
+    )
 end

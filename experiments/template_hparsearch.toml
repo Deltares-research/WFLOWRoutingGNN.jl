@@ -13,11 +13,17 @@
 # suffixed with a zero-padded index (e.g. "template_hps_run_hps01") and all
 # outputs are written to a separate subfolder under runs_dir.
 #
-# After all runs complete, a summary CSV is written to:
+# After each run, a summary CSV is (re)written to:
 #   <runs_dir>/<run_name>_hps_results.csv
 # If multi-seed repetitions are enabled, aggregate summaries are also written:
 #   <runs_dir>/<run_name>_hps_summary.csv
 #   <runs_dir>/<run_name>_hps_summary.toml
+# Failed runs are listed in <runs_dir>/<run_name>_hps_failures.csv.
+#
+# Resume an interrupted search with `--resume`: finished cells (metrics.toml and
+# output NetCDFs present, identical settings) are skipped and their rows rebuilt from
+# disk; incomplete cells are rerun from scratch.
+#   julia --project=<repo_root> scripts/hparsearch.jl --resume experiments/template_hparsearch.toml
 # ──────────────────────────────────────────────────────────────────────────────
 
 [data]
@@ -152,6 +158,10 @@ subcatch_rank = true
 # Cartesian-product combination of the values in search_space.
 search_type = "box"
 
+# Keep going when a run fails (logged, listed in *_hps_failures.csv). Default true;
+# false aborts the search at the first failure.
+# continue_on_error = true
+
 # Optional run repetition controls (choose exactly one):
 # - repetitions = N  → run each combination N times with seeds 1..N
 # - seeds = [..]     → run each combination once per explicit seed
@@ -192,7 +202,8 @@ search_type = "box"
 # Optional nonlinear encoder-input scaling of a time-varying variable
 # (zscore | log1p_zscore | signed_log_zscore | asinh_zscore). The table is
 # created on demand; only the encoder sees the transform (mass balance unchanged).
-# iver_inwater is the first candidate (heavy-tailed, area-normalised).
+# 
+iver_inwater is the first candidate (heavy-tailed, area-normalised).
 # "model.normalization.river_inwater" = ["zscore", "log1p_zscore", "asinh_zscore"]
 
 # Optional per-node std-floor sweep for MB-invasive hardening.

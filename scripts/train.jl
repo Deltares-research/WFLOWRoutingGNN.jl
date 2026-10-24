@@ -4,17 +4,26 @@
 # Launch a WflowRoutingGNN training run from the command line.
 #
 # Usage:
-#   julia --project=<repo_root> scripts/train.jl <path/to/config.toml>
+#   julia --project=<repo_root> scripts/train.jl [--resume] <path/to/config.toml>
 #
 # Example:
 #   julia --project=. scripts/train.jl experiments/template.toml
+#
+# --resume  skip the leading pipeline stages (preprocess, train, infer, analyze) whose
+#           artifacts already exist in the run directory; the first missing stage and all
+#           later ones are rerun from scratch. Without the flag every stage is run.
 
-if length(ARGS) != 1
-    println(stderr, "Usage: julia --project=<repo_root> scripts/train.jl <config.toml>")
+const USAGE = "Usage: julia --project=<repo_root> scripts/train.jl [--resume] <config.toml>"
+
+resume = "--resume" in ARGS
+args   = filter(!=("--resume"), ARGS)
+
+if length(args) != 1 || startswith(args[1], "--")
+    println(stderr, USAGE)
     exit(1)
 end
 
-toml_path = ARGS[1]
+toml_path = args[1]
 
 if !isfile(toml_path)
     println(stderr, "Error: file not found: $toml_path")
@@ -26,4 +35,4 @@ Pkg.activate(joinpath(@__DIR__, ".."); io = devnull)
 
 using WflowRoutingGNN
 
-run_wflow_gnn_from_toml(toml_path)
+run_wflow_gnn_from_toml(toml_path; resume)

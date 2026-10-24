@@ -1,5 +1,22 @@
 This document serves as a concrete changelog of the code, summarizing briefly the changes of each commit.
 
+## 2026-10-24
+
+- **Resumable `hpar_search` / training runs; robust search loop.** `hpar_search(toml; resume)`,
+        `run_wflow_gnn(ds, ms, ts; resume)` and `run_wflow_gnn_from_toml(path; resume)` take an
+        opt-in `resume` (default `false`); `scripts/hparsearch.jl` and `scripts/train.jl` accept
+        `--resume`. In a search a finished cell (`metrics/metrics.toml` + the four
+        `output/<split>_{pred,true}.nc`, and saved `model/*_settings.toml` equal to the cell's
+        settings) is not retrained; its result row is rebuilt from `metrics.toml`
+        (`_read_run_core_metrics`); incomplete or reconfigured cells rerun from scratch. A single run
+        skips the leading finished stages (`_stage_done`) and reads their results from disk.
+        Search loop: a failing run is logged and listed in `<run_name>_hps_failures.csv` instead of
+        aborting (`[hparsearch] continue_on_error`, default `true`; `InterruptException` always
+        aborts); `*_hps_results.csv` and the replicate summaries are rewritten after every run;
+        the trained model is no longer kept on the GPU (the returned vector holds CPU copies of the
+        models trained in the call) and `GC.gc` + `CUDA.reclaim` run after each run, which
+        removes a per-run GPU-memory accumulation. Tests: `test_hparsearch.jl`, `test_stages.jl`.
+
 ## 2026-10-23
 
 - **Formulation-aware `plot_amplification`; attribution CLI fix.** `plot_amplification`

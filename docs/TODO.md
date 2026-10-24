@@ -723,18 +723,25 @@ simply **rerun from scratch**. Resumability is **off by default** and enabled by
 explicit CLI flag on both the hpar-search and train scripts (so default behaviour and
 existing reproducibility are unchanged).
 
-- [ ] **Define "cell complete".** A run directory counts as done iff its terminal
+- [x] **Define "cell complete".** *(done: `metrics/metrics.toml` + the four
+      `output/{train,val}_{pred,true}.nc`; in `hpar_search` additionally the saved
+      `model/{data,model,train}_settings.toml` must equal the cell's current settings, so a
+      reconfigured cell is rerun — this resolves caveat (a) below for searches. Single runs
+      use per-stage artifact predicates `_stage_done`, trusted as they are.)* A run directory counts as done iff its terminal
       artifact exists and is self-consistent — propose `metrics/metrics.toml` present
       (written last by `analyze_run` when `metrics_toml = true`) **and** the expected
       `output/<split>_{pred,true}.nc` present. A partial/aborted cell (no/stale
       `metrics.toml`) is treated as incomplete and **rerun from scratch** (its dir is
       overwritten), per the scope decision.
-- [ ] **Hpar-search resume.** When the flag is set, before calling `run_wflow_gnn` for
+- [x] **Hpar-search resume.** When the flag is set, before calling `run_wflow_gnn` for
       a cell, check the deterministic run dir (`joinpath(ds.runs_dir, ds.run_name)`): if
       complete, `@info` skip and `continue`; else run it. Keep the deterministic
       combo/seed → folder naming so the check is a pure function of the config (already
       the case).
-- [ ] **Reconstruct the aggregate on resume.** The results CSV must still be produced
+- [x] **Reconstruct the aggregate on resume.** *(done: `_read_run_core_metrics` reads
+      `n_params`, durations, `val_n_timesteps` and the final losses from `metrics.toml`, which
+      already holds them; the results CSV and replicate summaries are also rewritten after
+      every run, so an interrupted search leaves partial results.)* The results CSV must still be produced
       even though skipped cells weren't run this invocation: read each finished cell's
       `metrics/metrics.toml` via the existing `_read_run_scalar_metrics` to rebuild its
       `rows` entry (metrics come from disk; `n_params`/durations that currently come
@@ -742,14 +749,15 @@ existing reproducibility are unchanged).
       `metrics.toml` if not already there, or mark them `NaN`/missing for skipped
       cells). Then `_write_hps_csv` / `_aggregate_repetition_rows` as today over the
       full set.
-- [ ] **Singleton `run_wflow_gnn` / train resume.** Add the same opt-in skip to the
+- [x] **Singleton `run_wflow_gnn` / train resume.** Add the same opt-in skip to the
       four-stage `AllStages` fold so a resumed single run skips stages whose artifacts
       already exist (prep → `prep/` + datasets; train → `model/model.jld2`; infer →
       `output/<split>_{pred,true}.nc`; analyze → `metrics/metrics.toml`). A stage with
       a missing/stale artifact and **all** later stages are (re)run. This also makes the
       existing per-stage `scripts/pipeline.jl` entry points composable for manual resume.
       Still **no** intra-train checkpoint resume — `train` reruns fully when selected.
-- [ ] **CLI flag on both scripts.** Add an opt-in flag (e.g. `--resume`) to
+- [x] **CLI flag on both scripts.** *(done for `scripts/hparsearch.jl` and `scripts/train.jl`;
+      `scripts/pipeline.jl` left as is — its stages are already run one at a time.)* Add an opt-in flag (e.g. `--resume`) to
       [scripts/hparsearch.jl](../scripts/hparsearch.jl) and
       [scripts/train.jl](../scripts/train.jl) (and optionally
       [scripts/pipeline.jl](../scripts/pipeline.jl)). Both scripts currently parse
@@ -764,6 +772,11 @@ existing reproducibility are unchanged).
       `metrics.toml` for a mismatch warning, out of scope for v1). (b) Skipped cells
       contribute their **persisted** metrics to the CSV, so columns sourced only from
       the in-memory return must gain a disk fallback (above).
+- [x] **Search-loop robustness (added with the above).** *(done)* A failing run no longer
+      aborts the search (`[hparsearch] continue_on_error`, default `true`; listed in
+      `<run_name>_hps_failures.csv`), and the per-run GPU model is dropped + `GC.gc` /
+      `CUDA.reclaim` run after each run — the old `models` vector kept every trained model
+      on the GPU, a plausible contributor to the `Out of GPU memory` in `slurm-246431.out`.
 - Touch: `src/hparsearch.jl` (`hpar_search` skip + CSV reconstruction),
   `src/run.jl` (`run_wflow_gnn` / `AllStages` stage-skip + `resume` kwarg),
   `src/pipeline.jl` (artifact-existence predicates, if not reused from the stage
