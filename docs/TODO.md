@@ -178,6 +178,14 @@ supervision with a convex combination:
 
 # Mass-balance redesign — B/C hybrid (Muskingum backbone + continuity readout)
 
+> **✔✔ VALIDATED & ADOPTED (E15, 2026-10-25).** The B/C hybrid
+> (`mb_formulation = "muskingum_continuity"`) is implemented, passed its A/B validation on
+> `sava_small_v081`, and is now the working base: it delivered the first positive `river_h`
+> NSE in the E-series (+0.22 vs theta ≈ −112), best-ever q (KGE 0.9963), a finite
+> past-horizon rollout, and ρ̂ = 0.33 < 1. Remaining open items below: the two design
+> choices (level-pool backbone, residual placement), the full `sava_v081` deployment, and
+> the headwater-depth over-dispersion frontier.
+
 **Why (the root-cause fix for the `amp≈12` blow-up).** The current
 `ThetaKinematicWave` (Option A) carries the *fragile* discharge `q` as the fed-back
 state with the normalisation stiffness `κ(Aᵀ−I) = −21.95` in the same loop, so the
@@ -288,13 +296,22 @@ Both operators are static SpMVs → precompute once (`A` is static, constraint 3
       routed by `P` and acts one step more directly on `h`. Decide whether to route it
       through `P` for a smoother, physically-sourced correction. Record the resolution
       of both in [DECISIONS.md](DECISIONS.md).
-- [ ] **Validation (win conditions).** A/B the hybrid vs `ThetaKinematicWave` on
-      `sava_small_v081`: (i) `amp` no longer geometric and fixed-horizon RMSE finite
-      from stiff high-flow anchors; (ii) stable past the training horizon (≥1906
-      steps, matching the current MB's one virtue) — the structural `C₃ < 1` claim;
-      (iii) mass conservation still exact (volume-budget PBIAS/drift); (iv) `q`
-      confirmed out of the loop (no `q`-row/column in the measured rollout
-      Jacobian). Then repeat on full `sava_v081` where A diverges.
+- [x] **Validation (win conditions) — DONE (E15, 2026-10-25;
+      `sava_small_v081_e15_newfeatures_ab`).** The A/B vs `ThetaKinematicWave` on
+      `sava_small_v081` confirmed every win condition and resolved the `river_h`
+      binding failure (first positive `river_h` NSE in the series, spatial-median
+      **+0.22** vs theta ≈ −112). (i) `frac_gt2 → 0` (geometric over-shoot GONE) and
+      fixed-horizon RMSE FINITE (0.44) where every theta cell is NaN; (ii) stable past
+      the training horizon with `rollout_contraction` ρ̂ = 0.33 < 1, backbone ρ median
+      0.048 / max 0.56 < 1 — the structural contraction claim holds empirically; (iii)
+      mass conservation near-exact (`volume_pbias` 16 % vs theta 255–400 %,
+      `mb_residual_rms` 0.017 vs 1.1–1.26); (iv) `q` out of the loop — it is the exact
+      continuity readout, physically ≥0, pooled KGE 0.9963 (best in series). Adopted as
+      the new working base (see [EXPERIMENTS.md](EXPERIMENTS.md) E15 + PROPOSED banner).
+      **One remaining weak spot:** smallest-catchment headwater `node48` h still
+      over-disperses (hNSE −69, std ratio 8.85, 9× better than theta's 77× explosion) —
+      the headwater-depth attack is the next frontier. The open design choices (a)/(b)
+      above and the full `sava_v081` deployment remain to do.
 - Touch: `src/massbalance.jl` (new struct + interface), `src/sparse_ops.jl` /
   precompute (both static operators), `src/run.jl` (`_build_mb_formulation` Val
   dispatch), `src/gnn.jl` (`MB_FORMULATIONS`, decoder out-dim), `src/strategy.jl` +

@@ -6,65 +6,78 @@ Experiment configs live under `experiments/`. Newest at the top.
 
 # PROPOSED
 
-> **The pushforward follow-up series (E7–E10) is COMPLETE; the feature-scaling test
-> (E11), the first MB-invasive test (E12), the schedule-depth study (E13), the σ-HARDENING
-> re-run (E12b, TODO §1b), and the σ-hardened depth ladder (E13b) are ALL DONE (see
-> COMPLETED).** No sweep is queued; the E-series has exhausted the scaling/schedule/loss
-> levers — the next move is the `river_h` MB reformulation (item 1).
+> **✔✔ THE `river_h` BINDING FAILURE IS RESOLVED (E15, 2026-10-25).** The
+> `muskingum_continuity` B/C-hybrid formulation — carried storage `h` advanced by a
+> contracting reservoir backbone, `q` as an out-of-loop exact continuity readout — delivers
+> the **first positive `river_h` NSE in the entire E-series** (spatial-median +0.22 vs the
+> theta base's ≈ −112) with genuine dynamic range (per-gauge std ratio ~1.2–1.5 vs theta
+> 4–5), the best-ever q (pooled KGE 0.9963), a **finite** past-horizon rollout
+> (`fixed_val_rmse` 0.44 where theta is NaN), `frac_gt2 → 0` (the chronic over-shoot is
+> gone), `volume_pbias` 16 % (vs 255–400 %), and `rollout_contraction` ρ̂ = 0.33 < 1. This
+> closes the item-1/item-2 MB-reformulation work that scaling/floor/schedule knobs
+> (E11–E13b) never could.
 >
-> **Working base (updated after E12b/E13b):** `rollout_grad = pushforward`, `tf_weight = 0`,
-> MSE, q≥0 floor, `mb_theta = 1`, the new distribution/physics-aware feature scaling
-> (log1p skewed statics + area-normalised inwater + `log1p(upstream_area)`), per-node
-> (μ_i,σ_i) normalization for `river_q`/`river_h`/`river_inwater`, **and the σ FLOORS
-> `mb_sigma_h_floor = 2.5` / `mb_sigma_q_floor = 0.002` (≈ each channel's p5) with the
-> re-autotuned LR `lr_start ≈ 2.58e-4`, `grad_clip = 10` (E12b).** Adopt for the `river_q`/
-> KGE gain AND the now-hardened gradient landscape (phase-1 grad_norm back to ~2, overall
-> median ~22 in the E11 band). **NOTE: `river_h` is STILL NOT fixed** — with the 2.0 m
-> clamp bug removed (`_nonnegative_floor`), h now explodes freely (outlet h_max 12–72 m vs
-> truth 2.84) and the headwater stays dead-flat at 0.0; the σ-floor + smooth floor were
-> necessary-but-not-sufficient. `river_h` needs the MB REFORMULATION (item 1 below).
+> **Working base (updated after E15): `mb_formulation = "muskingum_continuity"`,
+> `mb_residual_bound = 0.5`**, on top of `rollout_grad = pushforward`, `tf_weight = 0`, MSE,
+> q≥0 floor, the new distribution/physics-aware feature scaling (log1p skewed statics +
+> area-normalised inwater + `log1p(upstream_area)`), per-node (μ_i,σ_i) normalization,
+> σ floors `mb_sigma_h_floor = 2.5` / `mb_sigma_q_floor = 0.002`, LR `lr_start ≈ 2.58e-4`,
+> `grad_clip = 10`, 8×64/mlp2, `[1,2,4,6,8,10] × 50`. (`mb_theta` is now inert — it applies
+> only to the retired `theta_kinematic_wave` arm.)
 >
-> **✔ RESOLVED (E12b, 2026-09-20): the per-node σ base is HARDENED and the clamp confound
-> is CLEARED (TODO §1b DONE).** The σ_h floor (2.5 ≈ p5) tamed the tiny-σ_h gradient
-> inflation (phase-1 grad_norm 143000 → ~2), the re-autotuned LR/grad_clip suit the new
-> landscape, and the fixed `_nonnegative_floor` removed the spurious 2.0 m cap (outlet
-> 0/222 pinned, vs E12's 105/222).
+> **Queued next:** (A) a **full-length multi-seed confirmation** of the hybrid on small Sava
+> (more seeds, re-autotuned LR on the h-carrying landscape) before it is relied on for
+> headline results; (B) deploy the hybrid on the **full `sava_v081` basin** (supersedes the
+> E14 theta-base plan — rebuild E14 on `muskingum_continuity`); (C) the **headwater-depth
+> attack** (the one remaining weak spot, below).
 >
-> **✔ ANSWERED (E13b, 2026-09-20): the curriculum schedule is NOT a lever for the binding
-> failures.** On the hardened base, deployed free-rollout q is depth-invariant and good
-> (KGE 0.90–0.95); `river_h` is broken at every depth; training to the eval horizon only
-> tautologically bounds the fixed-horizon-30 q over-shoot (`frac_gt2` 1.0→0.70) at the cost
-> of 1-step accuracy and h. **⚠ Residual gap:** σ_h floor 2.5 decontaminated nhz ≤ 21 but
-> the deepest window (nhz 31) still shows phase-1 grad blowup (582–756) and `val_h_1step`
-> still scales with window length — see item 3.
->
-> **Still OWED — the real open work (reordered after E13b):**
-> 1. **`river_h` needs the MB REFORMULATION, not more scaling knobs (E12+E13+E12b+E13b
->    conclusion — now the TOP priority).** Even with the σ base hardened, the fixed smooth
->    floor, a re-tuned LR, AND every schedule depth, `river_h` is still degenerate —
->    downstream h explodes (outlet h_max 12–72 m vs truth 2.84) and the headwater `node48`
->    flatlines at exactly 0.0 (std=0, all seeds; the collapse is upstream of the floor).
->    Root cause is `h` slaved-then-floored from `q` + chronic over-drain. → implement the
->    **B/C-hybrid reformulation** (notes/mass_balance_formulations.md) so `h` is not
->    derived-then-floored from `q`.
-> 2. **The stiff fixed-horizon rollout still diverges for shallow/mid schedules** (E12b
->    `frac_gt2 = 1.0`; E13b hps01/hps02 `frac_gt2 = 1.0`, `fixed_val_rmse` huge). Only the
->    train-to-eval-horizon cell bounds it, tautologically. Same MB-reformulation family as
->    item 1.
-> 3. **Finish the σ-hardening for the deepest window (partial after E13b):** `mb_sigma_h_floor
->    = 2.5` fixed the training grad for nhz ≤ 21 but the deepest window (nhz 31) still blows
->    up in phase 1 (grad 582–756) and the h-channel `val_h_1step` still scales with window
->    length (2.7 → 6800 → 8000) at every depth. If a clean deep-window run is ever needed,
->    raise `mb_sigma_h_floor` and/or make the h-loss renormalisation window-invariant.
-> 4. **Attribute the scaling wins:** E11 bundled `log1p(upstream_area)`; E12 bundled
->    per-node σ **with** the smooth h-floor. An A/B (`mb_smooth_h_floor` on/off, and
->    `include_log_upstream_area` on/off) would isolate the drivers if we care.
-> 5. **Engineering:** gate `peak_stats` on `loss_type == :huber || peak_lambda > 0` (drops
+> **Still OWED — the real open work (reordered after E15):**
+> 1. **Headwater `river_h` over-dispersion is the one remaining weak spot.** The hybrid tamed
+>    the smallest-catchment headwater `node48` h ~9× (std ratio 77 → 8.85) but it still
+>    over-disperses (hNSE −69). Small-catchment storage dynamics (short `K`, flashy response)
+>    are the next frontier — check the `mb_residual_bound` / per-node `K` clamp and the
+>    headwater subcatchment-attribution error ranking.
+> 2. **The nonlinear encoder-input normalization lever is CLOSED (E15 feature 2).**
+>    zscore/log1p/asinh on `river_inwater` were indistinguishable within each formulation
+>    (hybrid river_h_nse 0.2233/0.2235/0.2267; backbone & residual byte-identical). Do not
+>    pursue encoder-input pre-transforms.
+> 3. **Full-length A/B of the R5b inwater fix** (`mb_inwater_unscale` on/off, 300 ep, several
+>    seeds) is still owed before relying on the fixed layer for the theta arm — though the
+>    hybrid supersedes theta, so this is now low priority.
+> 4. **Engineering:** gate `peak_stats` on `loss_type == :huber || peak_lambda > 0` (drops
 >    the E10 `peak_delta = 1000` workaround) if peak-weighting is ever revisited.
+>
+> ---
+>
+> **Superseded working base (E12b/E13b era, kept for provenance):** pushforward + q≥0 floor +
+> `mb_theta = 1` + the feature scaling + per-node σ + σ floors + retuned LR, on the
+> `theta_kinematic_wave` formulation. That base left `river_h` degenerate (downstream h
+> explodes to 12–72 m vs truth 2.84, headwater over-disperses) — the failure the E15 hybrid
+> now fixes. E12b hardened the σ/clamp confound (TODO §1b DONE) and E13b closed the
+> curriculum-schedule lever (depth is orthogonal to the binding failures); both remain valid
+> negative results, now subsumed by the formulation change.
 
 ---
 
 # COMPLETED
+
+> **★ E15 (2026-10-25) — the `muskingum_continuity` B/C-hybrid RESOLVES `river_h`.** A clean
+> 2 (mb_formulation) × 3 (inflow normalization) × 2-seed A/B on the E13b base. **Feature 1
+> (formulation) is a decisive win:** the hybrid (carried storage `h` + contracting reservoir
+> backbone + out-of-loop exact continuity `q` readout + bounded learned residual) gives the
+> first positive `river_h` NSE in the series (spatial-median **+0.22** vs theta ≈ −112) with
+> correct dynamic range (per-gauge std ratio 1.2–1.5 vs theta 4–5, cross-checked on the
+> free-rollout timeseries — real tracking, not collapse), best-ever **pooled q KGE 0.9963**
+> (q now the continuity readout, physically ≥0), **finite** `fixed_val_rmse` 0.44 (theta =
+> NaN), `peak_ratio_frac_gt2 → 0` (over-shoot gone), `volume_pbias` 16 % (vs 255–400 %),
+> `mb_residual_rms` 0.017 (vs 1.1–1.26), and `rollout_contraction` ρ̂ = 0.33 < 1 (backbone ρ
+> median 0.048 / max 0.56). Near-deterministic across seeds (~1e-4). **Feature 2
+> (nonlinear inflow normalization) is INERT** — zscore/log1p/asinh indistinguishable within
+> each arm (closed lever). **One weak spot:** smallest-catchment headwater `node48` h still
+> over-disperses (hNSE −69, ratio 8.85) but 9× better than theta's 77× explosion. **Metric
+> caveat:** the hybrid's higher `final_val_loss` (7.86 vs 0.13) is NOT a regression — it
+> carries `h`, so the normalized composite loss is in different units/channel; judge on the
+> deployed free-rollout skill above. **Adopted as the new working base** (see PROPOSED).
 
 > **Caveat (R5b, 2026-10):** all experiments below predate two fixes: (1) the mass-balance layer
 > used the lateral inflow without the upstream-area factor (now default; `mb_inwater_unscale = false`
@@ -359,6 +372,89 @@ Experiment configs live under `experiments/`. Newest at the top.
 > per-node σ for the q + boundedness win; leave the smooth floor OFF until an A/B credits
 > it; `river_h` is unresolved and now needs the MB REFORMULATION (h not slaved to q; B/C-
 > hybrid, notes/mass_balance_formulations.md), not more scaling/floor knobs.**
+
+## E15 — MB-formulation × inflow-normalization A/B (the `river_h` fix), 6 cells × 2 seeds — `sava_small_v081_e15_newfeatures_ab`
+
+**NAME:** two orthogonal new features crossed in one box search on the E13b known-best base
+(8×64 processor, mlp2, increment h-loss, pushforward, 6-phase `[1,2,4,6,8,10]×50 = 300`,
+per-node σ floors 2.5/0.002, `log_upstream_area`, `lr_start = 2.58e-4`, `grad_clip = 10`).
+**Feature 1** = `model.mb_formulation` ∈ {`theta_kinematic_wave` (legacy q-state kinematic
+wave, the amp≈12 baseline; `mb_theta = 1` applies), `muskingum_continuity` (B/C hybrid:
+carried storage `h`/`S` advanced by a contracting implicit-Euler reservoir backbone
+`P = (I+dt·D−dt·A·D)⁻¹`, spectrum `1/(1+dt/K) < 1`; `q` diagnosed out-of-loop by the exact
+continuity readout `(I−A)⁻¹(I_lat − dS/dt)`, never fed back; decoder freedom = bounded
+source residual `h = h_bb + ρ_max·tanh(Δ)`, `ρ_max = mb_residual_bound = 0.5`)}.
+**Feature 2** = `model.normalization.river_inwater` ∈ {`zscore` (control), `log1p_zscore`,
+`asinh_zscore`} — an ENCODER-INPUT-ONLY nonlinear pre-standardisation (MB/loss/rollout keep
+the affine z-score state, so it is orthogonal to feature 1). GRID: 2×3 = 6 cells × 2 seeds =
+12 runs. Cells: hps01–03 = theta × {zscore, log1p, asinh}; hps04–06 = hybrid × {same}.
+
+**SUMMARY (per cell, 2-seed mean; free-rollout deployed daterange + per-epoch stability):**
+
+| cell | formulation | inflow norm | pooled q KGE | `river_h_nse` (spatial-median) | ρ̂ (`rollout_contraction`) | `fixed_val_rmse` | `frac_gt2` | `volume_pbias` | `mb_residual_rms` |
+|---|---|---|---|---|---|---|---|---|---|
+| hps01 | theta | zscore | 0.750 | −109.2 | 0.650 | **NaN** | 1.0 | 324 % | 1.12 |
+| hps02 | theta | log1p | 0.723 | −115.2 | 0.658 | **NaN** | 1.0 | 398 % | 1.25 |
+| hps03 | theta | asinh | 0.734 | −112.0 | 0.638 | **NaN** | 0.91 | 373 % | 1.22 |
+| hps04 | **hybrid** | zscore | **0.9963** | **+0.223** | **0.328** | **0.436** | **0.0** | **16.2 %** | **0.017** |
+| hps05 | **hybrid** | log1p | **0.9963** | **+0.224** | **0.339** | **0.439** | **0.0** | **16.3 %** | **0.017** |
+| hps06 | **hybrid** | asinh | **0.9963** | **+0.227** | **0.336** | **0.439** | **0.0** | **16.3 %** | **0.017** |
+
+Hybrid backbone (deterministic, all hps04–06 seeds): `backbone_rho_median = 0.048`,
+`backbone_rho_max = 0.559` (< 1 ⇒ unconditional contraction). Theta companions:
+`analytic_gain = 47.1`, `q_to_h_amp ≈ 20–24`.
+
+**Per-gauge `river_h` (free rollout, hps04_s01 hybrid vs hps01_s01 theta; std ratio =
+std(pred)/std(truth), the anti-collapse check):**
+
+| gauge | truth σ | theta: pred σ / ratio / hNSE | hybrid: pred σ / ratio / hNSE |
+|---|---|---|---|
+| node1 (outlet) | 0.535 | 2.81 / 5.26 / −27.9 | **0.807 / 1.51 / +0.51** |
+| node74 | — | — / 4.3 / −26 | **— / ~1.1 / +0.97** |
+| node183 | 0.169 | 0.727 / 4.31 / −26.0 | **0.201 / 1.19 / +0.92** |
+| node48 (headwater) | 0.117 | 9.02 / 76.8 / −5898 | 1.04 / 8.85 / −69.5 |
+
+**Per-gauge `river_q` (hybrid, continuity readout, hps04_s01):** outlet qNSE 0.941 / peak
+ratio 0.74 / min 3.68 (≥0); node74 0.991 / 0.86; node48 0.999 / 0.96. q is the best in the
+series and physically non-negative everywhere.
+
+**FINDINGS:**
+1. **✔✔ `muskingum_continuity` RESOLVES the `river_h` binding failure** — the first positive
+   `river_h` NSE in the entire E-series (spatial-median +0.22 vs theta ≈ −112), with GENUINE
+   dynamic range (per-gauge std ratio 1.2–1.5 vs theta's 4–5 over-dispersion). This is real
+   tracking, not a less-degenerate collapse: positive NSE + std ratio ≈ 1 + finite
+   past-horizon rollout all agree (the three independent checks the E11/E12 collapse-vs-skill
+   gotchas demand). Outlet hNSE +0.51, node74 +0.97, node183 +0.92.
+2. **✔ q (now the out-of-loop continuity readout) is the best ever AND physically ≥0** —
+   pooled KGE 0.9963; per-gauge qNSE 0.94–0.999, peaks 0.74–0.96, min pred ≥ 0. Carrying `h`
+   instead of `q` did not cost q; it improved it.
+3. **✔ the structural stability claim is empirically validated** — ρ̂ = 0.33 < 1 (one-step
+   contraction), backbone ρ median 0.048 / max 0.56 < 1, `fixed_val_rmse` FINITE (0.44) past
+   the training horizon where every theta cell is NaN, and `frac_gt2 → 0` (the chronic
+   downstream over-shoot that plagued E11–E13b is GONE). `volume_pbias` 16 % (vs 255–400 %),
+   `mb_residual_rms` 0.017 (vs 1.1–1.26). Near-deterministic across seeds (std ~1e-4).
+4. **✖ Feature 2 (nonlinear inflow normalization) is INERT — a CLOSED lever.** Within each
+   formulation, zscore/log1p/asinh are indistinguishable: hybrid `river_h_nse`
+   0.2233/0.2235/0.2267, pooled_kge 0.99630/0.99631/0.99630, backbone & residual
+   byte-identical; the theta spread (−109 to −115) is pure seed noise with no scheme trend.
+   The encoder-only inflow pre-transform does nothing here.
+5. **⚠ One remaining weak spot — headwater over-dispersion.** The smallest-catchment
+   headwater `node48` h still over-disperses (hNSE −69, std ratio 8.85) — but 9× better than
+   theta's 77× explosion (and note this gauge no longer flatlines, as it did pre-R5b;
+   it now over-disperses). Small-catchment flashy storage dynamics are the next frontier.
+6. **Metric-disagreement caveat (do NOT misread).** The hybrid's `final_val_loss` 7.86 ≫
+   theta's 0.13 is NOT a regression: the hybrid CARRIES `h`, so the normalized composite
+   val-loss is in different units and dominated by a different channel (q is an indirect
+   readout). Deployed free-rollout skill — KGE 0.996, positive river_h NSE, finite rollout —
+   is the verdict. (Same class as the E13 "pooled_kge good while val_loss NaN" gotcha.)
+
+**RECOMMENDATIONS:** ADOPT `mb_formulation = "muskingum_continuity"` (`mb_residual_bound =
+0.5`) as the new working base — it resolves the top open binding failure (`river_h`,
+PROPOSED item 1/2 of the E12b/E13b era) that scaling/floor/schedule knobs never could, while
+improving q and stability simultaneously. Drop the inflow-normalization lever (feature 2,
+inert). Next: (A) full-length multi-seed confirmation with LR re-autotuned on the h-carrying
+landscape; (B) redeploy on the full `sava_v081` basin (rebuild E14 on the hybrid); (C) the
+headwater-depth attack.
 
 ## E13b — σ-hardened DEPTH ladder (clean re-run of E13, TODO §1b base), 3 cells × 2 seeds — `sava_small_v081_e13b_depth_floored`
 
