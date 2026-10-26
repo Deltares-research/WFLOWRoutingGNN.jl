@@ -56,6 +56,11 @@ Hyperparameters for a `WflowGNN` model.
                    (in `σ_h` units) of the learned residual added to the reservoir
                    backbone, `h_norm = h_backbone + ρ_max·tanh(Δ)` (default `0.5`).
                    See [`MuskingumContinuityHybrid`](@ref).
+- `mb_K_min_dt`, `mb_K_max_dt` : only for `mb_formulation = "muskingum_continuity"`: bounds,
+                   in multiples of the timestep, of the per-node reservoir constant
+                   `K = μ_h/μ_q` (defaults `0.05` / `100`). Raising `mb_K_min_dt` lets the
+                   backbone hold a peak `h` in flashy small-`K` cells (floor contraction
+                   `1/(1 + 1/mb_K_min_dt)`). Require `0 < mb_K_min_dt < mb_K_max_dt`.
 - `mb_theta`        : implicitness weight `θ ∈ [0, 1]` of the mass-balance time
                    discretisation (default `1.0` = fully implicit / backward
                    Euler). `0.5` = Crank–Nicolson, `0.0` = fully explicit.
@@ -124,6 +129,8 @@ Base.@kwdef struct ModelSettings
     mb_sigma_inwater_floor :: Float32 = 0.0f0
     mb_inwater_unscale   :: Bool = true
     mb_residual_bound    :: Float32 = 0.5f0
+    mb_K_min_dt          :: Float32 = MCH_K_MIN_DT
+    mb_K_max_dt          :: Float32 = MCH_K_MAX_DT
     normalization        :: Dict{String,String} = Dict{String,String}()
 end
 
@@ -170,6 +177,8 @@ function Base.show(io::IO, s::ModelSettings)
     println(io, "  mb_sigma_q_floor : ", s.mb_sigma_q_floor)
     println(io, "  mb_sigma_inwater_floor : ", s.mb_sigma_inwater_floor)
     println(io, "  mb_residual_bound : ", s.mb_residual_bound)
+    println(io, "  mb_K_min_dt     : ", s.mb_K_min_dt)
+    println(io, "  mb_K_max_dt     : ", s.mb_K_max_dt)
     isempty(s.normalization) ||
         print(io, "\n  normalization   : ", join(("$k=$v" for (k, v) in sort(collect(s.normalization))), ", "))
     print(  io, "  mb_inwater_unscale : ", s.mb_inwater_unscale)
@@ -201,6 +210,8 @@ function save_model_settings(path::String, s::ModelSettings)
         "mb_sigma_inwater_floor" => Float32(s.mb_sigma_inwater_floor),
         "mb_inwater_unscale" => s.mb_inwater_unscale,
         "mb_residual_bound" => Float32(s.mb_residual_bound),
+        "mb_K_min_dt" => Float32(s.mb_K_min_dt),
+        "mb_K_max_dt" => Float32(s.mb_K_max_dt),
     )
     isempty(s.normalization) || (dict["normalization"] = Dict{String,Any}(s.normalization))
     open(path, "w") do io
@@ -238,6 +249,8 @@ function load_model_settings(path::String)
         mb_sigma_inwater_floor = Float32(get(d, "mb_sigma_inwater_floor", 0.0)),
         mb_inwater_unscale = get(d, "mb_inwater_unscale", false),
         mb_residual_bound = Float32(get(d, "mb_residual_bound", 0.5)),
+        mb_K_min_dt = Float32(get(d, "mb_K_min_dt", MCH_K_MIN_DT)),
+        mb_K_max_dt = Float32(get(d, "mb_K_max_dt", MCH_K_MAX_DT)),
         normalization = _normalization_dict(get(d, "normalization", Dict{String,Any}()), d["domain"]),
     )
 end
@@ -613,6 +626,22 @@ function (m::WflowGNN)(g::GNNGraph,
                        forcing      ::AbstractMatrix,
                        static       ::AbstractMatrix,
                        forcing_next ::AbstractMatrix = forcing)
+    Δ = decoder_delta(m, g, state, forcing, static)
+    return apply_formulation(m.mass_balance, g, state, forcing, forcing_next, Δ)
+end
+
+"""
+    decoder_delta(m::WflowGNN, g, state, forcing, static) -> Δ
+
+Encoder → processor → decoder part of the forward pass: the raw decoder output `Δ` that
+`apply_formulation` turns into the next state. Split out so diagnostics can read `Δ`
+(e.g. [`rollout_residual_saturation`](@ref)) without a second pass through the network;
+the forward pass itself is unchanged.
+"""
+function decoder_delta(m::WflowGNN, g::GNNGraph,
+                       state   ::AbstractMatrix,
+                       forcing ::AbstractMatrix,
+                       static  ::AbstractMatrix)
     # `static` holds per-node constants for a single graph (N columns). For a
     # batched graph the dynamic inputs span B·N columns, so tile the static
     # block B times to match. The batched node ordering is block-wise
@@ -629,8 +658,7 @@ function (m::WflowGNN)(g::GNNGraph,
     # Physics-derived, known-at-t features appended to the decoder input
     # (`()` for formulations without any, or when augmentation is off).
     extras = m.augment_mb ? extra_decoder_features(f, g, state, forcing) : ()
-    Δ = m.decoder(_decoder_input(h, extras))
-    return apply_formulation(f, g, state, forcing, forcing_next, Δ)
+    return m.decoder(_decoder_input(h, extras))
 end
 
 _decoder_input(h, ::Tuple{}) = h

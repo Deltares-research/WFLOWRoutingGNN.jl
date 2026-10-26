@@ -349,23 +349,23 @@ targeted lever for exactly those cells, but it is not sweepable while the bound 
 `const` — so it can't be A/B-tested or autotuned. Exposing both bounds makes the
 `K_min_dt × residual_bound` 2×2 (see §3j / the peak-`h` discussion) a plain box search.
 
-- [ ] Add `mb_K_min_dt` / `mb_K_max_dt` to `ModelSettings`
+- [x] Add `mb_K_min_dt` / `mb_K_max_dt` to `ModelSettings`
       ([src/gnn.jl](../src/gnn.jl)), parsed from `[model]`, defaulting to the current
       `0.05` / `100` so existing configs and checkpoints are byte-unchanged. Validate
       `0 < K_min_dt < K_max_dt` at load (`ArgumentError` otherwise), mirroring the
       existing `mb_residual_bound` validation.
-- [ ] Thread both into `build_muskingum_continuity(...; K_min_dt, K_max_dt)` and replace
+- [x] Thread both into `build_muskingum_continuity(...; K_min_dt, K_max_dt)` and replace
       the `MCH_K_MIN_DT`/`MCH_K_MAX_DT` references in the `clamp!` + the `n_clipped`
       count; keep the two `const`s only as the default values. Log the active bounds in
       the existing `@info` line (median `K/dt`, contraction, fallback/clamp counts).
-- [ ] Serialize the two fields in `save_model_settings` and round-trip them in
+- [x] Serialize the two fields in `save_model_settings` and round-trip them in
       `load_model_settings` (default a missing key to the `const`, so pre-E19 checkpoints
       load unchanged).
-- [ ] Make them hpar-searchable: add `model.mb_K_min_dt` (and optionally `mb_K_max_dt`)
+- [x] Make them hpar-searchable: add `model.mb_K_min_dt` (and optionally `mb_K_max_dt`)
       to [experiments/template_hparsearch.toml](../experiments/template_hparsearch.toml)
       as a commented example; confirm a search cell sets them via `_set!`
       ([src/hparsearch.jl](../src/hparsearch.jl)).
-- [ ] Tests: `test/test_mb_hybrid.jl` — a custom `(K_min_dt, K_max_dt)` changes the
+- [x] Tests: `test/test_mb_hybrid.jl` — a custom `(K_min_dt, K_max_dt)` changes the
       per-node `contraction`/`K` as expected, the clamp count is correct, the
       invalid-bounds error fires, and the settings round-trip. Docs: docstring +
       [PROJECT.md](PROJECT.md) config table.
@@ -388,22 +388,22 @@ Right now nothing records the saturation rate, so we can't tell which wall is bi
 it **separately at the positive (+1) and negative (−1) ends** — asymmetry is informative
 (peaks need the +cap to build up; recessions/over-dispersion may ride the −cap).
 
-- [ ] In the post-hoc diagnostics path for the hybrid (`layer_mb_analysis` /
+- [x] In the post-hoc diagnostics path for the hybrid (`layer_mb_analysis` /
       `_rollout_mb_diagnostics`, dispatched on `MuskingumContinuityHybrid`), compute per
       step/per node `t = tanh(Δ)` and the two saturation fractions
       `frac_resid_cap_pos = mean(t > +τ)` and `frac_resid_cap_neg = mean(t < −τ)` for a
       near-cap threshold `τ` (e.g. 0.99), plus the mean/max `|t|`. Keep it
       `Flux.ignore_derivatives` / forward-only (diagnostic, must not touch the gradient).
-- [ ] Emit to `metrics.toml` under a `[mass_balance_residual]` (or a new
+- [x] Emit to `metrics.toml` under a `[mass_balance_residual]` (or a new
       `[residual_saturation]`) table: `frac_cap_pos`, `frac_cap_neg`, `abs_mean`,
       `abs_max` — pooled and, if cheap, a per-node CSV
       (`metrics/residual_saturation_by_node.csv`) so the small-`K` headwater subset can be
       cross-tabulated against `mb_backbone_contraction_by_node.csv` (the K-pinned cells).
-- [ ] Surface the pooled pair in the hpar-search results CSV
+- [x] Surface the pooled pair in the hpar-search results CSV
       ([src/hparsearch.jl](../src/hparsearch.jl) `_hps_result_row`) so a `K_min_dt ×
       residual_bound` sweep shows, per cell, whether raising the floor *reduced*
       saturation (the mechanism check), not just whether the metric moved.
-- [ ] Tests: `test/test_mb_hybrid.jl` — a forced near-±1 `Δ` yields the expected
+- [x] Tests: `test/test_mb_hybrid.jl` — a forced near-±1 `Δ` yields the expected
       `frac_cap_pos`/`frac_cap_neg`; an interior `Δ` yields ~0; the diagnostic is
       gradient-free (no effect on a training step). Docs: docstring + a line in
       [PROJECT.md](PROJECT.md) / the metrics reference.

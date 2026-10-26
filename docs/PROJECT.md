@@ -47,7 +47,13 @@ lives in [DECISIONS.md](DECISIONS.md) and the research notes under `docs/notes/`
   formulations are a `MassBalanceFormulation` dispatch hierarchy
   (`ThetaKinematicWave`, or `NoMassBalance` for models trained without a layer),
   so new formulations toggle via a single `mb_formulation` config key rather than
-  `if/else` branches.
+  `if/else` branches. The `muskingum_continuity` hybrid is tuned through `[model]`
+  `mb_residual_bound` (cap of the learned residual, `σ_h` units) and
+  `mb_K_min_dt` / `mb_K_max_dt` (clamp of the per-node reservoir constant
+  `K = μ_h/μ_q`, in multiples of `dt`; defaults `0.05` / `100`, require
+  `0 < mb_K_min_dt < mb_K_max_dt`). Raising `mb_K_min_dt` lifts the backbone contraction floor
+  `1/(1 + 1/mb_K_min_dt)` for flashy small-`K` cells. All three are sweepable in an hpar search
+  (`model.mb_K_min_dt`, ...).
 - **Normalisation.** Per-variable z-score plus a physical postscale
   (`river_q` area-normalised to specific discharge; `river_h` scaled by `w·l/A`),
   with statistics fit on the training split only. The MB layer evaluates physics
@@ -89,6 +95,7 @@ Train stage (`pipeline.jl`):
 - `losses.png` — training vs validation loss curves (1-step and rollout, with grad-norm / LR / curriculum-step overlays).
 - `amplification.png` — per-epoch stability diagnostic (mass-balance runs only), formulation-aware: for `theta_kinematic_wave` the `q→h` error amplification factor (train/val) with the analytic gain `θ·dt·σq/σh`; for `muskingum_continuity` (no readout to amplify) the median backbone contraction (columns `backbone_rho_median`), not labelled a gain. Both draw the measured validation carried-state gain `ρ̂` (`val_contraction`).
 - `metrics/metrics.toml` stability tables (written by the analyze stage): `[formulation]` (`kind`, `carried_state` / `readout`, effective `h_loss_weight`) and `[stability]` with the formulation-agnostic headline `rollout_contraction` ρ̂ (one-step gain of the carried state; `< 1` contractive, `rollout_contraction_margin = 1 − ρ̂`) plus per-formulation companions that exist only for their arm (theta: `analytic_gain`, `q_to_h_amp`; hybrid: `backbone_rho_median`, `backbone_rho_max`). Formulation-independent conservation is `[mass_balance_residual]` `volume_pbias` / `volume_drift`.
+- Hybrid residual saturation (analyze stage): `[residual_saturation]` in `metrics.toml` (`frac_cap_pos` / `frac_cap_neg` = share of validation node-steps with `tanh(Δ)` beyond `±τ`, τ = 0.99; `abs_mean`, `abs_max`) and `metrics/residual_saturation_by_node.csv` (per node, with `K_s` and `contraction`). A high saturation means the cap `mb_residual_bound`, not the `K` floor `mb_K_min_dt`, limits the correction; the hpar results CSV carries the pooled pair as `resid_frac_cap_pos` / `resid_frac_cap_neg`.
 - `fixed_horizon.png` — per-epoch fixed-horizon validation discharge RMSE and peak ratio (overall and high-flow), a stable rollout-skill signal across epochs.
 
 Analyze stage (`analysis.jl`):

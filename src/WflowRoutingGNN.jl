@@ -23,7 +23,7 @@ include("massbalance.jl")
 export MassBalanceFormulation, NoMassBalance, ThetaKinematicWave, MassBalanceLayer,
        build_massbalance, mb_diagnostics,
        MuskingumContinuityHybrid, build_muskingum_continuity, backbone_contraction,
-       encoder_state
+       residual_saturation, RESIDUAL_CAP_TAU, encoder_state
 
 include("gnn.jl")
 export WflowGNN, ModelSettings, save_model_settings, load_model_settings, ACTIVATIONS,
@@ -66,7 +66,7 @@ export plot_losses, plot_validation_movie, plot_timeseries, plot_downstream_time
 
 include("rollout.jl")
 export rollout, evaluate_trajectory, rollout_mb_diagnostics, rollout_ensemble,
-    FixedHorizonEval, build_fixed_horizon_eval, fixed_horizon_metrics,
+    rollout_residual_saturation, FixedHorizonEval, build_fixed_horizon_eval, fixed_horizon_metrics,
     volume_budget_diagnostics
 
 include("postprocess.jl")

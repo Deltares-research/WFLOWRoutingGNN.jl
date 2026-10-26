@@ -111,6 +111,8 @@ function settings_from_config(d::AbstractDict, toml_dir::AbstractString)
         mb_sigma_inwater_floor = Float32(get(md, "mb_sigma_inwater_floor", 0.0)),
         mb_inwater_unscale = get(md, "mb_inwater_unscale", true),
         mb_residual_bound = Float32(get(md, "mb_residual_bound", 0.5)),
+        mb_K_min_dt = Float32(get(md, "mb_K_min_dt", MCH_K_MIN_DT)),
+        mb_K_max_dt = Float32(get(md, "mb_K_max_dt", MCH_K_MAX_DT)),
         normalization = _normalization_dict(get(md, "normalization", Dict{String,Any}()), md["domain"]),
     )
 
@@ -272,6 +274,8 @@ _build_mb_formulation(::Val{:muskingum_continuity}, ms, norm_stats, postscale,
                       src_edges, tgt_edges, dt) =
     build_muskingum_continuity(norm_stats, postscale, src_edges, tgt_edges, dt;
                                residual_bound = ms.mb_residual_bound,
+                               K_min_dt = ms.mb_K_min_dt,
+                               K_max_dt = ms.mb_K_max_dt,
                                smooth_h_floor = ms.mb_smooth_h_floor,
                                h_floor_softness = ms.mb_h_floor_softness,
                                unscale_inwater = ms.mb_inwater_unscale)
@@ -409,6 +413,11 @@ Formulation-aware tables (`run_meta.mb_kind` selects the arm):
   `rollout_contraction_margin = 1 − ρ̂`, plus per-arm companions: `analytic_gain` /
   `q_to_h_amp` (θ only), `backbone_rho_median` / `backbone_rho_max` (hybrid only).
   Companions are absent, not `NaN`, for the other arms.
+- `[residual_saturation]` (hybrid only): how often the bounded source residual sits at its
+  cap on the validation rollout (see [`residual_saturation`](@ref)): `tau`, `n_valid`,
+  `frac_cap_pos` / `frac_cap_neg` (share of node-steps with `tanh(Δ)` above `+tau` /
+  below `-tau`), `abs_mean` / `abs_max` of `|tanh(Δ)|`. Per-node values are in
+  `residual_saturation_by_node.csv`.
 """
 function write_run_metrics_toml(path::AbstractString, losses, ts::TrainSettings,
                                 run_meta, spatial_summary, ramp,
@@ -481,6 +490,18 @@ function write_run_metrics_toml(path::AbstractString, losses, ts::TrainSettings,
         putf!(rho_t, "backbone_rho_max",    get(run_meta, :backbone_rho_max, nothing))
     end
     isempty(rho_t) || (root["stability"] = rho_t)
+
+    rs = get(run_meta, :residual_saturation, nothing)
+    if is_hybrid && rs !== nothing
+        rs_t = Dict{String, Any}()
+        putf!(rs_t, "tau",          rs.tau)
+        putf!(rs_t, "n_valid",      rs.n_valid)
+        putf!(rs_t, "frac_cap_pos", rs.frac_cap_pos)
+        putf!(rs_t, "frac_cap_neg", rs.frac_cap_neg)
+        putf!(rs_t, "abs_mean",     rs.abs_mean)
+        putf!(rs_t, "abs_max",      rs.abs_max)
+        isempty(rs_t) || (root["residual_saturation"] = rs_t)
+    end
 
     if mb_kind !== nothing
         roles = get(MB_STATE_ROLES, mb_kind, MB_STATE_ROLES[:none])

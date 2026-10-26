@@ -73,6 +73,10 @@ enforce_mass_balance = true
 # mb_residual_bound bounds the learned residual of "muskingum_continuity".
 mb_formulation = "theta_kinematic_wave"
 mb_residual_bound = 0.5
+# Bounds of the reservoir constant K = mu_h/mu_q of "muskingum_continuity", in
+# multiples of dt (0 < mb_K_min_dt < mb_K_max_dt; defaults 0.05 / 100).
+mb_K_min_dt = 0.05
+mb_K_max_dt = 100.0
 # Implicitness weight θ ∈ [0, 1] of the mass-balance time discretisation.
 # θ=1 fully implicit (default), θ=0.5 Crank–Nicolson, θ=0 fully explicit.
 # Lowering θ damps rollout h-overshoots (scales ∂h_norm/∂q_norm by θ).
@@ -189,6 +193,11 @@ search_type = "box"
 # A/B of the mass-balance formulation: the legacy q-state kinematic wave versus
 # the reservoir-backbone + continuity-readout hybrid (mb_theta only affects the former).
 "model.mb_formulation" = ["theta_kinematic_wave", "muskingum_continuity"]
+# Optional (muskingum_continuity only): floor / ceiling of the reservoir constant
+# K = mu_h/mu_q in multiples of dt (defaults 0.05 / 100). Raising the floor lets the
+# backbone hold a peak h in flashy small-K cells (floor contraction 1/(1 + 1/K_min_dt)).
+# "model.mb_K_min_dt" = [0.05, 0.2, 0.5]
+# "model.mb_K_max_dt" = [20.0, 100.0]
 # Physics-augmented decoder inputs (upstream-Q sum + explicit depth estimate).
 "model.mb_augment_decoder" = [false, true]
 
@@ -202,8 +211,7 @@ search_type = "box"
 # Optional nonlinear encoder-input scaling of a time-varying variable
 # (zscore | log1p_zscore | signed_log_zscore | asinh_zscore). The table is
 # created on demand; only the encoder sees the transform (mass balance unchanged).
-# 
-iver_inwater is the first candidate (heavy-tailed, area-normalised).
+# river_inwater is the first candidate (heavy-tailed, area-normalised).
 # "model.normalization.river_inwater" = ["zscore", "log1p_zscore", "asinh_zscore"]
 
 # Optional per-node std-floor sweep for MB-invasive hardening.

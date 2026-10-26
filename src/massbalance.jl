@@ -738,7 +738,8 @@ end
 Flux.gpu(l::MuskingumContinuityHybrid) = _mch_move(l, Flux.gpu, _to_cusparse)
 Flux.cpu(l::MuskingumContinuityHybrid) = _mch_move(l, Flux.cpu, _to_cpu_sparse)
 
-# Bounds of the reservoir constant, as multiples of the timestep.
+# Bounds of the reservoir constant, as multiples of the timestep (defaults of
+# `mb_K_min_dt` / `mb_K_max_dt`).
 const MCH_K_MIN_DT = 0.05f0
 const MCH_K_MAX_DT = 100f0
 
@@ -808,14 +809,16 @@ end
 """
     build_muskingum_continuity(norm_stats, postscale, src_edges, tgt_edges, dt;
                                residual_bound, smooth_h_floor, h_floor_softness,
-                               unscale_inwater = true) -> MuskingumContinuityHybrid
+                               unscale_inwater = true, K_min_dt = $(MCH_K_MIN_DT),
+                               K_max_dt = $(MCH_K_MAX_DT)) -> MuskingumContinuityHybrid
 
 Factory for [`MuskingumContinuityHybrid`](@ref); statistics, inverse scalers and `dt`
 as in [`build_massbalance`](@ref). The reservoir constant is `K_i = μ_h/μ_q` (mean
 scaled storage over mean scaled discharge, in seconds), clamped to
-`[$(MCH_K_MIN_DT), $(MCH_K_MAX_DT)]·dt`; nodes without a positive finite ratio fall back
-to `K = dt`. Aborts (`ArgumentError`) on a non-finite or negative `residual_bound` or a
-cyclic routing graph. The batched operators are left unset; call
+`[K_min_dt, K_max_dt]·dt` (defaults `[$(MCH_K_MIN_DT), $(MCH_K_MAX_DT)]`); nodes without a
+positive finite ratio fall back to `K = dt`. Aborts (`ArgumentError`) on a non-finite or
+negative `residual_bound`, bounds violating `0 < K_min_dt < K_max_dt` or a cyclic routing
+graph. The batched operators are left unset; call
 [`precompute_batched`](@ref).
 """
 function build_muskingum_continuity(norm_stats, postscale,
@@ -825,9 +828,15 @@ function build_muskingum_continuity(norm_stats, postscale,
                                     residual_bound::Real,
                                     smooth_h_floor::Bool,
                                     h_floor_softness::Real,
-                                    unscale_inwater::Bool = true)
+                                    unscale_inwater::Bool = true,
+                                    K_min_dt::Real = MCH_K_MIN_DT,
+                                    K_max_dt::Real = MCH_K_MAX_DT)
     isfinite(residual_bound) && residual_bound >= 0 ||
         throw(ArgumentError("mb_residual_bound must be finite and ≥ 0, got $residual_bound"))
+    isfinite(K_min_dt) && isfinite(K_max_dt) && 0 < K_min_dt < K_max_dt ||
+        throw(ArgumentError("mb_K_min_dt and mb_K_max_dt must satisfy 0 < mb_K_min_dt < mb_K_max_dt, " *
+                            "got $K_min_dt and $K_max_dt"))
+    kmin, kmax = Float32(K_min_dt), Float32(K_max_dt)
     pq_vec  = postscale["river_q"]
     ph_vec  = postscale["river_h"]
     n_nodes = length(pq_vec)
@@ -851,8 +860,8 @@ function build_muskingum_continuity(norm_stats, postscale,
     K = μ_h ./ μ_q
     n_fallback = count(k -> !(isfinite(k) && k > 0f0), K)
     K[.!(isfinite.(K) .& (K .> 0f0))] .= dtf
-    n_clipped = count(k -> k < MCH_K_MIN_DT * dtf || k > MCH_K_MAX_DT * dtf, K)
-    clamp!(K, MCH_K_MIN_DT * dtf, MCH_K_MAX_DT * dtf)
+    n_clipped = count(k -> k < kmin * dtf || k > kmax * dtf, K)
+    clamp!(K, kmin * dtf, kmax * dtf)
     λ = dtf ./ K
     contraction = 1f0 ./ (1f0 .+ λ)
     all(c -> 0f0 < c < 1f0, contraction) ||
@@ -861,7 +870,7 @@ function build_muskingum_continuity(norm_stats, postscale,
     P = _tree_inverse_operator(src_edges, tgt_edges, n_nodes, λ, 1f0 .+ λ)
     R = _tree_inverse_operator(src_edges, tgt_edges, n_nodes,
                                ones(Float32, n_nodes), ones(Float32, n_nodes))
-    @info "Muskingum-continuity hybrid: median K/dt = $(round(median(K) / dtf; sigdigits = 3)), " *
+    @info "Muskingum-continuity hybrid: K/dt clamp [$kmin, $kmax], median K/dt = $(round(median(K) / dtf; sigdigits = 3)), " *
           "backbone contraction (spectral radius) = $(round(maximum(contraction); sigdigits = 4)); " *
           "$n_fallback node(s) K→dt fallback, $n_clipped clamped; nnz(P) = $(nnz(P))"
     return MuskingumContinuityHybrid(
@@ -961,6 +970,57 @@ end
 
 # Diagonal (= spectrum) of the backbone operator, per node: `1/(1 + dt/K_i)`.
 backbone_contraction(f::MuskingumContinuityHybrid) = Array(f.contraction)
+
+"""
+    RESIDUAL_CAP_TAU
+
+Default saturation threshold of [`residual_saturation`](@ref): a residual step counts as
+"at the cap" when `|tanh(Δ)| > τ`, i.e. the bounded residual `residual_bound · tanh(Δ)`
+uses more than 99 % of its allowed range (where the gradient of `tanh` is below 2 %).
+"""
+const RESIDUAL_CAP_TAU = 0.99f0
+
+"""
+    residual_saturation(t; τ = RESIDUAL_CAP_TAU) -> NamedTuple
+
+Saturation of the hybrid's bounded source residual, from `t = tanh.(Δ)` of every
+validation step, an `(n_nodes, T)` matrix (so `residual_bound · t` is the residual in
+normalised depth). Only finite entries count. Returns
+
+- `tau`, `n_valid` (finite samples),
+- pooled `frac_cap_pos` (`t > τ`), `frac_cap_neg` (`t < -τ`), `abs_mean`, `abs_max`
+  (`NaN` when there is no finite sample),
+- `node`: per-node `frac_cap_pos`, `frac_cap_neg`, `abs_mean`, `abs_max`, `n_valid`.
+
+A large `frac_cap_*` says the cap, not the learned dynamics, limits the correction: raise
+`mb_residual_bound`, or — if the backbone floor (`mb_K_min_dt`) is what forces the residual
+to the cap — relax that instead. Diagnostic only; nothing here enters the forward pass.
+"""
+function residual_saturation(t::AbstractMatrix{<:Real}; τ::Real = RESIDUAL_CAP_TAU)
+    n = size(t, 1)
+    npos  = zeros(Int, n);  nneg = zeros(Int, n);  nval = zeros(Int, n)
+    asum  = zeros(Float64, n);  amax = fill(NaN32, n)
+    for j in axes(t, 2), i in 1:n
+        v = t[i, j]
+        isfinite(v) || continue
+        nval[i] += 1
+        v >  τ && (npos[i] += 1)
+        v < -τ && (nneg[i] += 1)
+        a = abs(v)
+        asum[i] += a
+        amax[i] = isnan(amax[i]) ? Float32(a) : max(amax[i], Float32(a))
+    end
+    tot = sum(nval)
+    frac(c, d) = d == 0 ? NaN32 : Float32(c / d)
+    node = (frac_cap_pos = frac.(npos, nval), frac_cap_neg = frac.(nneg, nval),
+            abs_mean = Float32[nval[i] == 0 ? NaN32 : Float32(asum[i] / nval[i]) for i in 1:n],
+            abs_max = amax, n_valid = nval)
+    return (; tau = Float32(τ), n_valid = tot,
+            frac_cap_pos = frac(sum(npos), tot), frac_cap_neg = frac(sum(nneg), tot),
+            abs_mean = tot == 0 ? NaN32 : Float32(sum(asum) / tot),
+            abs_max = tot == 0 ? NaN32 : maximum(filter(!isnan, amax)),
+            node)
+end
 
 """
     carried_state_rows(f, n_state) -> UnitRange{Int}

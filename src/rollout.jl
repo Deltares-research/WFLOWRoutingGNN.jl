@@ -556,6 +556,42 @@ _rollout_mb_diagnostics(::NoMassBalance, model, split, static) = nothing
 # the layer-free residual diagnostic still applies).
 _rollout_mb_diagnostics(::MuskingumContinuityHybrid, model, split, static) = nothing
 
+"""
+    rollout_residual_saturation(model, split, static; τ = RESIDUAL_CAP_TAU)
+        -> Union{Nothing, NamedTuple}
+
+Autoregressive rollout over `split` (same flattening and initial condition as
+[`rollout_mb_diagnostics`](@ref)) recording `tanh(Δ)` of the
+[`MuskingumContinuityHybrid`](@ref) residual at every step and node, summarised by
+[`residual_saturation`](@ref). Uses the unchanged forward path (the decoder output is read
+via `decoder_delta` and passed on to the formulation) and is gradient-free. Returns
+`nothing` for every other formulation.
+"""
+function rollout_residual_saturation(model::WflowGNN, split, static::AbstractMatrix{Float32};
+                                     τ::Real = RESIDUAL_CAP_TAU)
+    return _rollout_residual_saturation(model.mass_balance, model, split, static, τ)
+end
+
+_rollout_residual_saturation(::MassBalanceFormulation, model, split, static, τ) = nothing
+
+function _rollout_residual_saturation(mb::MuskingumContinuityHybrid, model, split, static, τ)
+    graphs = vcat(split[1], [w[end] for w in split[2:end]])
+    T      = length(graphs) - 1
+    T >= 1 || throw(ArgumentError("split must contain at least 2 unique timesteps"))
+
+    g0    = graphs[1]
+    t     = Matrix{Float32}(undef, g0.num_nodes, T)
+    state = g0.ndata.state
+    for k in 1:T
+        forcing_t    = graphs[k].ndata.forcing
+        forcing_next = graphs[k + 1].ndata.forcing
+        Δ = decoder_delta(model, g0, state, forcing_t, static)
+        t[:, k] = vec(tanh.(Δ))
+        state = apply_formulation(mb, g0, state, forcing_t, forcing_next, Δ)
+    end
+    return residual_saturation(t; τ)
+end
+
 function _rollout_mb_diagnostics(mb::ThetaKinematicWave, model, split, static)
 
     # Flatten windows to a consecutive timeseries (same logic as evaluate_trajectory)

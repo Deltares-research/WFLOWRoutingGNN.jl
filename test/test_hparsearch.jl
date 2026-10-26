@@ -136,7 +136,7 @@ end
 
 @testset "hparsearch: stability headline and per-formulation companions" begin
     mktempdir() do tmp
-        function mk_run(name; kind, stab)
+        function mk_run(name; kind, stab, rsat = nothing)
             mkpath(joinpath(tmp, name, "metrics"))
             d = Dict{String, Any}(
                 "formulation" => Dict{String, Any}("kind" => kind, "h_loss_weight" => 1.0),
@@ -144,6 +144,7 @@ end
                 "mass_balance_residual" => Dict{String, Any}(
                     "volume_pbias" => 1.5, "volume_drift" => -2.0,
                     "pred" => Dict{String, Any}("rms" => 0.01)))
+            rsat === nothing || (d["residual_saturation"] = rsat)
             open(joinpath(tmp, name, "metrics", "metrics.toml"), "w") do io
                 TOML.print(io, d)
             end
@@ -164,13 +165,17 @@ end
         hy = rd(mk_run("hy1"; kind = "muskingum_continuity",
                        stab = Dict{String, Any}("rollout_contraction" => 0.6,
                                                 "backbone_rho_median" => 0.4,
-                                                "backbone_rho_max" => 0.9)))
+                                                "backbone_rho_max" => 0.9),
+                       rsat = Dict{String, Any}("frac_cap_pos" => 0.25, "frac_cap_neg" => 0.05)))
         @test hy.rollout_contraction == 0.6
         @test hy.backbone_rho_max == 0.9
+        @test hy.resid_frac_cap_pos == 0.25 && hy.resid_frac_cap_neg == 0.05
+        @test ismissing(th.resid_frac_cap_pos) && ismissing(th.resid_frac_cap_neg)
         @test ismissing(hy.analytic_gain) && ismissing(hy.q_to_h_amp)
 
         gone = rd(joinpath(tmp, "no_such_run"))          # no metrics.toml
         @test isnan(gone.rollout_contraction) && ismissing(gone.analytic_gain)
+        @test ismissing(gone.resid_frac_cap_pos)
 
         th2 = rd(mk_run("th2"; kind = "theta_kinematic_wave",
                         stab = Dict{String, Any}("rollout_contraction" => 0.6,
@@ -186,6 +191,7 @@ end
         @test ismissing(agg[1].backbone_rho_max_mean)
         @test agg[2].backbone_rho_max_mean == 0.9
         @test ismissing(agg[2].analytic_gain_mean)
+        @test ismissing(agg[1].resid_frac_cap_pos_mean) && agg[2].resid_frac_cap_neg_mean == 0.05
         @test !hasproperty(agg[1], :final_amp_mean)
 
         # CSV: a metric that does not apply is an empty cell, never NaN
@@ -197,6 +203,7 @@ end
         cell(l, k) = split(lines[l], ","; keepempty = true)[findfirst(==(k), header)]
         @test cell(2, "backbone_rho_max") == "" && cell(2, "analytic_gain") == "0.5"
         @test cell(4, "analytic_gain") == "" && cell(4, "backbone_rho_max") == "0.9"
+        @test cell(2, "resid_frac_cap_pos") == "" && cell(4, "resid_frac_cap_pos") == "0.25"
         @test !occursin("missing", join(lines, "\n"))
 
         # summary TOML: companions only for the combinations where they exist
@@ -206,6 +213,7 @@ end
         @test c[1]["rollout_contraction"]["mean"] ≈ 0.7
         @test haskey(c[1], "analytic_gain") && !haskey(c[1], "backbone_rho_max")
         @test haskey(c[2], "backbone_rho_max") && !haskey(c[2], "analytic_gain")
+        @test haskey(c[2], "resid_frac_cap_pos") && !haskey(c[1], "resid_frac_cap_pos")
         @test !haskey(c[1], "final_amp")
     end
 end

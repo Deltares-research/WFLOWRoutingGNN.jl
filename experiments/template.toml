@@ -73,6 +73,12 @@ mb_formulation = "theta_kinematic_wave"
 # "muskingum_continuity" formulation: h_norm = h_backbone + rho_max*tanh(delta).
 mb_residual_bound = 0.5
 
+# Bounds of the reservoir constant K = mu_h/mu_q of "muskingum_continuity", in multiples
+# of dt (0 < mb_K_min_dt < mb_K_max_dt). Raising the floor lets the backbone hold a peak h
+# in flashy small-K cells (floor contraction = 1/(1 + 1/mb_K_min_dt)).
+mb_K_min_dt = 0.05
+mb_K_max_dt = 100.0
+
 # Implicitness weight θ ∈ [0, 1] of the mass-balance time discretisation
 # (river domain, enforce_mass_balance = true only).
 #   θ = 1.0  fully implicit / backward Euler (default; historical behaviour)

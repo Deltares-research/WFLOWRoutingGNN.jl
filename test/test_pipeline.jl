@@ -384,6 +384,8 @@ end
         @test haskey(toml_n["stability"], "rollout_contraction")   # defined for every model
         @test !haskey(toml_n["stability"], "analytic_gain")
         @test !haskey(toml_n["stability"], "backbone_rho_max")
+        @test !haskey(toml_n, "residual_saturation")
+        @test !isfile(joinpath(dirs.metrics, "residual_saturation_by_node.csv"))
         @test all(isfinite, tr_none.losses.val_contraction)
     end
 end
@@ -428,5 +430,20 @@ end
         @test !haskey(toml_h["training_stability"], "final_amp")
         @test haskey(toml_h["mass_balance_residual"], "volume_pbias")
         @test all(isfinite, tr.losses.val_contraction)
+
+        # residual saturation: per-node CSV and pooled [residual_saturation] table
+        @test haskey(toml_h, "residual_saturation")
+        rs = toml_h["residual_saturation"]
+        @test 0 ≤ rs["frac_cap_pos"] ≤ 1 && 0 ≤ rs["frac_cap_neg"] ≤ 1
+        @test rs["frac_cap_pos"] + rs["frac_cap_neg"] ≤ 1
+        @test 0 ≤ rs["abs_mean"] ≤ rs["abs_max"] ≤ 1
+        @test rs["tau"] ≈ RESIDUAL_CAP_TAU
+        rcsv = readlines(joinpath(dirs.metrics, "residual_saturation_by_node.csv"))
+        @test length(rcsv) == prep.n_nodes + 1
+        @test rcsv[1] == "node_idx,K_s,contraction,frac_cap_pos,frac_cap_neg,abs_mean,abs_max,n_valid"
+        @test all(length(split(l, ",")) == 8 for l in rcsv)
+        sat = rollout_residual_saturation(tr.model, prep.dataset.val, prep.static_arr)
+        @test rs["frac_cap_pos"] ≈ sat.frac_cap_pos atol = 1e-5
+        @test rs["n_valid"] == sat.n_valid
     end
 end

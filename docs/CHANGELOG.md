@@ -1,5 +1,35 @@
 This document serves as a concrete changelog of the code, summarizing briefly the changes of each commit.
 
+## 2026-10-26
+
+- **Residual saturation diagnostic for the hybrid (TODO §3j).** After the analyze stage's
+        validation rollout the `muskingum_continuity` hybrid now reports how often the bounded
+        source residual sits at its cap: `rollout_residual_saturation` replays the validation
+        split, records `tanh(Δ)` per step and node and `residual_saturation(t; τ = 0.99)`
+        (`RESIDUAL_CAP_TAU`) summarises it separately at the `+` and `−` cap plus `abs_mean` /
+        `abs_max`, pooled and per node (finite samples only). Output: new `[residual_saturation]`
+        table in `metrics.toml` (hybrid only: `tau`, `n_valid`, `frac_cap_pos`, `frac_cap_neg`,
+        `abs_mean`, `abs_max`) and `metrics/residual_saturation_by_node.csv` (with `K_s` and
+        `contraction` to cross-tabulate the `K`-pinned cells). The hpar results CSV and summary
+        gain `resid_frac_cap_pos` / `resid_frac_cap_neg` (empty / absent for other formulations).
+        Forward-only: the encoder→processor→decoder part of `WflowGNN`'s call was split out as
+        `decoder_delta` (the call is `apply_formulation(…, decoder_delta(…))`, numerically
+        identical) so the diagnostic reads `Δ` without a second network pass. Tests:
+        [test/test_mb_hybrid.jl](../test/test_mb_hybrid.jl),
+        [test/test_pipeline.jl](../test/test_pipeline.jl),
+        [test/test_hparsearch.jl](../test/test_hparsearch.jl).
+
+- **Configurable reservoir `K` clamp (TODO §3i).** New `[model]` keys `mb_K_min_dt` /
+        `mb_K_max_dt` (`ModelSettings`, defaults `0.05` / `100`, the former hard-coded
+        `MCH_K_MIN_DT` / `MCH_K_MAX_DT`) set the clamp of the `muskingum_continuity` reservoir
+        constant `K = μ_h/μ_q` in multiples of `dt`. `build_muskingum_continuity` takes
+        `K_min_dt` / `K_max_dt` (validated `0 < K_min_dt < K_max_dt`, `ArgumentError` otherwise)
+        and logs the active clamp; both are saved in `model_settings.toml` (a missing key loads the
+        default, so older checkpoints are unchanged), parsed by `settings_from_config` and
+        sweepable in an hpar search (`model.mb_K_min_dt`). Templates updated (and a broken
+        comment line in `template_hparsearch.toml` fixed). Tests:
+        [test/test_mb_hybrid.jl](../test/test_mb_hybrid.jl).
+
 ## 2026-10-24
 
 - **River network and subcatchment boundaries on the attribution maps (TODO §3g-bis).**

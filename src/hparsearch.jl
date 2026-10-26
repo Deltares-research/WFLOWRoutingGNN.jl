@@ -133,7 +133,8 @@ end
 # Per-formulation stability companions and secondary conservation numbers: only
 # written to the summary TOML for combinations where they exist.
 const _HPS_OPTIONAL_METRICS = (:volume_pbias, :mb_residual_rms, :analytic_gain,
-                               :q_to_h_amp, :backbone_rho_median, :backbone_rho_max)
+                               :q_to_h_amp, :backbone_rho_median, :backbone_rho_max,
+                               :resid_frac_cap_pos, :resid_frac_cap_neg)
 
 function _hps_add_optional!(entry::Dict, r)
     for k in _HPS_OPTIONAL_METRICS
@@ -247,7 +248,9 @@ function _read_run_scalar_metrics(run_dir::AbstractString)
                             analytic_gain = missing,
                             q_to_h_amp = missing,
                             backbone_rho_median = missing,
-                            backbone_rho_max = missing)
+                            backbone_rho_max = missing,
+                            resid_frac_cap_pos = missing,
+                            resid_frac_cap_neg = missing)
     d = TOML.parsefile(path)
     fh = get(d, "fixed_horizon", Dict{String,Any}())
     rp = get(d, "river_q_performance", Dict{String,Any}())
@@ -258,6 +261,7 @@ function _read_run_scalar_metrics(run_dir::AbstractString)
     form = get(d, "formulation", Dict{String,Any}())
     mbr  = get(d, "mass_balance_residual", Dict{String,Any}())
     mbr_pred = get(mbr, "pred", Dict{String,Any}())
+    rsat = get(d, "residual_saturation", Dict{String,Any}())
     # `missing` when the key is absent: the metric does not apply to this formulation
     opt(t, k) = haskey(t, k) ? Float64(t[k]) : missing
     return (
@@ -276,6 +280,8 @@ function _read_run_scalar_metrics(run_dir::AbstractString)
         q_to_h_amp = opt(stab, "q_to_h_amp"),
         backbone_rho_median = opt(stab, "backbone_rho_median"),
         backbone_rho_max = opt(stab, "backbone_rho_max"),
+        resid_frac_cap_pos = opt(rsat, "frac_cap_pos"),
+        resid_frac_cap_neg = opt(rsat, "frac_cap_neg"),
     )
 end
 
@@ -329,6 +335,8 @@ function _aggregate_repetition_rows(rows::Vector)
             q_to_h_amp_mean          = opt_mean(:q_to_h_amp),
             backbone_rho_median_mean = opt_mean(:backbone_rho_median),
             backbone_rho_max_mean    = opt_mean(:backbone_rho_max),
+            resid_frac_cap_pos_mean  = opt_mean(:resid_frac_cap_pos),
+            resid_frac_cap_neg_mean  = opt_mean(:resid_frac_cap_neg),
         ))
     end
     return out
@@ -593,6 +601,8 @@ function _hps_result_row(ds, ms, ts, run_base, combo_idx, metrics)
         q_to_h_amp                      = msc.q_to_h_amp,
         backbone_rho_median             = msc.backbone_rho_median,
         backbone_rho_max                = msc.backbone_rho_max,
+        resid_frac_cap_pos              = msc.resid_frac_cap_pos,
+        resid_frac_cap_neg              = msc.resid_frac_cap_neg,
         train_duration_s                = metrics.train_duration_s,
         val_rollout_duration_s          = metrics.val_rollout_duration_s,
         val_rollout_duration_per_step_s = metrics.val_rollout_duration_s /

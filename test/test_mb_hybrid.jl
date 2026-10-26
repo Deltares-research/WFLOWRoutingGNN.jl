@@ -32,11 +32,11 @@ function hy_inputs(; N = HY_N)
     return norm_stats, postscale
 end
 
-function hy_build(; bound = 0.5, smooth = false)
+function hy_build(; bound = 0.5, smooth = false, kwargs...)
     norm_stats, postscale = hy_inputs()
     return build_muskingum_continuity(norm_stats, postscale, HY_SRC, HY_TGT, HY_DT;
                                       residual_bound = bound, smooth_h_floor = smooth,
-                                      h_floor_softness = 0.05)
+                                      h_floor_softness = 0.05, kwargs...)
 end
 
 function hy_model(mb)
@@ -83,6 +83,75 @@ hy_graph(N = HY_N) = rand_graph(N, 2N)
     @testset "build aborts on invalid settings" begin
         @test_throws ArgumentError hy_build(bound = -0.1)
         @test_throws ArgumentError hy_build(bound = NaN)
+        @test_throws ArgumentError hy_build(K_min_dt = 0)
+        @test_throws ArgumentError hy_build(K_min_dt = -0.1)
+        @test_throws ArgumentError hy_build(K_min_dt = 2, K_max_dt = 1)
+        @test_throws ArgumentError hy_build(K_min_dt = 1, K_max_dt = 1)
+        @test_throws ArgumentError hy_build(K_min_dt = NaN)
+        @test_throws ArgumentError hy_build(K_max_dt = Inf)
+    end
+
+    @testset "configurable K clamp bounds" begin
+        mb0 = hy_build()
+        dt  = HY_DT
+        # defaults: K/dt spans ~0.12 .. 2.3, inside [0.05, 100] -> nothing clamped
+        @test minimum(mb0.K) / dt < 0.5 && maximum(mb0.K) / dt < 5
+        @test minimum(mb0.K) / dt > WflowRoutingGNN.MCH_K_MIN_DT
+        @test hy_build(K_min_dt = WflowRoutingGNN.MCH_K_MIN_DT,
+                       K_max_dt = WflowRoutingGNN.MCH_K_MAX_DT).K == mb0.K
+
+        # raising the floor lifts the small-K nodes: floor contraction 1/(1 + 1/K_min_dt)
+        n_low = count(<(0.5f0 * dt), mb0.K)
+        @test n_low > 0
+        mb1 = @test_logs (:info, Regex("\\b$n_low clamped")) match_mode = :any hy_build(K_min_dt = 0.5)
+        @test minimum(mb1.K) ≈ 0.5f0 * dt
+        @test minimum(backbone_contraction(mb1)) ≈ 1f0 / 3f0
+        @test all(mb1.K .>= mb0.K)
+        @test mb1.K[mb0.K .>= 0.5f0 * dt] == mb0.K[mb0.K .>= 0.5f0 * dt]   # others untouched
+        @test diag(Matrix(mb1.P)) ≈ backbone_contraction(mb1)
+        @test all(0 .< backbone_contraction(mb1) .< 1)
+
+        # lowering the ceiling caps the large-K nodes
+        n_high = count(>(1f0 * dt), mb0.K)
+        @test n_high > 0
+        mb2 = @test_logs (:info, Regex("\\b$n_high clamped")) match_mode = :any hy_build(K_max_dt = 1)
+        @test maximum(mb2.K) ≈ dt
+        @test maximum(backbone_contraction(mb2)) ≈ 0.5f0
+    end
+
+    @testset "K bounds: settings, round trip, config, hpar key" begin
+        @test ModelSettings(domain = "river").mb_K_min_dt == WflowRoutingGNN.MCH_K_MIN_DT
+        @test ModelSettings(domain = "river").mb_K_max_dt == WflowRoutingGNN.MCH_K_MAX_DT
+        ms = ModelSettings(domain = "river", mb_formulation = "muskingum_continuity",
+                           mb_K_min_dt = 0.2f0, mb_K_max_dt = 50f0)
+        path = tempname() * ".toml"
+        save_model_settings(path, ms)
+        ms2 = load_model_settings(path)
+        @test ms2.mb_K_min_dt == 0.2f0 && ms2.mb_K_max_dt == 50f0
+        # a pre-bounds checkpoint (keys absent) loads with the historical constants
+        d = TOML.parsefile(path)
+        delete!(d, "mb_K_min_dt"); delete!(d, "mb_K_max_dt")
+        open(path, "w") do io
+            TOML.print(io, d)
+        end
+        ms3 = load_model_settings(path)
+        rm(path)
+        @test ms3.mb_K_min_dt == WflowRoutingGNN.MCH_K_MIN_DT
+        @test ms3.mb_K_max_dt == WflowRoutingGNN.MCH_K_MAX_DT
+
+        # [model] config keys, including the hpar-search path (`_set!`)
+        cfg = Dict{String,Any}(
+            "data"  => Dict{String,Any}("run_name" => "x", "runs_dir" => "r", "wflow_model_path" => "m",
+                                        "train_frac" => 0.6, "val_frac" => 0.2),
+            "model" => Dict{String,Any}("domain" => "river"),
+            "train" => Dict{String,Any}("epochs" => 1, "batch_size" => 1, "lr_start" => 1e-3, "lr_final" => 1e-4),
+        )
+        _, m0, _ = WflowRoutingGNN.settings_from_config(cfg, pwd())
+        @test m0.mb_K_min_dt == WflowRoutingGNN.MCH_K_MIN_DT && m0.mb_K_max_dt == WflowRoutingGNN.MCH_K_MAX_DT
+        WflowRoutingGNN._set!(cfg, "model.mb_K_min_dt", 0.3)
+        WflowRoutingGNN._set!(cfg, "model.mb_K_max_dt", 20.0)
+        _, m1, _ = WflowRoutingGNN.settings_from_config(cfg, pwd())
+        @test m1.mb_K_min_dt == 0.3f0 && m1.mb_K_max_dt == 20f0
     end
 
     @testset "formulation selection and settings round trip" begin
@@ -286,5 +355,89 @@ end
         expected = norm((Matrix(mb.P) * (D .* δ)) ./ D) / norm(δ)
         @test rc(model, [g1, g2], static) ≈ expected rtol = 1f-3
         @test expected > 0
+    end
+end
+
+@testset "residual saturation diagnostic (3j)" begin
+    @testset "residual_saturation summary" begin
+        t = Float32[ 1.0 -1.0 0.5 NaN
+                     0.1  0.2 -0.3 0.0
+                     NaN  NaN NaN NaN]
+        s = residual_saturation(t)
+        @test s.tau == RESIDUAL_CAP_TAU
+        @test s.n_valid == 7
+        @test s.node.n_valid == [3, 4, 0]
+        @test s.node.frac_cap_pos[1] ≈ 1/3 && s.node.frac_cap_neg[1] ≈ 1/3
+        @test s.node.frac_cap_pos[2] == 0 && s.node.frac_cap_neg[2] == 0
+        @test s.node.abs_mean[1] ≈ (1 + 1 + 0.5) / 3 && s.node.abs_max[1] == 1
+        @test s.node.abs_mean[2] ≈ 0.15 && s.node.abs_max[2] ≈ 0.3
+        @test isnan(s.node.frac_cap_pos[3]) && isnan(s.node.abs_mean[3]) && isnan(s.node.abs_max[3])
+        # pooled over the finite samples only
+        @test s.frac_cap_pos ≈ 1/7 && s.frac_cap_neg ≈ 1/7
+        @test s.abs_mean ≈ (2.5 + 0.6) / 7 && s.abs_max == 1
+        # the threshold is strict and configurable
+        @test residual_saturation(Float32[0.99 -0.995]; τ = 0.99f0).frac_cap_neg == 0.5
+        @test residual_saturation(Float32[0.99 -0.995]; τ = 0.99f0).frac_cap_pos == 0
+        @test residual_saturation(Float32[0.5 -0.5]; τ = 0.4f0).n_valid == 2
+        @test residual_saturation(Float32[0.5 -0.5]; τ = 0.4f0).frac_cap_pos == 0.5
+        e = residual_saturation(fill(NaN32, 2, 3))
+        @test e.n_valid == 0 && isnan(e.frac_cap_pos) && isnan(e.abs_mean) && isnan(e.abs_max)
+    end
+
+    N      = HY_N
+    nf     = length(hy_vars()["forcing"])
+    static = randn(Float32, length(hy_vars()["static"]), N)
+    mkg()  = rand_graph(N, 2N; ndata = (; state = randn(Float32, 2, N),
+                                          forcing = randn(Float32, nf, N)))
+    gs     = [mkg() for _ in 1:4]
+    split  = [[gs[1], gs[2]], [gs[2], gs[3]], [gs[3], gs[4]]]      # flattens to 4 graphs, T = 3
+    lastdense(m) = m.decoder isa Chain ? m.decoder[end] : m.decoder
+    function with_decoder_output!(m, b)       # constant decoder output Δ = b at every node
+        d = lastdense(m)
+        fill!(d.weight, 0f0); fill!(d.bias, b)
+        return m
+    end
+
+    @testset "rollout: forced Δ gives the expected saturation" begin
+        pos = rollout_residual_saturation(with_decoder_output!(hy_model(hy_build()), 10f0), split, static)
+        @test pos.n_valid == 3N
+        @test pos.frac_cap_pos == 1 && pos.frac_cap_neg == 0 && pos.abs_max ≈ 1
+        @test all(==(1), pos.node.frac_cap_pos) && length(pos.node.n_valid) == N
+
+        neg = rollout_residual_saturation(with_decoder_output!(hy_model(hy_build()), -10f0), split, static)
+        @test neg.frac_cap_neg == 1 && neg.frac_cap_pos == 0
+
+        zero_ = rollout_residual_saturation(with_decoder_output!(hy_model(hy_build()), 0f0), split, static)
+        @test zero_.frac_cap_pos == 0 && zero_.frac_cap_neg == 0
+        @test zero_.abs_mean == 0 && zero_.abs_max == 0
+
+        mid = rollout_residual_saturation(with_decoder_output!(hy_model(hy_build()), 0.5f0), split, static)
+        @test mid.frac_cap_pos == 0 && mid.frac_cap_neg == 0
+        @test mid.abs_mean ≈ tanh(0.5f0) && mid.abs_max ≈ tanh(0.5f0)
+        @test all(≈(tanh(0.5f0)), mid.node.abs_mean)
+    end
+
+    @testset "diagnostic is forward-only and leaves the model untouched" begin
+        model = hy_model(hy_build())
+        before = deepcopy(Flux.state(model))
+        a = rollout_residual_saturation(model, split, static)
+        b = rollout_residual_saturation(model, split, static)
+        @test Flux.state(model) == before
+        @test a == b
+        # the split-out decoder output reproduces the regular forward pass exactly
+        g, st, fo = gs[1], gs[1].ndata.state, gs[1].ndata.forcing
+        fn = gs[2].ndata.forcing
+        Δ  = WflowRoutingGNN.decoder_delta(model, g, st, fo, static)
+        @test size(Δ) == (1, N)
+        @test WflowRoutingGNN.apply_formulation(model.mass_balance, g, st, fo, fn, Δ) ==
+              model(g, st, fo, static, fn)
+    end
+
+    @testset "not applicable to other formulations" begin
+        ms = ModelSettings(domain = "river", hidden_dim = 8, nlayers = 1, mb_formulation = "none")
+        A_self = sparse(vcat(HY_TGT, 1:HY_N), vcat(HY_SRC, 1:HY_N),
+                        ones(Float32, length(HY_SRC) + HY_N), HY_N, HY_N)
+        m = WflowGNN(ms, WflowRoutingGNN.NoMassBalance(), A_self)
+        @test rollout_residual_saturation(m, split, static) === nothing
     end
 end

@@ -118,6 +118,7 @@ function analyze_run(prep::PrepBundle, ms::ModelSettings, ts::TrainSettings;
     mb_floor_summary      = nothing
     mb_stiffness_summary  = nothing
     backbone_rho_max      = nothing
+    residual_saturation_summary = nothing
 
     plot_validation_movie(p_grids, t_grids, domain;
                           path       = joinpath(dirs.plots, "validation.mp4"),
@@ -188,6 +189,7 @@ function analyze_run(prep::PrepBundle, ms::ModelSettings, ts::TrainSettings;
             mb_floor_summary      = layer.mb_floor
             mb_stiffness_summary  = layer.mb_stiffness
             backbone_rho_max      = get(layer, :backbone_rho_max, nothing)
+            residual_saturation_summary = get(layer, :residual_saturation, nothing)
         end
     end
 
@@ -235,7 +237,8 @@ function analyze_run(prep::PrepBundle, ms::ModelSettings, ts::TrainSettings;
                                                             infer.val_rollout_duration_s,
                                   val_n_timesteps         = size(p_states, 3),
                                   mb_kind                 = mb_formulation_kind(ms),
-                                  backbone_rho_max        = backbone_rho_max),
+                                  backbone_rho_max        = backbone_rho_max,
+                                  residual_saturation     = residual_saturation_summary),
                                out.spatial_summary, out.ramp, out.river_q_perf,
                                out.volume_budget, out.mb_floor, out.mb_stiffness,
                                out.mb_residual)
@@ -312,13 +315,17 @@ Layer-internal mass-balance diagnostics (floor fraction, stiffness, volume budge
 plus their plots/CSVs), dispatched on the mass-balance formulation `mb`
 (`model.mass_balance`). Returns `nothing` for [`NoMassBalance`](@ref): there is no
 layer to inspect, and the layer-free residual of [`mb_residual_diagnostics`](@ref)
-covers such models.
+covers such models. For [`MuskingumContinuityHybrid`](@ref) it writes the per-node
+backbone contraction and, from a validation rollout, the saturation of the bounded
+source residual ([`residual_saturation`](@ref), `residual_saturation_by_node.csv`).
 """
 layer_mb_analysis(::NoMassBalance, model, prep, dirs, split_times) = nothing
 
-# Hybrid: report the backbone contraction (diagonal of P = spectrum) per node. There is
-# no floor/stiffness/volume-budget record for this formulation; only the largest
-# contraction (`backbone_rho_max`, the spectral radius) is returned for `metrics.toml`.
+# Hybrid: report the backbone contraction (diagonal of P = spectrum) per node and how
+# often the bounded source residual saturates (`residual_saturation_by_node.csv`). There
+# is no floor/stiffness/volume-budget record for this formulation; the largest contraction
+# (`backbone_rho_max`, the spectral radius) and the pooled saturation summary
+# (`residual_saturation`) are returned for `metrics.toml`.
 function layer_mb_analysis(mb::MuskingumContinuityHybrid, model, prep, dirs, split_times)
     c = backbone_contraction(mb)
     K = Array(mb.K)
@@ -331,8 +338,30 @@ function layer_mb_analysis(mb::MuskingumContinuityHybrid, model, prep, dirs, spl
     end
     @info "Muskingum-continuity backbone contraction: median=$(round(median(c); sigdigits=3)) " *
           "max=$(round(maximum(c); sigdigits=4)) (spectral radius of P; < 1)"
+
+    sat = try
+        rollout_residual_saturation(Flux.cpu(model), prep.dataset.val, prep.static_arr)
+    catch err
+        @warn "Skipping residual saturation diagnostic" exception = (err, catch_backtrace())
+        nothing
+    end
+    if sat !== nothing
+        open(joinpath(dirs.metrics, "residual_saturation_by_node.csv"), "w") do io
+            println(io, "node_idx,K_s,contraction,frac_cap_pos,frac_cap_neg,abs_mean,abs_max,n_valid")
+            nd = sat.node
+            for i in eachindex(c)
+                println(io, join((i, Float32(K[i]), c[i], nd.frac_cap_pos[i], nd.frac_cap_neg[i],
+                                  nd.abs_mean[i], nd.abs_max[i], nd.n_valid[i]), ","))
+            end
+        end
+        @info "Residual saturation (|tanh(Δ)| > $(sat.tau)): " *
+              "+cap=$(round(100 * sat.frac_cap_pos; sigdigits=3))% " *
+              "-cap=$(round(100 * sat.frac_cap_neg; sigdigits=3))% " *
+              "mean|tanh|=$(round(sat.abs_mean; sigdigits=3))"
+    end
     return (; volume_budget = nothing, mb_floor = nothing, mb_stiffness = nothing,
-            backbone_rho_max = Float32(maximum(c)))
+            backbone_rho_max = Float32(maximum(c)),
+            residual_saturation = sat)
 end
 
 function layer_mb_analysis(::ThetaKinematicWave, model, prep, dirs, split_times)
