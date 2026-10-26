@@ -25,18 +25,26 @@ Experiment configs live under `experiments/`. Newest at the top.
 > `grad_clip = 10`, 8×64/mlp2, `[1,2,4,6,8,10] × 50`. (`mb_theta` is now inert — it applies
 > only to the retired `theta_kinematic_wave` arm.)
 >
-> **Queued next:** (A) a **full-length multi-seed confirmation** of the hybrid on small Sava
-> (more seeds, re-autotuned LR on the h-carrying landscape) before it is relied on for
-> headline results; (B) deploy the hybrid on the **full `sava_v081` basin** (supersedes the
-> E14 theta-base plan — rebuild E14 on `muskingum_continuity`); (C) the **headwater-depth
-> attack** (the one remaining weak spot, below).
+> **✔ Queued items (A) and (B) are now DONE.** (A) **E16** (5-seed small-Sava confirmation,
+> 2026-10-26) reproduced the hybrid tightly across seeds and across LR — robust. (B) **E18**
+> (single-seed full `sava_v081`, 2026-10-26) proved the hybrid **trains stably at full domain**
+> (8235 nodes / 585-hop) where the theta base provably diverged: ρ̂ = 0.49 < 1, finite rollout,
+> `frac_gt2` 0.16, `volume_pbias` 3.8 %, `backbone_rho_max` 0.845 < 1, pooled q KGE 0.923 — in
+> 16.9 h. **The structural-stability claim scales.** (C) the **headwater-depth attack** is now
+> the clear sole remaining frontier, and E16+E18 sharpened its mechanism (below).
 >
-> **Still OWED — the real open work (reordered after E15):**
-> 1. **Headwater `river_h` over-dispersion is the one remaining weak spot.** The hybrid tamed
->    the smallest-catchment headwater `node48` h ~9× (std ratio 77 → 8.85) but it still
->    over-disperses (hNSE −69). Small-catchment storage dynamics (short `K`, flashy response)
->    are the next frontier — check the `mb_residual_bound` / per-node `K` clamp and the
->    headwater subcatchment-attribution error ranking.
+> **Still OWED — the real open work (reordered after E16/E18):**
+> 1. **Headwater `river_h` over-dispersion is the one remaining weak spot — and E16/E18 pinned
+>    its mechanism to the `h/q` ratio (= the backbone storage timescale `K = μ_h/μ_q`).** The
+>    per-cell h-error is NOT governed by low q or low h alone — it is the **combination `q ≫ h`
+>    (small `K`: shallow, flashy, steep cells)**, which the reservoir backbone **over-disperses**
+>    (h std ratio climbs > 1 monotonically as `h/q` falls; q stays excellent throughout). On the
+>    full domain this low-`K` headwater population is vast, dragging the spatial-median `river_h`
+>    NSE negative (−1.99) even though large-outlet h is positive (+0.17…+0.25). **E17 should attack
+>    the low-`h/q` (short-`K`) cells specifically** — raise the per-node `K`-clamp floor (currently
+>    `[0.05,100]·dt`) and/or give the decoder more depth-residual headroom (`mb_residual_bound`)
+>    where `K` is small. (Supporting plots: `e16_hq_ratio_diagnosis.png`,
+>    `e18_hq_ratio_diagnosis.png` in each run's output dir.)
 > 2. **The nonlinear encoder-input normalization lever is CLOSED (E15 feature 2).**
 >    zscore/log1p/asinh on `river_inwater` were indistinguishable within each formulation
 >    (hybrid river_h_nse 0.2233/0.2235/0.2267; backbone & residual byte-identical). Do not
@@ -60,6 +68,32 @@ Experiment configs live under `experiments/`. Newest at the top.
 ---
 
 # COMPLETED
+
+> **★ E18 (2026-10-26) — the hybrid is STABLE at the full `sava_v081` domain** (single seed,
+> `sava_v081_e18_fulldomain_hybrid`). The headline scientific result: on 8235 nodes /
+> 585-hop diameter / Courant-p90 2226 — where the `theta_kinematic_wave` base provably
+> diverges (epoch 2) — the hybrid completed all 250 epochs (16.9 h) and stayed contractive:
+> `rollout_contraction` ρ̂ = **0.487 < 1**, `backbone_rho_max` **0.845 < 1** (vs 0.56 small
+> Sava — higher Courant, still bounded), `fixed_val_rmse` **82 (finite**, theta = NaN),
+> `peak_ratio_frac_gt2` **0.156** (theta 1.0), `volume_pbias` **3.8 %**, `mb_residual_rms`
+> 0.072. **q is excellent basin-wide:** pooled KGE **0.923**, per-node q NSE median **0.966**
+> (p10 0.689), qmin ≥ 0 everywhere. **`river_h` is scale-split:** positive at large outlets
+> (+0.17…+0.25, std ratio ~0.7) but severely over-dispersed at the vast population of tiny
+> flashy headwaters (ratio up to 17), dragging the spatial-median NSE to **−1.99** (p90 still
+> **+0.57**). Same headwater weak spot as small Sava, amplified by node count — **confirms the
+> `h/q` (short-`K`) mechanism** below and makes E17 the clear next move. **Runtime lesson:** the
+> batch probe fit batch 32, so one full-domain seed is only ~17 h (not the 2–5 days estimated)
+> → a multi-seed full-domain run is now affordable.
+
+> **★ E16 (2026-10-26) — multi-seed confirmation: the hybrid is ROBUST** (5 seeds,
+> `sava_small_v081_e16_hybrid_confirm`). Reruns the adopted `muskingum_continuity` base on
+> small Sava with 5 seeds and plain zscore (Feature 2 dropped as inert). The E15 result holds
+> tightly and is not a seed fluke: river_h spatial-median NSE **+0.23** band, pooled q KGE
+> ~0.996, ρ̂ ≈ 0.39, `backbone_rho_max` 0.559, `frac_gt2` 0, qmin ≥ 0. The headwater
+> over-dispersion persists exactly as in E15. **Autotune lesson confirmed:** the hybrid's
+> contracting backbone means the LR range test has **no divergence knee**, so the auto-picker
+> collapses to the LR floor — supply `lr_start` manually (≈ 1.14e-4 small Sava, ≈ 1e-4 full
+> domain) with `grad_clip = 10`. Both confirm the hybrid as the working base.
 
 > **★ E15 (2026-10-25) — the `muskingum_continuity` B/C-hybrid RESOLVES `river_h`.** A clean
 > 2 (mb_formulation) × 3 (inflow normalization) × 2-seed A/B on the E13b base. **Feature 1
@@ -372,6 +406,105 @@ Experiment configs live under `experiments/`. Newest at the top.
 > per-node σ for the q + boundedness win; leave the smooth floor OFF until an A/B credits
 > it; `river_h` is unresolved and now needs the MB REFORMULATION (h not slaved to q; B/C-
 > hybrid, notes/mass_balance_formulations.md), not more scaling/floor knobs.**
+
+## E18 — full-domain hybrid deployment (stability at scale), single seed — `sava_v081_e18_fulldomain_hybrid`
+
+**NAME:** the adopted `muskingum_continuity` hybrid base deployed on the **full `sava_v081`
+basin** (8235 nodes, 585-hop diameter, Courant median/p90/max 152/2226/111727, ~14k unsteady
+cells) — the scale where the `theta_kinematic_wave` base provably diverges (epoch 2).
+5-phase `[1,2,5,8,10] × 50 = 250` epochs, `repetitions = 1` (robustness deliberately
+sacrificed for runtime). Autotuned config: `batch_size = 32` (memory probe), `lr_start = 1e-4`
+(**manual** — the range test failed, see below), `lr_peak_decay = 0.661` (probe), `grad_clip
+= 10`. Preceded by a self-terminating `config_stabilitycheck.toml` (10 ep, compressed
+curriculum, batch 2) which passed. Run `sava_v081_e18_fulldomain_hybrid_hps01_s01`.
+
+**HEADLINE METRICS (free-rollout deployed daterange + per-epoch stability):**
+
+| metric | E18 (full `sava_v081`) | E16/E15 (small Sava) | theta at full scale |
+|---|---|---|---|
+| `rollout_contraction` ρ̂ | **0.487** | 0.33–0.39 | diverged |
+| `backbone_rho_max` | **0.845** (< 1) | 0.559 | n/a |
+| `fixed_val_rmse` | **82 (finite)** | 0.44 | NaN |
+| `peak_ratio_frac_gt2` | **0.156** | 0.0 | 1.0 |
+| `volume_pbias` | **3.8 %** | 16 % | 255–400 % |
+| `mb_residual_rms` | 0.072 | 0.017 | 1.1–1.26 |
+| pooled q KGE | **0.923** | 0.996 | 0.72–0.77 |
+| `river_h_nse` (spatial-median) | **−1.99** | +0.22 | ≈ −112 |
+| train duration | **16.9 h** (batch 32, 250 ep) | — | — |
+
+**Per-node distributions (8235 nodes):** q NSE mean 0.895 / median **0.966** / p10 0.689 /
+p90 0.999 (q excellent everywhere, qmin ≥ 0); river_h NSE mean −65 / median −1.99 / p10 −77 /
+p90 **+0.57** (a meaningful minority positive — the larger catchments).
+
+**Per-gauge (free rollout):** large outlets (node3898_r5, node3966_r4, node4923_r2) river_h
+NSE **+0.17…+0.25**, std ratio ~0.65–0.79, q NSE 0.70–0.78, peak 0.81–0.84 — well-behaved.
+Tiny headwaters over-dispersed: node5879_r5 hNSE −414 / ratio **17.0** (truth σ 0.071),
+node764_r4 −2.84 / 2.79, node2408_r2 −0.21 / 2.0 — yet q excellent at all (qNSE 0.96–0.999).
+
+**FINDINGS:**
+1. **✔✔ the structural-stability claim SCALES.** The hybrid is the first formulation to train
+   stably on the full Sava: ρ̂ = 0.49 < 1, `backbone_rho_max` 0.845 < 1 (rose from 0.56 with
+   the stiffer Courant regime but stayed bounded), finite past-horizon rollout, `frac_gt2`
+   0.16, `volume_pbias` 3.8 % — where theta diverges at epoch 2. The core design guarantee
+   (unconditional reservoir-backbone contraction) holds at 8235 nodes.
+2. **✔ q is excellent basin-wide** — pooled KGE 0.923, per-node NSE median 0.966, qmin ≥ 0.
+3. **✖ `river_h` is scale-split** — positive at large outlets (+0.17…+0.25) but severely
+   over-dispersed at the vast population of tiny flashy headwaters, so the spatial-median
+   (−1.99) is dragged negative by node count (p90 still +0.57). SAME weak spot as E15/E16,
+   amplified. See the `h/q` mechanism in the E16 entry below — it is identical here.
+4. **Runtime:** batch 32 fit well → 16.9 h for one full-domain seed (far under the 2–5 day
+   estimate), so a multi-seed full-domain confirmation is now affordable.
+5. **Autotune:** the full-domain LR range test failed for the same no-divergence-knee reason
+   as E16 (all inits near-floor, "no robust finite recommendation"); `lr_start = 1e-4` /
+   `grad_clip = 10` supplied manually trained cleanly.
+
+---
+
+## E16 — multi-seed hybrid confirmation (robustness), 1 cell × 5 seeds — `sava_small_v081_e16_hybrid_confirm`
+
+**NAME:** a full-length multi-seed rerun of the adopted `muskingum_continuity` base on small
+Sava to confirm the E15 single-cell result is robust (not a seed fluke) with a re-autotuned
+LR. Config = E15 hybrid winner (8×64/mlp2, increment, pushforward, `[1,2,4,6,8,10]×50`, σ
+floors 2.5/0.002, log-area, `mb_residual_bound = 0.5`), **plain `zscore`** (Feature 2 dropped
+as inert per E15), `repetitions = 5`. Re-autotuned: `lr_start = 1.14e-4` (manual — range test
+has no knee), `grad_clip = 10`, `lr_peak_decay = 0.9`, batch 8. Runs
+`sava_small_v081_e16_hybrid_confirm_hps01_s01..s05`.
+
+**SUMMARY (5-seed):** river_h spatial-median NSE **+0.23** (tight band), pooled q KGE ~0.996,
+ρ̂ ≈ 0.39, `backbone_rho_median` 0.048 / `backbone_rho_max` 0.559, `frac_gt2` 0, qmin ≥ 0 —
+all reproduce E15 within seed noise.
+
+**FINDINGS:**
+1. **✔ the hybrid is ROBUST** — 5 seeds reproduce the E15 river_h/q/stability profile tightly;
+   the result is not a single-seed artifact. Adopted base confirmed.
+2. **✔ LR-robust** — trained cleanly across seeds with manually-supplied `lr_start = 1.14e-4`.
+3. **⚠ autotune no-knee gotcha** — the contracting backbone means the LR range-test loss never
+   diverges (dips to a shallow min then wanders flat to lr=1.0 with bounded grad-norm), so the
+   Leslie-Smith auto-picker collapses to the LR floor and `aggregate_lr_recommendations` errors
+   "no robust finite recommendation". **For the hybrid, always supply `lr_start` manually.**
+4. **⚠ the headwater over-dispersion persists** — exactly as E15.
+
+**The `(q,h)→error` relationship (E16 + E18, per-cell diagnosis).** Investigated which cells
+the poor `river_h` lives in. The controlling variable is the **`h/q` ratio** (mean depth ÷
+mean discharge = the backbone linear-reservoir storage timescale `K = μ_h/μ_q`), **not q or h
+alone:**
+- Spearman ρ of per-cell h-NSE vs predictors: **q magnitude −0.12 (E16) / −0.02 (E18)**
+  (uncorrelated), h magnitude +0.05 / +0.38, **`h/q` ratio +0.25 / +0.30**.
+- The q×h quartile grid of median h-NSE is blue (good) on the diagonal and upper-right
+  (`h ≥ q`) and dark-red (catastrophic) in the lower-left triangle (`q ≫ h`): E18 q3×h1 = −62,
+  q4×h2 = −85; E16 q4×h3 = −4.3. Neither a fixed-q row nor a fixed-h column is uniformly bad.
+- Splitting by `h/q` tercile is monotonic in BOTH experiments: low `h/q` (q≫h, flashy/steep)
+  → worst h-NSE AND highest h std ratio (over-dispersion: E16 2.08, E18 3.49); high `h/q`
+  (h≫q, deep/slow) → best h-NSE, std ratio → ~1.5–1.9. q NSE stays 0.8–1.0 across all terciles.
+- **Interpretation:** the reservoir backbone over-disperses the sharp, shallow depth signal of
+  short-`K` (flashy headwater) cells; deep high-`h/q` channels are accurate. E18 is the same
+  structure as E16, shifted two decades lower in `h/q` and far more populated in the failing
+  corner — "same mechanism, amplified." → E17 should target low-`h/q`/short-`K` cells (raise
+  the `K`-clamp floor, more `mb_residual_bound` headroom there). Plots:
+  `e16_hq_ratio_diagnosis.png`, `e18_hq_ratio_diagnosis.png` (in each run's output dir): Panel
+  A = h-NSE vs `h/q` colored by std ratio; Panel B = q×h quartile heatmap of median h-NSE.
+
+---
 
 ## E15 — MB-formulation × inflow-normalization A/B (the `river_h` fix), 6 cells × 2 seeds — `sava_small_v081_e15_newfeatures_ab`
 

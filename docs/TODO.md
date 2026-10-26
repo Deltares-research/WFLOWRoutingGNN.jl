@@ -178,13 +178,16 @@ supervision with a convex combination:
 
 # Mass-balance redesign — B/C hybrid (Muskingum backbone + continuity readout)
 
-> **✔✔ VALIDATED & ADOPTED (E15, 2026-10-25).** The B/C hybrid
-> (`mb_formulation = "muskingum_continuity"`) is implemented, passed its A/B validation on
-> `sava_small_v081`, and is now the working base: it delivered the first positive `river_h`
-> NSE in the E-series (+0.22 vs theta ≈ −112), best-ever q (KGE 0.9963), a finite
-> past-horizon rollout, and ρ̂ = 0.33 < 1. Remaining open items below: the two design
-> choices (level-pool backbone, residual placement), the full `sava_v081` deployment, and
-> the headwater-depth over-dispersion frontier.
+> **✔✔ VALIDATED & ADOPTED (E15, 2026-10-25); CONFIRMED ROBUST + SCALED (E16/E18, 2026-10-26).**
+> The B/C hybrid (`mb_formulation = "muskingum_continuity"`) is implemented, passed its A/B
+> validation on `sava_small_v081`, and is now the working base: it delivered the first positive
+> `river_h` NSE in the E-series (+0.22 vs theta ≈ −112), best-ever q (KGE 0.9963), a finite
+> past-horizon rollout, and ρ̂ = 0.33 < 1. **E16** (5-seed) confirmed it is robust (not a seed
+> fluke); **E18** deployed it on the **full `sava_v081`** (8235 nodes) and proved the structural
+> contraction **scales** (ρ̂ = 0.49, `backbone_rho_max` 0.845 < 1, finite rollout, KGE 0.923) where
+> theta diverges at epoch 2. Remaining open item: the **headwater over-dispersion frontier**,
+> whose mechanism E16/E18 pinned to the **`h/q` ratio (short `K`)** — see the validation item
+> below. The two design choices (level-pool backbone, residual placement) remain optional revisits.
 
 **Why (the root-cause fix for the `amp≈12` blow-up).** The current
 `ThetaKinematicWave` (Option A) carries the *fragile* discharge `q` as the fed-back
@@ -310,8 +313,17 @@ Both operators are static SpMVs → precompute once (`A` is static, constraint 3
       the new working base (see [EXPERIMENTS.md](EXPERIMENTS.md) E15 + PROPOSED banner).
       **One remaining weak spot:** smallest-catchment headwater `node48` h still
       over-disperses (hNSE −69, std ratio 8.85, 9× better than theta's 77× explosion) —
-      the headwater-depth attack is the next frontier. The open design choices (a)/(b)
-      above and the full `sava_v081` deployment remain to do.
+      the headwater-depth attack is the next frontier. **E16/E18 (2026-10-26) confirmed the
+      hybrid robust (5-seed) and stable at the full `sava_v081` domain (8235 nodes, ρ̂ = 0.49,
+      `backbone_rho_max` 0.845 < 1, KGE 0.923), and pinned the headwater mechanism: the
+      per-cell h-error is governed by the `h/q` ratio (= backbone storage timescale
+      `K = μ_h/μ_q`), NOT q or h alone — cells with `q ≫ h` (small `K`: shallow, flashy, steep)
+      are over-dispersed (h std ratio > 1), while deep high-`h/q` channels are accurate. On the
+      full domain the vast low-`K` headwater population drags the spatial-median `river_h` NSE
+      to −1.99 even though large-outlet h is positive (+0.17…+0.25). So E17 should target
+      low-`h/q`/short-`K` cells specifically — raise the per-node `K`-clamp floor and/or give
+      the decoder more `mb_residual_bound` depth-residual headroom there.** The full `sava_v081`
+      deployment is now DONE (E18); the open design choices (a)/(b) above remain optional.
 - Touch: `src/massbalance.jl` (new struct + interface), `src/sparse_ops.jl` /
   precompute (both static operators), `src/run.jl` (`_build_mb_formulation` Val
   dispatch), `src/gnn.jl` (`MB_FORMULATIONS`, decoder out-dim), `src/strategy.jl` +
@@ -322,6 +334,83 @@ Both operators are static SpMVs → precompute once (`A` is static, constraint 3
   backbone + C readout) and does **not** share state with `ThetaKinematicWave`, so
   it lands as a *parallel* formulation behind the toggle — no change to the legacy
   path, so existing checkpoints and A/B comparisons stay valid.
+
+## 3i. Expose the reservoir `K`-clamp bounds (`K_min_dt` / `K_max_dt`) in the config
+
+**Why.** The backbone residence time is `K = μ_h/μ_q` per node, clamped to
+`[MCH_K_MIN_DT, MCH_K_MAX_DT]·dt` in
+[src/massbalance.jl](../src/massbalance.jl) (`build_muskingum_continuity`), where both
+bounds are currently hard-coded `const`s (`MCH_K_MIN_DT = 0.05f0`,
+`MCH_K_MAX_DT = 100f0`). E16/E18 pinned the headwater over-dispersion to the **small-`K`
+(flashy, `q ≫ h`) population**: at the floor `K = 0.05·dt` the backbone contraction is
+`1/(1+20) ≈ 0.048`, so it drains almost instantly and **cannot hold a peak `h`**, leaving
+the bounded residual to do all the work (and saturate). Raising the floor is the most
+targeted lever for exactly those cells, but it is not sweepable while the bound is a
+`const` — so it can't be A/B-tested or autotuned. Exposing both bounds makes the
+`K_min_dt × residual_bound` 2×2 (see §3j / the peak-`h` discussion) a plain box search.
+
+- [ ] Add `mb_K_min_dt` / `mb_K_max_dt` to `ModelSettings`
+      ([src/gnn.jl](../src/gnn.jl)), parsed from `[model]`, defaulting to the current
+      `0.05` / `100` so existing configs and checkpoints are byte-unchanged. Validate
+      `0 < K_min_dt < K_max_dt` at load (`ArgumentError` otherwise), mirroring the
+      existing `mb_residual_bound` validation.
+- [ ] Thread both into `build_muskingum_continuity(...; K_min_dt, K_max_dt)` and replace
+      the `MCH_K_MIN_DT`/`MCH_K_MAX_DT` references in the `clamp!` + the `n_clipped`
+      count; keep the two `const`s only as the default values. Log the active bounds in
+      the existing `@info` line (median `K/dt`, contraction, fallback/clamp counts).
+- [ ] Serialize the two fields in `save_model_settings` and round-trip them in
+      `load_model_settings` (default a missing key to the `const`, so pre-E19 checkpoints
+      load unchanged).
+- [ ] Make them hpar-searchable: add `model.mb_K_min_dt` (and optionally `mb_K_max_dt`)
+      to [experiments/template_hparsearch.toml](../experiments/template_hparsearch.toml)
+      as a commented example; confirm a search cell sets them via `_set!`
+      ([src/hparsearch.jl](../src/hparsearch.jl)).
+- [ ] Tests: `test/test_mb_hybrid.jl` — a custom `(K_min_dt, K_max_dt)` changes the
+      per-node `contraction`/`K` as expected, the clamp count is correct, the
+      invalid-bounds error fires, and the settings round-trip. Docs: docstring +
+      [PROJECT.md](PROJECT.md) config table.
+- Touch: `src/gnn.jl` (`ModelSettings` + parse/serialize), `src/massbalance.jl`
+      (factory signature + clamp), `src/run.jl` (pass-through if the builder is called
+      there), `experiments/template*.toml`, `test/test_mb_hybrid.jl`, `docs/PROJECT.md`.
+      No change to the legacy θ path.
+
+## 3j. Track how often the bounded source residual saturates (both caps)
+
+**Why.** The hybrid's only freedom above the contracting backbone is the bounded residual
+`h_pre = h_bb + residual_bound·tanh(Δ)` ([src/massbalance.jl](../src/massbalance.jl), the
+`MuskingumContinuityHybrid` forward). When `|tanh(Δ)| → 1` the residual is **pinned at the
+cap** and the decoder has no further authority — a peak the backbone washed out is then
+*representationally unreachable* regardless of the loss. This is the single diagnostic that
+decides the §3i-vs-loss question: if the failing small-`K` headwater cells are
+**floor-pinned on `K` but NOT saturated on the residual**, raise the `K` floor (§3i); if
+they are **saturated**, the binding ceiling is `mb_residual_bound` / peak emphasis instead.
+Right now nothing records the saturation rate, so we can't tell which wall is binding. Track
+it **separately at the positive (+1) and negative (−1) ends** — asymmetry is informative
+(peaks need the +cap to build up; recessions/over-dispersion may ride the −cap).
+
+- [ ] In the post-hoc diagnostics path for the hybrid (`layer_mb_analysis` /
+      `_rollout_mb_diagnostics`, dispatched on `MuskingumContinuityHybrid`), compute per
+      step/per node `t = tanh(Δ)` and the two saturation fractions
+      `frac_resid_cap_pos = mean(t > +τ)` and `frac_resid_cap_neg = mean(t < −τ)` for a
+      near-cap threshold `τ` (e.g. 0.99), plus the mean/max `|t|`. Keep it
+      `Flux.ignore_derivatives` / forward-only (diagnostic, must not touch the gradient).
+- [ ] Emit to `metrics.toml` under a `[mass_balance_residual]` (or a new
+      `[residual_saturation]`) table: `frac_cap_pos`, `frac_cap_neg`, `abs_mean`,
+      `abs_max` — pooled and, if cheap, a per-node CSV
+      (`metrics/residual_saturation_by_node.csv`) so the small-`K` headwater subset can be
+      cross-tabulated against `mb_backbone_contraction_by_node.csv` (the K-pinned cells).
+- [ ] Surface the pooled pair in the hpar-search results CSV
+      ([src/hparsearch.jl](../src/hparsearch.jl) `_hps_result_row`) so a `K_min_dt ×
+      residual_bound` sweep shows, per cell, whether raising the floor *reduced*
+      saturation (the mechanism check), not just whether the metric moved.
+- [ ] Tests: `test/test_mb_hybrid.jl` — a forced near-±1 `Δ` yields the expected
+      `frac_cap_pos`/`frac_cap_neg`; an interior `Δ` yields ~0; the diagnostic is
+      gradient-free (no effect on a training step). Docs: docstring + a line in
+      [PROJECT.md](PROJECT.md) / the metrics reference.
+- Touch: `src/analysis.jl` and/or `src/rollout.jl` (hybrid-dispatched diagnostic),
+      `src/run.jl` (`metrics.toml` writer), `src/hparsearch.jl` (results row),
+      `test/test_mb_hybrid.jl`, `docs/PROJECT.md`. No model-source (forward-path) change —
+      this reads `Δ`, it does not alter the dynamics.
 
 ---
 
