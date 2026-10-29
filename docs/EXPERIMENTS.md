@@ -6,6 +6,48 @@ Experiment configs live under `experiments/`. Newest at the top.
 
 # PROPOSED
 
+> **✔ HEADWATER `river_h` — `mb_residual_bound` KNEE FOUND AT 6.0; ARC CLOSED (E17→E20,
+> 2026-10-28/29).** E17 (12-cell box) refuted the K-floor hypothesis (any `mb_K_min_dt > 0.05`
+> is catastrophic — a longer reservoir time constant makes the backbone over-store *more*;
+> h-NSE → −10⁴, q collapses) and showed `mb_sigma_h_floor` is inert (< 0.015), isolating the
+> **decoder residual cap** as the one live knob. E19 then swept `{1.0,1.5,2.0}` (monotone
+> 0.559 → 0.767 → 0.880, no plateau) and **E20 extended to `{2.5,4.0,6.0,8.0}` and found the
+> knee: `mb_residual_bound = 6.0`** (river_h NSE 0.9415 → 0.9909 → **0.9934** → 0.9925; both
+> headwater `h peak_err` and past-horizon `peak_ratio` best at 6.0 then regress at 8.0; every
+> guardrail monotone-clean — pooled q KGE 0.9987, `frac_gt2` 0, `backbone_rho_max` flat 0.5585).
+> river_h spatial-median NSE rose **0.230 → 0.9934** across the arc purely by widening the cap.
+>
+> **Current working base: `mb_residual_bound = 6.0`**; `mb_K_min_dt = 0.05`, `mb_sigma_h_floor
+> = 2.5` confirmed optimal.
+>
+> **→ NEXT (two tracks).** (1) **Promote bound = 6.0 to a single-seed full `sava_v081` confirm**
+> (as E18) to check the headwater gain scales. (2) **Architectural follow-up — asymmetric
+> residual.** A model-free, no-training estimator (teacher-forced one-step backbone demand
+> `h_true_norm[t+1] − backbone_step(h_true[t], I[t+1])`) shows the correction is strongly
+> one-sided: positive demand never exceeds ~1.15 while the negative recession tail reaches −88
+> (p99 = −14.9). Symmetric `ρ_max` wastes positive headroom and under-covers the negative tail,
+> so replacing `ρ_max·tanh(Δ)` with an **asymmetric** residual (small +, large −, data-set from
+> the demand quantiles) is the concrete lever to close the node-21-class tail. The estimator is
+> validated (per-node p99 demand ↔ actual `frac_cap_neg` r = 0.70; deep-neg demand ↔ peak h-bias
+> r = 0.84) and should be re-run on the full-domain prep before fixing any promotion bound,
+> since the demand distribution is regime-dependent.
+>
+> **Pre-E20 working base (superseded): `mb_residual_bound = 1.0`**; `mb_K_min_dt = 0.05`,
+> `mb_sigma_h_floor = 2.5` confirmed optimal.
+>
+> **⚠ Loss/curriculum audit (2026-10-29, from the E19 training curves) — NOT an action item, a
+> standing finding.** The q-beats-h pattern is **structural, not a loss defect**: h is the
+> carried state advanced by a *contracting* (smoothing) backbone, while q is the out-of-loop
+> continuity readout pinned by `dS/dt` + the known lateral forcing (level biases cancel) — so
+> "derived q" is *easier* than "directly predicted h". The h-channel already **dominates** the
+> composite gradient (normalized `val_h_1step ≈ 5.15` vs `val_q_1step ≈ 0.015`, `h_loss_weight`
+> = 1.0, μ already divided out), so up-weighting h is pointless and E17's σ_h test (an h-loss
+> reweight) confirmed reweighting is **inert**. The validation objectives also **bottom out in
+> curriculum phase 1 (~ep45)** and gain **0 %** over epochs 51–300 — the long-rollout phases buy
+> *stability*, not 1-step accuracy. Conclusion: do **not** touch the loss for h; the schedule is
+> likely over-long (a shortening probe could cut compute at ~no accuracy cost) but that is a
+> compute question, not an h-skill lever. The only thing that has ever moved h is the cap.
+>
 > **✔✔ THE `river_h` BINDING FAILURE IS RESOLVED (E15, 2026-10-25).** The
 > `muskingum_continuity` B/C-hybrid formulation — carried storage `h` advanced by a
 > contracting reservoir backbone, `q` as an out-of-loop exact continuity readout — delivers
@@ -34,16 +76,16 @@ Experiment configs live under `experiments/`. Newest at the top.
 > the clear sole remaining frontier, and E16+E18 sharpened its mechanism (below).
 >
 > **Still OWED — the real open work (reordered after E16/E18):**
-> 1. **Headwater `river_h` over-dispersion is the one remaining weak spot — and E16/E18 pinned
->    its mechanism to the `h/q` ratio (= the backbone storage timescale `K = μ_h/μ_q`).** The
->    per-cell h-error is NOT governed by low q or low h alone — it is the **combination `q ≫ h`
->    (small `K`: shallow, flashy, steep cells)**, which the reservoir backbone **over-disperses**
->    (h std ratio climbs > 1 monotonically as `h/q` falls; q stays excellent throughout). On the
->    full domain this low-`K` headwater population is vast, dragging the spatial-median `river_h`
->    NSE negative (−1.99) even though large-outlet h is positive (+0.17…+0.25). **E17 should attack
->    the low-`h/q` (short-`K`) cells specifically** — raise the per-node `K`-clamp floor (currently
->    `[0.05,100]·dt`) and/or give the decoder more depth-residual headroom (`mb_residual_bound`)
->    where `K` is small. (Supporting plots: `e16_hq_ratio_diagnosis.png`,
+> 1. **Headwater `river_h` — E17→E20 found & closed the lever: `mb_residual_bound = 6.0` (NOT the
+>    K floor).** The pre-registered K-floor fix was **refuted** — raising `mb_K_min_dt` above 0.05
+>    makes the backbone over-store *worse* and is catastrophic (h-NSE → −10⁴, q collapses). Keep
+>    K = 0.05. The binding constraint was the one-sided residual cap: sweeping it lifted river_h
+>    NSE **0.230 → 0.9934** (knee at 6.0, E20) with q unchanged/better. `mb_sigma_h_floor` was
+>    inert. **New working base: `mb_residual_bound = 6.0`.** OPEN: (a) promote the bound = 6.0 base
+>    to a single-seed full `sava_v081` confirm (as E18) to check the headwater gain scales;
+>    (b) **asymmetric residual** (small +, large − headroom, data-set from the model-free
+>    backbone-demand estimator) to close the remaining node-21-class deep-recession tail that no
+>    sane symmetric bound covers. (Supporting plots: `e16_hq_ratio_diagnosis.png`,
 >    `e18_hq_ratio_diagnosis.png` in each run's output dir.)
 > 2. **The nonlinear encoder-input normalization lever is CLOSED (E15 feature 2).**
 >    zscore/log1p/asinh on `river_inwater` were indistinguishable within each formulation
@@ -68,6 +110,116 @@ Experiment configs live under `experiments/`. Newest at the top.
 ---
 
 # COMPLETED
+
+> **★ E20 (2026-10-29) — aggressive residual-bound push: the knee is `mb_residual_bound = 6.0`**
+> (4-cell single-seed box, `sava_small_v081_e20_residual_bound_push`). 1-D `mb_residual_bound ∈
+> {2.5, 4.0, 6.0, 8.0}` on the frozen E17/E19 base (K=0.05, σ_h=2.5). **river_h NSE finally
+> plateaus and q/guardrails stay clean throughout:**
+>
+> | bound | river_h NSE | h peak_err | pooled q KGE | volume_pbias | frac_cap_neg | fixed peak_ratio |
+> |-------|-------------|-----------|--------------|--------------|--------------|------------------|
+> | 2.5 | 0.9415 | 0.383 | 0.99817 | 3.18 % | 0.108 | 0.967 |
+> | 4.0 | 0.9909 | 0.187 | 0.99858 | 1.52 % | 0.059 | 0.985 |
+> | **6.0** | **0.9934** | **0.111** | 0.99871 | 0.77 % | 0.048 | **0.993** |
+> | 8.0 | 0.9925 | 0.121 | 0.99877 | 0.51 % | 0.020 | 0.992 |
+>
+> **Knee at 6.0** per the pre-registered rule: river_h NSE Δ is +0.049 (2.5→4), +0.0025 (4→6,
+> already < 0.02 knee threshold), **−0.0009 (6→8)** — and both the headwater `h peak_err` and the
+> past-horizon `peak_ratio` are **best at 6.0** then regress at 8.0. **No cliff:** every guardrail
+> is monotone-clean (q KGE ↑, q FHV ≈ 0, `frac_gt2` = 0 everywhere, `backbone_rho_max` flat 0.5585
+> < 1 — K frozen so the backbone is identical across cells, `fixed_val_rmse` ≈ 0.25 flat). Pushing
+> to 8.0 only marginally tidies volume/cap at a slight river_h/peak cost. This closes the
+> headwater-attack arc: river_h spatial-median NSE went **0.230 → 0.559 (E17) → 0.880 (E19) →
+> 0.9934 (E20)** purely by widening the residual cap. **New working base: `mb_residual_bound = 6.0`.**
+>
+> **⚠ Analyze-stage recovery (process note).** All 4 cells finished train+infer on the cluster but
+> the analyze stage died identically on `IOError: broken pipe (EPIPE)` — root cause was
+> `plot_validation_movie`'s FFmpeg subprocess dying on the node, aborting analyze *before*
+> `metrics.toml`. Not a model/numerical fault (all `model.jld2`/prep/`output/*.nc` intact). Fixed
+> durably by wrapping the `record(...)` call in `src/plot.jl` in try/catch (a diagnostic movie can
+> never again block metrics), then regenerated all 4 `metrics.toml` locally on CPU via
+> `analyze_run(load_prep → repoint staticmaps → load_model)`.
+>
+> **⚠ Node-level residual-demand analysis + a data-driven bound estimator (2026-10-29).** Five
+> nodes (21, 213, 222, 250, 289) still overpredict `river_h`. They share exactly two traits:
+> backbone **K pinned at the floor** (`Ks/dt = 0.05`, can't drain faster) **and** negative residual
+> saturation in the top decile — the *only* discriminating variable is `frac_cap_neg` (peak-h-bias
+> ↔ `frac_cap_neg` r = 0.56; slope/area/width/flashiness all ≈ 0). The mechanism is the
+> node-level restatement of the whole arc: the contracting backbone over-stores during/after sharp
+> peaks at small flashy channels already at min-K, and the corrective **negative** residual
+> saturates, so h can't be pulled down enough. Because the backbone has **no learned parameters**,
+> the required cap is **estimable from data with no training**: the teacher-forced one-step demand
+> `h_true_norm[t+1] − backbone_step(h_true[t], I[t+1])` over all val transitions. On sava_small
+> (6.1M samples) pooled `|demand|` quantiles are p50 = 0.31, p90 = 2.59, **p95 = 4.42**, p99 = 11.4
+> — so the E20 knee (6.0) ≈ **p95 coverage**, exactly where returns flatten. The estimator is
+> validated against the trained model it never saw: per-node p99 demand ↔ actual `frac_cap_neg`
+> r = 0.70, deep-negative demand ↔ actual peak h-bias r = 0.84.
+>
+> **→ Architectural follow-up — ASYMMETRIC residual.** The demand is strongly **one-sided**: 56 %
+> of corrections are negative, the positive tail **never exceeds ~1.15** (p99 = 0.49) while the
+> negative tail reaches −88 (p99 = −14.9). A *symmetric* `ρ_max` therefore wastes ~5 of unused
+> positive headroom while under-covering the negative recession tail, and a large symmetric bound
+> also hands the decoder spurious positive-h headroom. Replacing `ρ_max·tanh(Δ)` with an
+> **asymmetric** residual (small positive ~1–1.5, large negative ~12–15, both data-set from the
+> demand quantiles) would cover the real correction far more efficiently and more safely — the
+> concrete next lever to close the node-21-class tail (its demand p99 ≈ 35 is beyond any sane
+> symmetric bound). Because `ρ_max` is a **per-node normalized** quantity it is far more
+> transferable than a physical bound, but the demand distribution is regime-dependent → re-run the
+> model-free estimator on the full-domain prep before promoting a bound.
+
+> **★ E19 (2026-10-29) — residual-bound sweep: river_h climbs monotonically, NO plateau yet**
+> (3-cell single-seed box, `sava_small_v081_e19_residual_bound`). 1-D `mb_residual_bound ∈
+> {1.0, 1.5, 2.0}` on the E17-winner base (K=0.05, σ_h=2.5 frozen; hps01 = E17 hps07 control).
+> **Every metric improves monotonically with the cap, with zero regression anywhere:**
+> river_h spatial-median NSE **0.559 → 0.767 → 0.880**; pooled q KGE **0.9971 → 0.9976 → 0.9979**
+> (best in the series); `volume_pbias` **205 → 138 → 96 %**; `fixed_val_rmse` **0.372 → 0.326 →
+> 0.291**; residual `frac_cap_neg` **0.255 → 0.184 → 0.142** (cap opening, decoder effort
+> falling); `frac_cap_pos` 0; `frac_gt2` 0; `backbone_rho_max` flat 0.56 < 1; ρ̂ ≈ 0.44 < 1. This
+> is the clean "wider cap lets the residual finish absorbing the backbone's intrinsic
+> over-storage" picture — NOT decoder-override (q and conservation *improve* with h, they don't
+> trade off). **The cap is still 14 % saturated at bound 2.0 and the trend is still rising → the
+> knee is unfound**; per the pre-registered rule this is the "still-binding → queue one more
+> cell" branch → E20 extends aggressively to {2.5, 4.0, 6.0, 8.0}.
+>
+> **⚠ Training-curve audit (this run's `losses.csv`).** All validation objectives bottom out in
+> curriculum **phase 1 (~ep45)** and gain **0 %** over epochs 51–300 (the steps 2→10 phases,
+> 83 % of the budget); the residual bound **shifts the whole floor down** (val_h_1step min
+> 5.15 → 4.61 → 4.15) without changing the shape — confirming the binding wall is the **cap**,
+> not the optimizer or schedule. The q/h loss gap is structural (normalized `val_h_1step ≈ 5.15`
+> ≫ `val_q_1step ≈ 0.015`, `h_loss_weight` = 1.0): h is the carried, contraction-smoothed state
+> while q is the forcing-pinned continuity readout. **Loss reweighting is a dead lever** (h
+> already dominates the gradient; E17 σ_h test inert). The long curriculum buys *stability* not
+> 1-step accuracy — a schedule-shortening probe is a compute question, not an h lever.
+
+> **★ E17 (2026-10-28) — headwater attack: `mb_residual_bound = 1.0` wins; the K-floor fix is
+> REFUTED** (12-cell single-seed box, `sava_small_v081_e17_headwater_attack`). A reduced
+> Cartesian over `mb_K_min_dt ∈ {0.05,0.5,2.0}` × `mb_residual_bound ∈ {0.5,1.0}` ×
+> `mb_sigma_h_floor ∈ {2.5,0.5}` on the adopted hybrid base (hps01 = exact E16 control).
+> **Result decisively splits three ways:**
+> - **K floor — REFUTED (sign was backwards).** Every `mb_K_min_dt ≥ 0.5` cell is catastrophic:
+>   river_h NSE **−670 (K=0.5) / −13805 (K=2.0)**, pooled q KGE collapses **0.996 → 0.964 → 0.835**,
+>   residual **fully pinned at the negative cap (frac 1.0)**, `volume_pbias` 337 → 548 → 2487 %,
+>   `backbone_rho_max` 0.56 → 0.67. A larger K *lengthens* reservoir retention, so the backbone
+>   over-stores **more**, not less — the opposite of the pre-registered expectation. The +26 m
+>   backbone depth bias is intrinsic to the fast-relaxation small-K regime and must be absorbed by
+>   the residual, never by loosening K. **Keep `mb_K_min_dt = 0.05`.**
+> - **Residual bound — the WIN.** At K = 0.05, `mb_residual_bound 0.5 → 1.0` lifts river_h
+>   spatial-median NSE **0.230 → 0.559** (2.4×, hps01 → hps07), relieves residual cap saturation
+>   `frac_cap_neg` **0.374 → 0.256**, halves `volume_pbias` **337 → 204 %**, and q is unchanged /
+>   slightly better (**pooled KGE 0.9971 — best in the series**). Stability holds: `backbone_rho_max`
+>   0.56 < 1, `rollout_contraction` < 1, `fixed_val_rmse` finite. This is the structural
+>   explanation of the q-good/h-bad split: the over-stored backbone needed more one-sided
+>   (negative) residual headroom than the ±0.5 cap allowed.
+> - **`mb_sigma_h_floor` — INERT.** 2.5 → 0.5 shifts river_h NSE by **< 0.015** at every K/bound
+>   combination (hps01 0.230 vs hps04 0.244; hps07 0.559 vs hps10 0.557). Headwater
+>   loss-observability is **not** the limiter. Keep the default 2.5.
+>
+> **Winner = hps07** (K_min 0.05, residual **1.0**, σ_h 2.5) — a single-knob change from the E16
+> base. hps12 (K=2.0/bound 1.0/σ_h 0.5) died on a transient `CUDA error: invalid argument` in the
+> already-refuted K=2.0 arm → no rerun warranted. The cap is still **~26 % saturated** at bound 1.0,
+> so river_h skill is likely not yet maxed → 1-D `mb_residual_bound ∈ {1.0,1.5,2.0}` follow-up
+> queued (`sava_small_v081_e19_residual_bound`). **New working base: `mb_residual_bound = 1.0`.**
+> **Launch lesson reconfirmed:** manual `lr_start = 1.14e-4 --grad-clip 10` (hybrid no-knee).
 
 > **★ E18 (2026-10-26) — the hybrid is STABLE at the full `sava_v081` domain** (single seed,
 > `sava_v081_e18_fulldomain_hybrid`). The headline scientific result: on 8235 nodes /

@@ -495,8 +495,17 @@ function plot_validation_movie(
                 string(timestamps[$t_obs]));
           halign = :center, tellwidth = false)
 
-    record(fig, path, 1:T; framerate = framerate) do t
-        t_obs[] = t
+    # The `.mp4` encoder pipes frames to an FFmpeg subprocess; when that process
+    # dies mid-record (e.g. a missing codec / OOM on a compute node) the next
+    # frame write raises `IOError: broken pipe (EPIPE)`. A diagnostic movie must
+    # never abort the analyze stage before `metrics.toml` is written, so treat a
+    # recording failure as non-fatal and return the figure without the movie.
+    try
+        record(fig, path, 1:T; framerate = framerate) do t
+            t_obs[] = t
+        end
+    catch err
+        @warn "plot_validation_movie: skipping movie, recording failed" path exception = (err, catch_backtrace())
     end
 
     return fig

@@ -178,16 +178,28 @@ supervision with a convex combination:
 
 # Mass-balance redesign — B/C hybrid (Muskingum backbone + continuity readout)
 
-> **✔✔ VALIDATED & ADOPTED (E15, 2026-10-25); CONFIRMED ROBUST + SCALED (E16/E18, 2026-10-26).**
+> **✔✔ VALIDATED & ADOPTED (E15, 2026-10-25); CONFIRMED ROBUST + SCALED (E16/E18, 2026-10-26);
+> HEADWATER LEVER FOUND & KNEE CLOSED (E17→E20, 2026-10-28/29).**
 > The B/C hybrid (`mb_formulation = "muskingum_continuity"`) is implemented, passed its A/B
 > validation on `sava_small_v081`, and is now the working base: it delivered the first positive
 > `river_h` NSE in the E-series (+0.22 vs theta ≈ −112), best-ever q (KGE 0.9963), a finite
 > past-horizon rollout, and ρ̂ = 0.33 < 1. **E16** (5-seed) confirmed it is robust (not a seed
 > fluke); **E18** deployed it on the **full `sava_v081`** (8235 nodes) and proved the structural
 > contraction **scales** (ρ̂ = 0.49, `backbone_rho_max` 0.845 < 1, finite rollout, KGE 0.923) where
-> theta diverges at epoch 2. Remaining open item: the **headwater over-dispersion frontier**,
-> whose mechanism E16/E18 pinned to the **`h/q` ratio (short `K`)** — see the validation item
-> below. The two design choices (level-pool backbone, residual placement) remain optional revisits.
+> theta diverges at epoch 2. **E17** then attacked the headwater over-dispersion: the `h/q`/K-floor
+> hypothesis was **REFUTED** (raising `mb_K_min_dt` above 0.05 is catastrophic — the backbone
+> over-stores *more*, h-NSE → −10⁴, q collapses), while **`mb_residual_bound 0.5 → 1.0`** doubled
+> river_h NSE (0.230 → 0.559 small Sava) with q unchanged and all stability guardrails holding;
+> `mb_sigma_h_floor` was inert. **E19** (`{1.0,1.5,2.0}`) showed the cap climbs monotonically with
+> no plateau, and **E20** (`{2.5,4.0,6.0,8.0}`) **found the knee: `mb_residual_bound = 6.0`**
+> (river_h NSE 0.9415 → **0.9934** → 0.9925; both headwater `h peak_err` and past-horizon
+> `peak_ratio` best at 6.0 then regress at 8.0; all guardrails monotone-clean). river_h NSE rose
+> **0.230 → 0.9934** across the arc purely by widening the cap. **Current working base:
+> `mb_residual_bound = 6.0`.** Remaining open items: (a) a single-seed full-`sava_v081` confirm of
+> bound = 6.0; (b) an **asymmetric residual** (small +, large − headroom, data-set from the
+> model-free backbone-demand estimator — positive demand never exceeds ~1.15, negative tail
+> reaches −88) to close the node-21-class deep-recession tail no symmetric bound covers. The two
+> design choices (level-pool backbone, residual placement) remain optional revisits.
 
 **Why (the root-cause fix for the `amp≈12` blow-up).** The current
 `ThetaKinematicWave` (Option A) carries the *fragile* discharge `q` as the fed-back
@@ -322,7 +334,16 @@ Both operators are static SpMVs → precompute once (`A` is static, constraint 3
       full domain the vast low-`K` headwater population drags the spatial-median `river_h` NSE
       to −1.99 even though large-outlet h is positive (+0.17…+0.25). So E17 should target
       low-`h/q`/short-`K` cells specifically — raise the per-node `K`-clamp floor and/or give
-      the decoder more `mb_residual_bound` depth-residual headroom there.** The full `sava_v081`
+      the decoder more `mb_residual_bound` depth-residual headroom there.** **E17 (2026-10-28,
+      12-cell box) RESOLVED it — and the K-floor half of the hypothesis was REFUTED:** raising
+      `mb_K_min_dt` above 0.05 is catastrophic (h-NSE −670 at K=0.5, −13805 at K=2.0; q KGE
+      collapses 0.996 → 0.835; residual pinned fully at the −cap; `volume_pbias` → 2487 %) —
+      a larger K *lengthens* retention so the backbone over-stores **more**, not less. The win
+      is the **residual bound**: at K=0.05, `mb_residual_bound 0.5 → 1.0` lifts river_h
+      spatial-median NSE **0.230 → 0.559** (2.4×), cuts residual cap saturation 0.374 → 0.256,
+      halves `volume_pbias` 337 → 204 %, q unchanged (KGE 0.9971). `mb_sigma_h_floor` was inert
+      (< 0.015). **New working base: `mb_residual_bound = 1.0`; keep `mb_K_min_dt = 0.05`.**
+      The full `sava_v081`
       deployment is now DONE (E18); the open design choices (a)/(b) above remain optional.
 - Touch: `src/massbalance.jl` (new struct + interface), `src/sparse_ops.jl` /
   precompute (both static operators), `src/run.jl` (`_build_mb_formulation` Val
@@ -412,7 +433,99 @@ it **separately at the positive (+1) and negative (−1) ends** — asymmetry is
       `test/test_mb_hybrid.jl`, `docs/PROJECT.md`. No model-source (forward-path) change —
       this reads `Δ`, it does not alter the dynamics.
 
+## 3k. Asymmetric bounded residual (`residual_bound_pos` / `residual_bound_neg`)
+
+**Why.** E17→E20 closed the *symmetric* residual lever (small-domain knee
+`mb_residual_bound = 6`, full-domain ≈ 8), but the correction the residual must apply is
+strongly **one-sided**, so a symmetric cap is the wrong shape. A model-free estimator — the
+teacher-forced one-step backbone demand `demand[t+1] = h_true_norm[t+1] −
+backbone_step(h_true[t], I[t+1])`, which needs **no trained model** because the backbone
+(`P`) has no learned parameters — quantifies it on the val split:
+
+  | demand side              | sava_small p99 | sava_v081 full p99 | max (full) |
+  |--------------------------|----------------|--------------------|------------|
+  | positive (add `h`)       | **0.49**       | **1.18**           | 8.3        |
+  | negative (subtract `h`)  | −14.9          | −28.7              | −581       |
+
+56 % of corrections are negative and the **positive tail never exceeds ~1.2**, while the
+negative recession tail runs to −29 (full p99). The contracting backbone systematically
+*over-stores* during/after sharp peaks at small-`K` headwater cells, so the residual's real
+job is almost entirely to pull `h` **down**. A symmetric `ρ_max` big enough to cover the
+negative tail (≈ 8–15) hands the decoder ~8–15 of **unused positive headroom** it can use to
+inject spurious `h`, while *still* under-covering the deepest recessions (node-21-class cells
+have demand p99 ≈ 35 on small-domain — beyond any sane symmetric bound). The estimator is
+validated against the trained model it never saw: per-node p99 demand ↔ actual
+`frac_cap_neg` r = 0.70; deep-negative demand ↔ actual peak `h`-bias r = 0.84. (Analysis +
+numbers: [EXPERIMENTS.md](EXPERIMENTS.md) E20 entry; `scripts/` one-off not yet committed —
+see the recipe in the implementation items.)
+
+**Design.** Replace the single symmetric cap `h_pre = h_bb + ρ_max·tanh(Δ)` with an
+asymmetric map that has a small positive and a large negative bound. Two interchangeable
+parameterizations (decide in DECISIONS.md):
+  - **(A) scaled-sigmoid (recommended):** `h_pre = h_bb + [ρ⁺·σ(Δ) − ρ⁻·(1−σ(Δ))]` where
+    `σ` is the logistic — output ranges smoothly in `(−ρ⁻, +ρ⁺)`, monotone in `Δ`, reduces
+    to the current `ρ_max·tanh` when `ρ⁺ = ρ⁻ = ρ_max` (so the symmetric base is the exact
+    special case — keeps E15–E20 reproducible). `dΔ`-gradient is well-conditioned.
+  - **(B) two-sided tanh:** `ρ⁺·relu(tanh Δ) − ρ⁻·relu(−tanh Δ)` — same range, but the
+    gradient kinks at `Δ = 0`; (A) is preferred.
+Both keep the **BIBO-stability guarantee** (bounded additive residual on a contraction),
+so the structural-contraction claim is untouched — the bound just becomes two numbers.
+
+**Implementation items.**
+- [ ] **Config + settings.** Add `mb_residual_bound_pos` / `mb_residual_bound_neg` to
+      `ModelSettings` ([src/gnn.jl](../src/gnn.jl)), parsed from `[model]`. **Back-compat:**
+      if only the legacy `mb_residual_bound` is present, set both to it (symmetric — exact
+      current behaviour); if the new keys are present they win. Validate `ρ⁺ > 0`, `ρ⁻ > 0`
+      at load (mirror the existing `mb_residual_bound` validation). Serialize/round-trip in
+      `save_model_settings`/`load_model_settings` (default a missing key to the symmetric
+      `mb_residual_bound`, so **every pre-3k checkpoint loads byte-unchanged**).
+- [ ] **Layer.** Store `residual_bound_pos` / `residual_bound_neg` on
+      `MuskingumContinuityHybrid` ([src/massbalance.jl](../src/massbalance.jl)); replace the
+      `l.residual_bound .* tanh.(Δ)` line in the forward with the chosen asymmetric map.
+      Keep a single `residual_bound` field too (or derive it) so the existing
+      `residual_saturation` diagnostic and any symmetric configs keep working; when
+      asymmetric, the saturation diagnostic must know **which** bound each side is near
+      (τ-threshold on the pre-scaled activation, not on `h_pre`). Update
+      `build_muskingum_continuity(...)` to thread both bounds.
+- [ ] **Saturation diagnostic (extend §3j).** The current `residual_saturation` counts
+      `tanh(Δ) > ±τ`. Under the asymmetric map the positive and negative ranges differ, so
+      report `frac_cap_pos`/`frac_cap_neg` against their **own** bounds and keep
+      `abs_max`/`abs_mean` in the normalized-h units of the *applied* residual (so
+      `metrics.toml` saturation is comparable across symmetric and asymmetric runs).
+- [ ] **Data-driven bound estimator (new script).** Add
+      `scripts/estimate_residual_bound.jl <run_dir_or_config>` that loads a prep
+      (`load_prep`) + the layer's backbone (`load_model`, read `P`/per-node stats off
+      `model.mass_balance`), computes the teacher-forced one-step demand over the val split
+      (`h_true_norm[t+1] − backbone_step(h_true[t], I[t+1])`), and prints the signed demand
+      quantiles + suggested `(ρ⁺, ρ⁻)` at p95/p99 each side. This is **model-free** (backbone
+      has no learned params) so it runs on a prep alone — no training. Reuse the validated
+      recipe from the E20 analysis (per-node demand ↔ `frac_cap_neg` r = 0.70). Emit a small
+      `residual_demand_quantiles.toml` next to the run for the record.
+- [ ] **Decoder out-dim unchanged.** The decoder still emits one `Δ` per node; only the
+      output map changes — confirm `extra_decoder_dim(::MuskingumContinuityHybrid) = 0`
+      still holds and no encoder/decoder shape changes.
+- [ ] **Tests** (`test/test_mb_hybrid.jl`): (i) `ρ⁺ = ρ⁻` reproduces the symmetric
+      `tanh` output bit-for-bit (back-compat); (ii) the asymmetric map's range is
+      `(−ρ⁻, +ρ⁺)` and monotone in `Δ`; (iii) settings round-trip incl. the legacy→symmetric
+      default; (iv) BIBO/contraction check still passes (state stays bounded for extreme `Δ`);
+      (v) the estimator script returns sensible quantiles on a tiny fixture.
+- [ ] **Docs.** DECISIONS.md: record the chosen parameterization (A vs B) and the
+      back-compat default. PROJECT.md config table: the two new keys. Reference the E20
+      estimator analysis.
+- Touch: `src/gnn.jl` (`ModelSettings` parse/serialize/validate), `src/massbalance.jl`
+      (struct field + forward map + factory + saturation diagnostic), `src/analysis.jl`
+      (saturation reporting), `scripts/estimate_residual_bound.jl` (new),
+      `experiments/template*.toml` (commented example), `test/test_mb_hybrid.jl`,
+      `docs/DECISIONS.md`, `docs/PROJECT.md`. **No legacy-θ path change; the symmetric hybrid
+      is the exact `ρ⁺ = ρ⁻` special case, so E15–E21 stay reproducible.**
+- **Follow-up experiment (eval agent, after the layer lands).** A/B the asymmetric cap
+      (e.g. `ρ⁺ ≈ 1.5`, `ρ⁻ ≈ 12–15` from the full-domain estimator) vs the adopted symmetric
+      bound on `sava_small_v081` first (cheap), targeting the node-21-class deep-recession tail
+      (track per-node `frac_cap_neg` + peak `h`-bias at nodes 21/213/222/250/289), then promote
+      to full domain if it clears the tail without q/stability regression.
+
 ---
+
 
 # Input feature normalization — selectable nonlinear scaling
 
